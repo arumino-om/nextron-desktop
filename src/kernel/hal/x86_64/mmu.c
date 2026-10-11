@@ -278,6 +278,30 @@ EXPORT CONST AddrSpace *hal_vm_kernel_space(void)
 	return &kernel_space;
 }
 
+EXPORT UD hal_vm_map_device(UD pa, UD size)
+{
+	UD ps = (UD)hal_page_size();
+	UD start = pa & ~(ps - 1);
+	UD end = (pa + size + ps - 1) & ~(ps - 1);
+	UD va = BTRON_MMIO_BASE + start;
+
+	if (size == 0 || start >= BTRON_RESERVED_BASE - BTRON_MMIO_BASE) {
+		return 0;
+	}
+	if (hal_vm_translate(&kernel_space, va) == start) {
+		return BTRON_MMIO_BASE + pa;
+	}
+	if (hal_vm_map(&kernel_space, va, start, end - start,
+	               BTRON_PG_READ | BTRON_PG_WRITE | BTRON_PG_DEVICE
+	                   | BTRON_PG_GLOBAL) != 0) {
+		return 0;
+	}
+	/* CR3 を書き直して TLB を捨てる。INVLPG で足りるが、
+	 * 起動時の一括設定しか想定していないので単純にする。 */
+	write_cr3(kernel_space.root_pa & E_ADDR_MASK);
+	return BTRON_MMIO_BASE + pa;
+}
+
 /* ------------------------------------------------------------------ */
 /* 起動時の初期化                                                      */
 /*                                                                     */

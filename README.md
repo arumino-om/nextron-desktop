@@ -22,9 +22,11 @@ BTRON3 の四層構造（中心核 / 周辺核 / ディスプレイプリミテ�
 TRON Forum のいずれとも関係はなく、これらによる承認も受けていません。
 
 > **現在の状態:** Phase 1（ブート + HAL）の途中です。**arm64 が UEFI 経由で
-> 起動し**、ページングを立ち上げてカーネルを上位半分へ移し、QEMU 上で設計上の
-> 不変条件 18 件を検査するところまで動きます。中心核（タスク・スケジューラ・
-> 割込み・時間管理）は未着手です。x86_64 は HAL を型検査しているだけで未検証です。
+> 起動し**、ページングを立ち上げてカーネルを上位半分へ移し、ファームウェアの
+> 記述（Device Tree / ACPI）からシリアル・割込みコントローラ・タイマ・CPU を
+> 読み取り、QEMU 上で設計上の不変条件 20 件を検査するところまで動きます。
+> 中心核（タスク・スケジューラ・割込み・時間管理）は未着手です。
+> x86_64 は HAL を型検査しているだけで未検証です。
 
 ## 開発環境の構築
 
@@ -75,7 +77,7 @@ cmake --preset x86_64  && cmake --build --preset x86_64
 ### 実行
 
 ```sh
-ctest --preset arm64                 # 直接起動 / UEFI / Device Tree / GOP の 4 通り
+ctest --preset arm64   # 直接起動 / UEFI(ACPI) / Device Tree / GICv3+SMP / GOP の 7 通り
 
 python3 tools/run_qemu.py --arch arm64 --uefi --interactive build/arm64/btron-arm64.img
 python3 tools/run_qemu.py --arch arm64 --interactive        build/arm64/btron-arm64.elf

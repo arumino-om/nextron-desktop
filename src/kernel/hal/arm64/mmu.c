@@ -62,8 +62,6 @@ IMPORT B __kernel_end[];
 IMPORT CONST UD __kernel_vma_base;
 IMPORT CONST UD __kernel_lma_base;
 
-#define PL011_PA 0x09000000ULL
-
 LOCAL AddrSpace kernel_space; /* 上位半分 (TTBR1) */
 LOCAL UD empty_root;          /* 恒等写像を捨てた後に TTBR0 が指す空の表 */
 LOCAL Bool vm_on = False;
@@ -275,6 +273,33 @@ EXPORT Bool hal_vm_enabled(void)
 	return vm_on;
 }
 
+EXPORT UD hal_vm_map_device(UD pa, UD size)
+{
+	UD ps = (UD)hal_page_size();
+	UD start = pa & ~(ps - 1);
+	UD end = (pa + size + ps - 1) & ~(ps - 1);
+	UD va = BTRON_MMIO_BASE + start;
+
+	if (size == 0 || start >= BTRON_RESERVED_BASE - BTRON_MMIO_BASE) {
+		return 0;
+	}
+	/* 既に張ってあれば張り直さない。別名は物理アドレスで一意なので
+	 * 二度呼んでも同じ値になる。 */
+	if (hal_vm_translate(&kernel_space, va) == start) {
+		return BTRON_MMIO_BASE + pa;
+	}
+	if (hal_vm_map(&kernel_space, va, start, end - start,
+	               BTRON_PG_READ | BTRON_PG_WRITE | BTRON_PG_DEVICE) != 0) {
+		return 0;
+	}
+	__asm__ volatile(
+	    "dsb ishst\n"
+	    "tlbi vmalle1\n"
+	    "dsb ish\n"
+	    "isb\n" ::: "memory");
+	return BTRON_MMIO_BASE + pa;
+}
+
 /* ------------------------------------------------------------------ */
 /* 起動時の初期化                                                      */
 /* ------------------------------------------------------------------ */
@@ -358,9 +383,11 @@ EXPORT ERR hal_vm_init(void)
 		return -1;
 	}
 
-	/* MMIO 区画に UART を置く */
-	if (hal_vm_map(&kernel_space, BTRON_MMIO_BASE + PL011_PA, PL011_PA, ps,
-	               BTRON_PG_READ | BTRON_PG_WRITE | BTRON_PG_DEVICE) != 0) {
+	/* MMIO 区画に UART を置く。アドレスはドライバが持っている
+	 * （既定値、または DT / ACPI から読んだ値）。 */
+	if (hal_console_pa() != 0 &&
+	    hal_vm_map(&kernel_space, BTRON_MMIO_BASE + hal_console_pa(), hal_console_pa(),
+	               ps, BTRON_PG_READ | BTRON_PG_WRITE | BTRON_PG_DEVICE) != 0) {
 		return -1;
 	}
 
@@ -375,7 +402,8 @@ EXPORT ERR hal_vm_init(void)
 	               BTRON_PG_READ | BTRON_PG_WRITE | BTRON_PG_EXEC) != 0) {
 		return -1;
 	}
-	if (hal_vm_map(&low, PL011_PA, PL011_PA, ps,
+	if (hal_console_pa() != 0 &&
+	    hal_vm_map(&low, hal_console_pa(), hal_console_pa(), ps,
 	               BTRON_PG_READ | BTRON_PG_WRITE | BTRON_PG_DEVICE) != 0) {
 		return -1;
 	}

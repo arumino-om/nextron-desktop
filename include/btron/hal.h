@@ -22,6 +22,19 @@ IMPORT void hal_console_puts(CONST B *s);
  * これ以降は恒等写像を捨てられる。宛先はドライバ自身が知っている。 */
 IMPORT void hal_console_remap(void);
 
+/* ファームウェアの記述（DT / ACPI）から読んだシリアルをドライバに教える。
+ *
+ * type は machdesc.h の MD_UART_*。ドライバが扱える種類でなければ False を
+ * 返し、既定値のまま動き続ける。起動第 1 段で、MMU を有効にする前に呼ぶ。
+ *
+ * これにより規律 R2 と同じ形（アドレスを直書きせず読み取った値を使う）が
+ * シリアルについても成立する。既定値は「記述が読めないときの保険」。 */
+IMPORT Bool hal_console_set(UW type, UD base);
+
+/* ドライバが使っている物理アドレス。hal_vm_init() が MMIO 区画に
+ * 張るべきページを知るために使う。 */
+IMPORT UD hal_console_pa(void);
+
 /* --- ページサイズ (R2) --------------------------------------------
  * A13 で 4KB と決めたが、定数として配らず HAL 経由で参照する。
  * 将来 16KB granule へ移行する余地を残すため。            */
@@ -39,5 +52,17 @@ IMPORT void hal_exit(W code) __attribute__((noreturn));
  * ベクタが無いとフォルトが無言のハングになる。起動直後に入れる。 */
 
 IMPORT void hal_exception_init(void);
+
+/* --- 時間の読み出し ------------------------------------------------
+ * 中心核の時間管理（BTRON3 §1.3）の土台。いまは単調カウンタの読み出しだけで、
+ * 割込みは GIC ができてから (D8 / machdesc の timer_intid)。
+ *
+ * 周波数はレジスタから直接読めるので、ファームウェアの記述に依らない。 */
+
+IMPORT UD hal_timer_freq(void);  /* Hz。0 なら読めなかった */
+IMPORT UD hal_timer_count(void); /* 単調増加のカウンタ値 */
+
+/* usec マイクロ秒だけ待つ。カウンタを回して待つだけで、割込みは使わない。 */
+IMPORT void hal_timer_wait_us(UD usec);
 
 #endif /* __BTRON_HAL_H__ */

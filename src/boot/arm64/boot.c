@@ -11,6 +11,7 @@
 
 #include <btron/bootinfo.h>
 #include <btron/hal.h>
+#include <btron/machdesc.h>
 #include <btron/machine.h>
 #include <btron/test.h>
 #include <btron/vmem.h>
@@ -76,6 +77,23 @@ EXPORT void boot_early(UD arg)
 	 * MMU を有効にする前にカーネル内へ複製しておく。 */
 	via_uefi = bootinfo_take(arg);
 
+	/* ハードウェア構成を読む（詳細 D8）。DT / ACPI のテーブルも
+	 * ファームウェアの領域にあり、この先写像されない。いまは MMU が
+	 * 無効で全物理メモリが見えているので、ここで読んで複製する。 */
+	if (machdesc_probe()) {
+		CONST MachDesc *md = machdesc();
+
+		/* シリアルを記述どおりに差し替える。既定値は記述が読めない
+		 * ときの保険であって、本来のアドレスはここから来る。 */
+		if (hal_console_set(md->uart_type, md->uart_pa)) {
+			hal_console_puts("  シリアル  : ");
+			hal_console_puts(md_uart_name(md->uart_type));
+			hal_console_puts(" @ ");
+			put_hex(md->uart_pa);
+			hal_console_puts("\n");
+		}
+	}
+
 	/* カーネルが実際に置かれた物理先頭を HAL に教える。UEFI ローダは
 	 * リンク時の LMA が空いていなければ別の場所へ置く（規律 R17）。 */
 	hal_kernel_set_pa_base(via_uefi ? bootinfo()->kernel_pa : 0);
@@ -134,6 +152,48 @@ LOCAL CONST B *mem_type_name(UW t)
 	default:
 		return "使用不可";
 	}
+}
+
+LOCAL void show_machdesc(void)
+{
+	CONST MachDesc *md = machdesc();
+	UW i;
+
+	hal_console_puts("  ハード記述: ");
+	hal_console_puts(md_source_name(md->source));
+	if (md->source == MD_SRC_NONE) {
+		hal_console_puts("（ハードウェアは既定値で動かしている）\n");
+		return;
+	}
+	hal_console_puts("\n    シリアル  : ");
+	hal_console_puts(md_uart_name(md->uart_type));
+	hal_console_puts(" @ ");
+	put_hex(md->uart_pa);
+	hal_console_puts("\n    割込み    : ");
+	hal_console_puts(md_intc_name(md->intc_type));
+	hal_console_puts(" dist ");
+	put_hex(md->intc_dist_pa);
+	hal_console_puts(" cpu ");
+	put_hex(md->intc_cpu_pa);
+	hal_console_puts("\n    タイマ    : INTID");
+	for (i = 0; i < MD_TIMER_COUNT; i++) {
+		hal_console_puts(" ");
+		put_dec(md->timer_intid[i]);
+	}
+	hal_console_puts(" (EL1 物理 = ");
+	put_dec(md->timer_intid[MD_TIMER_NONSECURE]);
+	hal_console_puts(", ");
+	put_dec(hal_timer_freq() / 1000000);
+	hal_console_puts("MHz)\n    CPU       : ");
+	put_dec(md->cpu_count);
+	hal_console_puts(" 個  id");
+	for (i = 0; i < md->cpu_count && i < MD_MAX_CPUS; i++) {
+		hal_console_puts(" ");
+		put_hex(md->cpu_id[i]);
+	}
+	hal_console_puts("\n    CPU 起動  : ");
+	hal_console_puts(md_boot_name(md->boot_method));
+	hal_console_puts("\n");
 }
 
 LOCAL void show_bootinfo(void)
@@ -220,6 +280,7 @@ EXPORT void boot_main(UD arg)
 	hal_console_puts(" KB\n");
 
 	show_bootinfo();
+	show_machdesc();
 
 	BTRON_TEST("基本データタイプの幅", {
 		BTRON_CHECK("幅", sizeof(B) == 1);
@@ -388,6 +449,50 @@ EXPORT void boot_main(UD arg)
 			}
 			BTRON_CHECK("空きでない", protected_region == True);
 		}
+	});
+
+	BTRON_TEST("ハードウェア記述 (D8)", {
+		CONST MachDesc *md = machdesc();
+
+		if (bootinfo()->dtb == 0 && bootinfo()->acpi_rsdp == 0) {
+			/* QEMU -kernel 直接起動。記述が無いので既定値で動いている。 */
+			BTRON_CHECK("記述なし", md->source == MD_SRC_NONE);
+			BTRON_CHECK("既定値で動作", hal_console_pa() != 0);
+		} else {
+			BTRON_CHECK("出どころ", md->source != MD_SRC_NONE);
+			/* シリアル。これが読めないと実機で何も出せない。 */
+			BTRON_CHECK("シリアル種別", md->uart_type == MD_UART_PL011);
+			BTRON_CHECK("シリアル位置", md->uart_pa != 0);
+			BTRON_CHECK("ドライバに反映", hal_console_pa() == md->uart_pa);
+			/* 割込みコントローラ。中心核の前提。 */
+			BTRON_CHECK("GIC", md->intc_type == MD_INTC_GICV2
+			                       || md->intc_type == MD_INTC_GICV3);
+			BTRON_CHECK("GICD", md->intc_dist_pa != 0);
+			BTRON_CHECK("GICR/GICC", md->intc_cpu_pa != 0);
+			/* タイマ。EL1 物理タイマは PPI なので INTID 16..31。 */
+			BTRON_CHECK("タイマ INTID",
+			            md->timer_intid[MD_TIMER_NONSECURE] >= 16
+			                && md->timer_intid[MD_TIMER_NONSECURE] < 32);
+			BTRON_CHECK("CPU", md->cpu_count >= 1);
+			BTRON_CHECK("CPU 起動方法", md->boot_method != MD_BOOT_NONE);
+		}
+		/* 周波数はレジスタから読むので記述の有無に依らない */
+		BTRON_CHECK("タイマ周波数", hal_timer_freq() > 0);
+	});
+
+	BTRON_TEST("MMIO 区画への写像 (§3.2-3 / R18 の機構)", {
+		CONST MachDesc *md = machdesc();
+		UD pa = (md->intc_dist_pa != 0) ? md->intc_dist_pa : hal_console_pa();
+		UD va = hal_vm_map_device(pa, 0x10000);
+
+		BTRON_CHECK("張れた", va != 0);
+		BTRON_CHECK("別名は基底+物理", va == BTRON_MMIO_BASE + pa);
+		BTRON_CHECK("MMIO 区画の中", va >= BTRON_MMIO_BASE
+		                                 && va < BTRON_RESERVED_BASE);
+		BTRON_CHECK("往復", hal_vm_translate(hal_vm_kernel_space(), va) == pa);
+		/* 二度呼んでも同じ値。別名は物理アドレスで一意に決まる。 */
+		BTRON_CHECK("冪等", hal_vm_map_device(pa, 0x10000) == va);
+		BTRON_CHECK("0 は拒否", hal_vm_map_device(pa, 0) == 0);
 	});
 
 	BTRON_TEST("早期プールの位置 (R4 の前提)", {

@@ -110,7 +110,12 @@ if(BTRON_ARCH STREQUAL "arm64")
     src/kernel/hal/arm64/mmu.c
     src/kernel/hal/arm64/vectors.S
     src/kernel/hal/arm64/exception.c
+    src/kernel/hal/arm64/timer.c
     src/kernel/boot/bootinfo.c
+    src/kernel/boot/machdesc.c
+    src/kernel/boot/fdt.c
+    src/kernel/boot/acpi.c
+    src/kernel/klib/string.c
     src/kernel/mm/pmem.c)
 
   target_link_libraries(btron-kernel PRIVATE btron_flags btron_headers btron_test)
@@ -169,20 +174,54 @@ if(TARGET btron-kernel)
             --arch ${BTRON_ARCH} --uefi --timeout 90
             --expect "BTRON3 準拠 OS — UEFI ローダ"
             --expect "起動経路  : UEFI"
+            --expect "ハード記述: ACPI"
             --deny   "[ FAIL ]"
             --deny   "ローダ異常終了"
             "${BTRON_DISK_IMAGE}")
 
   if(BTRON_ARCH STREQUAL "arm64")
+    # Device Tree 経路。ACPI を切ると ArmVirtQemu は DTB を置く。
+    # 同じ機種を 2 つの記述形式で読んで同じ結果になることが、
+    # 2 つのパーサの相互検証になっている。
     add_test(NAME boot-uefi-dt-arm64
       COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/run_qemu.py"
               --arch arm64 --uefi --timeout 90 --machine "virt,acpi=off"
               --expect "起動経路  : UEFI"
               --expect "ACPI RSDP : なし"
+              --expect "ハード記述: Device Tree"
+              --expect "GICv2 dist 0x0000000008000000 cpu 0x0000000008010000"
+              --expect "EL1 物理 = 30"
+              --expect "PSCI (HVC)"
               --deny   "DTB       : なし"
               --deny   "[ FAIL ]"
               --deny   "ローダ異常終了"
               "${BTRON_DISK_IMAGE}")
+
+    # GICv2 の値（上）と同じ内容を ACPI 側でも確かめる。
+    add_test(NAME boot-uefi-acpi-gic-arm64
+      COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/run_qemu.py"
+              --arch arm64 --uefi --timeout 90
+              --expect "ハード記述: ACPI"
+              --expect "GICv2 dist 0x0000000008000000 cpu 0x0000000008010000"
+              --expect "EL1 物理 = 30"
+              --expect "PSCI (HVC)"
+              --deny   "[ FAIL ]"
+              "${BTRON_DISK_IMAGE}")
+
+    # GICv3 と複数 CPU (D3 の前提)。DT と ACPI の両方で同じ結果を求める。
+    foreach(_m "virt,gic-version=3" "virt,gic-version=3,acpi=off")
+      string(REPLACE "," "-" _tag "${_m}")
+      add_test(NAME boot-uefi-smp-${_tag}
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/run_qemu.py"
+                --arch arm64 --uefi --timeout 90 --machine "${_m}"
+                --extra=-smp --extra=4
+                --expect "GICv3 dist 0x0000000008000000 cpu 0x00000000080a0000"
+                --expect "CPU       : 4 個"
+                --expect "EL1 物理 = 30"
+                --deny   "[ FAIL ]"
+                --deny   "ローダ異常終了"
+                "${BTRON_DISK_IMAGE}")
+    endforeach()
   endif()
 
   # ramfb はリニアなフレームバッファを見せる。virtio-gpu は Blt のみで
@@ -212,7 +251,12 @@ if(BTRON_ARCH STREQUAL "x86_64")
     src/kernel/hal/x86_64/page.c
     src/kernel/hal/x86_64/exit.c
     src/kernel/hal/x86_64/mmu.c
+    src/kernel/hal/x86_64/timer.c
     src/kernel/boot/bootinfo.c
+    src/kernel/boot/machdesc.c
+    src/kernel/boot/fdt.c
+    src/kernel/boot/acpi.c
+    src/kernel/klib/string.c
     src/kernel/mm/pmem.c)
   target_link_libraries(btron_hal_x86_64 PRIVATE btron_flags btron_headers)
 endif()

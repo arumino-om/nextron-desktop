@@ -102,6 +102,17 @@ IMPORT ERR hal_vm_map(AddrSpace *as, UD va, UD pa, UD size, UW attr);
 /* 検証・デバッグ用。対応付けが無ければ 0 を返す。 */
 IMPORT UD hal_vm_translate(CONST AddrSpace *as, UD va);
 
+/* 物理の MMIO 範囲を上位半分の MMIO 区画 (BTRON_MMIO_BASE) に張り、
+ * 仮想アドレスを返す。失敗時 0。
+ *
+ * 別名は BTRON_MMIO_BASE + 物理アドレスで一意に決まるので、同じ範囲を
+ * 二度張っても同じ値が返る。デバイスメモリ属性（キャッシュ無効・投機不可）
+ * で張る。GIC・フレームバッファ・各種レジスタはこれを通す。
+ *
+ * この写像はカーネルの上位半分にあり、プロセスへの貸出とは独立に
+ * 存在し続ける（規律 R18）。 */
+IMPORT UD hal_vm_map_device(UD pa, UD size);
+
 /* 現在 MMU が有効か */
 IMPORT Bool hal_vm_enabled(void);
 
