@@ -40,6 +40,13 @@ IMPORT Bool hal_console_set(UW type, UD base);
  * 張るべきページを知るために使う。 */
 IMPORT UD hal_console_pa(void);
 
+/* コンソール出力の複製先を登録する。
+ *
+ * 画面コンソール (screen_console_init) が自分を登録するので、既存の
+ * hal_console_puts() の呼び出しがそのまま画面にも出る。呼び出し側を
+ * 1 行も変えずに済むのが狙い。0 を渡すと複製をやめる。 */
+IMPORT void hal_console_tee(void (*fn)(CONST B *s));
+
 /* --- ページサイズ (R2) --------------------------------------------
  * A13 で 4KB と決めたが、定数として配らず HAL 経由で参照する。
  * 将来 16KB granule へ移行する余地を残すため。            */

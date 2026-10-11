@@ -10,11 +10,13 @@
  */
 
 #include <btron/bootinfo.h>
+#include <btron/font.h>
 #include <btron/hal.h>
 #include <btron/intc.h>
 #include <btron/kernel.h>
 #include <btron/machdesc.h>
 #include <btron/machine.h>
+#include <btron/screen.h>
 #include <btron/test.h>
 #include <btron/vmem.h>
 
@@ -23,6 +25,8 @@ EXPORT void boot_main(UD arg);
 
 /* src/kernel/core/selftest.c。検査タスクを作って中心核を起動する。戻らない。 */
 IMPORT void knl_selftest_start(void) __attribute__((noreturn));
+
+LOCAL void draw_splash(void);
 
 IMPORT B __kernel_start[];
 IMPORT B __kernel_end[];
@@ -160,6 +164,46 @@ LOCAL CONST B *mem_type_name(UW t)
 	}
 }
 
+/* 起動画面。画面が立ったことを目で見て分かるようにする。
+ *
+ * 文字が出れば B8（グリフデータ）と UTF-8 → グリフの経路まで一度に
+ * 確かめられる。色は BGRA / RGBA の差を screen_rgb() が吸収している。 */
+LOCAL void draw_splash(void)
+{
+	CONST Screen *s = screen();
+	UW w = s->width;
+	UW i;
+
+	CONST UW band = screen_rgb(0x1E, 0x3A, 0x5F);
+
+	/* 上端に帯を引き、その中に表題を置く。
+	 * この 3 行は固定領域にするので、以後の出力でスクロールしない。 */
+	screen_fill(0, 0, (W)w, 3 * 16 + 4, band);
+	screen_text_at(1, 0, "BTRON3 準拠 OS — 画面コンソール", screen_rgb(0xF0, 0xF4, 0xFF),
+	               band);
+	screen_text_at(1, 1, "かな・漢字も出ます（GNU Unifont / B8）",
+	               screen_rgb(0xA8, 0xC0, 0xE0), band);
+
+	/* 色の帯。画素形式 (BGRA / RGBA) を取り違えていれば色が入れ替わるので、
+	 * 目で見て分かる。赤・緑・青の順に明るくなっていれば正しい。 */
+	for (i = 0; i < 8; i++) {
+		UW r = ((i & 1U) != 0) ? 0xFFU : 0x20U;
+		UW g = ((i & 2U) != 0) ? 0xFFU : 0x20U;
+		UW b = ((i & 4U) != 0) ? 0xFFU : 0x20U;
+
+		screen_fill((W)(i * (w / 8U)), 2 * 16 + 2, (W)(w / 8U), 14,
+		            screen_rgb(r, g, b));
+	}
+
+	screen_console_reserve(3);
+	screen_console_color(screen_rgb(0xD0, 0xD8, 0xE0), screen_rgb(0x10, 0x14, 0x20));
+	hal_console_puts("  画面コンソール: ");
+	put_dec(screen_console_cols());
+	hal_console_puts(" 桁 x ");
+	put_dec(screen_console_rows());
+	hal_console_puts(" 行\n");
+}
+
 LOCAL void show_machdesc(void)
 {
 	CONST MachDesc *md = machdesc();
@@ -287,6 +331,13 @@ EXPORT void boot_main(UD arg)
 
 	show_bootinfo();
 	show_machdesc();
+
+	/* 画面を立てる。これ以降 hal_console_puts() の出力が画面にも出る
+	 * （E24: 画面はカーネルが保有する / 規律 R18）。
+	 * 画面が無い構成では黙ってシリアルだけで進む。 */
+	if (screen_init() == E_OK && screen_console_init() == E_OK) {
+		draw_splash();
+	}
 
 	BTRON_TEST("基本データタイプの幅", {
 		BTRON_CHECK("幅", sizeof(B) == 1);
@@ -557,6 +608,69 @@ EXPORT void boot_main(UD arg)
 			hal_vm_switch(&other);
 			BTRON_CHECK("分離", hal_vm_translate(&other, va) == 0);
 		}
+	});
+
+	BTRON_TEST("画面 (E24 / 規律 R18 / F6)", {
+		CONST Screen *s = screen();
+
+		if (s == 0) {
+			/* 画面が無い構成。異常ではない。 */
+			BTRON_CHECK("記述も無い", bootinfo()->fb.base == 0
+			                              || bootinfo()->fb.format == BFB_NONE);
+		} else {
+			UW red = screen_rgb(0xFF, 0, 0);
+			UW blue = screen_rgb(0, 0, 0xFF);
+
+			BTRON_CHECK("大きさ", s->width > 0 && s->height > 0);
+			BTRON_CHECK("pitch", s->pitch >= s->width * 4);
+			/* **写像は上位半分の MMIO 区画にある**（規律 R18）。
+			 * ここが下位半分だと、プロセスへ貸し出した瞬間に
+			 * 緊急画面が描けなくなる。 */
+			BTRON_CHECK("上位半分", s->base >= BTRON_MMIO_BASE
+			                            && s->base < BTRON_RESERVED_BASE);
+			BTRON_CHECK("別名", s->base == BTRON_MMIO_BASE + s->pa);
+
+			/* **書いた画素を読み返して確かめる。**
+			 * 画面出力の自動テストはスクリーンショット比較になりがちで
+			 * CI に乗らない。読み返せば普通のテストとして扱える。 */
+			screen_pixel(1, 1, red);
+			screen_pixel(2, 1, blue);
+			BTRON_CHECK("書いて読める", screen_get(1, 1) == red);
+			BTRON_CHECK("隣と混ざらない", screen_get(2, 1) == blue);
+			BTRON_CHECK("赤と青は別の値", red != blue);
+			/* 画面外は黙って無視し、読むと 0 */
+			screen_pixel((W)s->width, 0, red);
+			BTRON_CHECK("画面外は 0", screen_get((W)s->width, 0) == 0);
+
+			screen_fill(4, 4, 8, 8, red);
+			BTRON_CHECK("矩形の中", screen_get(5, 5) == red);
+			BTRON_CHECK("矩形の外", screen_get(12, 5) != red);
+			screen_fill(0, 0, 16, 16, screen_rgb(0x10, 0x14, 0x20));
+		}
+	});
+
+	BTRON_TEST("グリフデータ (B8)", {
+		CONST FontSet *f = font_default();
+		UW width = 0;
+		UW len = 0;
+
+		BTRON_CHECK("ある", f != 0);
+		BTRON_CHECK("16 ドット", f->height == 16);
+		BTRON_CHECK("半角がある", f->narrow_count > 90);
+		BTRON_CHECK("全角がある", f->wide_count > 10000);
+		/* 半角は 8 ドット、全角は 16 ドット */
+		BTRON_CHECK("'A' は半角", font_glyph(f, 'A', &width) != 0 && width == 8);
+		BTRON_CHECK("'あ' は全角", font_glyph(f, 0x3042U, &width) != 0 && width == 16);
+		BTRON_CHECK("'準' がある", font_glyph(f, 0x6E96U, &width) != 0 && width == 16);
+		BTRON_CHECK("'—' がある", font_glyph(f, 0x2014U, &width) != 0);
+		/* 範囲外は 0 を返す（落ちない） */
+		BTRON_CHECK("無い字", font_glyph(f, 0xE000U, &width) == 0 && width == 0);
+		BTRON_CHECK("面外", font_glyph(f, 0x10000U, &width) == 0);
+
+		/* UTF-8 の切り出し。規律 R7 の境界。 */
+		BTRON_CHECK("ASCII", font_utf8_next("A", &len) == 'A' && len == 1);
+		BTRON_CHECK("3 バイト", font_utf8_next("あ", &len) == 0x3042U && len == 3);
+		BTRON_CHECK("終端", font_utf8_next("", &len) == 0 && len == 0);
 	});
 
 	/* ハードウェア記述が無いと中心核は起動できない。

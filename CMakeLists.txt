@@ -95,6 +95,26 @@ add_library(btron_test STATIC src/lib/std/test.c)
 target_link_libraries(btron_test PUBLIC btron_flags btron_headers)
 
 # --------------------------------------------------------------------------
+# 内蔵グリフデータ (B8 / 詳細 B8)
+#
+# GNU Unifont をビルド時に取得する。**リポジトリには入れない。**
+# tools/mkfont.py が $UNIFONT_SRC（flake.nix が公開する上流ソース tarball）の
+# .hex から C ソースを生成する。日本語字形 (izmg16) を中国語字形 (wqy) より
+# 優先して合成している。
+#
+# 生成物は build/ の下なので .gitignore 済み。
+# --------------------------------------------------------------------------
+set(BTRON_FONT_DATA "${CMAKE_CURRENT_BINARY_DIR}/font_data.c")
+
+add_custom_command(
+  OUTPUT "${BTRON_FONT_DATA}"
+  COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/mkfont.py"
+          --out "${BTRON_FONT_DATA}"
+  DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tools/mkfont.py"
+  COMMENT "グリフデータを生成 (GNU Unifont)"
+  VERBATIM)
+
+# --------------------------------------------------------------------------
 # カーネル (Phase 1)
 #
 # いまのところ arm64 のみ。起動してシリアルに出し、実行時に設計上の
@@ -135,6 +155,10 @@ if(BTRON_ARCH STREQUAL "arm64")
     src/kernel/boot/fdt.c
     src/kernel/boot/acpi.c
     src/kernel/klib/string.c
+    src/kernel/screen/fb.c
+    src/kernel/screen/font.c
+    src/kernel/screen/console.c
+    "${BTRON_FONT_DATA}"
     src/kernel/mm/pmem.c)
 
   target_link_libraries(btron-kernel PRIVATE btron_flags btron_headers btron_test)
@@ -252,6 +276,7 @@ if(TARGET btron-kernel)
             --extra=-device --extra=ramfb
             --expect "起動経路  : UEFI"
             --expect "pitch"
+            --expect "画面コンソール:"
             --deny   "画面      : なし"
             --deny   "[ FAIL ]"
             --deny   "ローダ異常終了"

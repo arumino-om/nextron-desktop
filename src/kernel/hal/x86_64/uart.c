@@ -76,12 +76,28 @@ EXPORT void hal_console_putc(B c)
 	outb((UH)(port_base + UART_THR), (UB)c);
 }
 
+LOCAL void (*tee)(CONST B *s);
+
+EXPORT void hal_console_tee(void (*fn)(CONST B *s))
+{
+	tee = fn;
+}
+
 EXPORT void hal_console_puts(CONST B *s)
 {
-	for (; *s != '\0'; s++) {
-		if (*s == '\n') {
+	CONST B *p = s;
+
+	for (; *p != '\0'; p++) {
+		if (*p == '\n') {
 			hal_console_putc('\r');
 		}
-		hal_console_putc(*s);
+		hal_console_putc(*p);
+	}
+	if (tee != 0) {
+		void (*fn)(CONST B *) = tee;
+
+		tee = 0;
+		fn(s);
+		tee = fn;
 	}
 }

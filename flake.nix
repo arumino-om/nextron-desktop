@@ -96,6 +96,26 @@
               BTRON_LD = "${pkgs.lld}/bin/ld.lld";
               BTRON_TARGET_X64 = targetX64;
               BTRON_TARGET_ARM64 = targetArm64;
+
+              # グリフデータ (B8 / 詳細 B8)。
+              #
+              # **リポジトリには入れない。ビルド時に取得する。**
+              # ただし素朴に curl で取ると再現性が壊れる（上流が消える・
+              # 内容が変わる）ので、nixpkgs 経由にして flake.lock で
+              # ハッシュまで固定する。ネットワークに出るのは nix develop の
+              # ときだけで、ビルド自体は決定的になる。
+              #
+              # 指すのは**上流のソース tarball**。パッケージの出力には
+              # .otf と .pcf.gz しか無く、こちらには .hex がある。
+              # .hex は "コード:ビットマップ" のテキストなので扱いが楽で、
+              # しかも**日本語字形 (izmg16) と中国語字形 (wqy) が別ファイル**に
+              # なっているので、日本語を優先して合成できる。
+              #
+              # ライセンス: GPL-2.0-or-later WITH Font-exception-2.0。
+              # フォント例外により、このフォントで描いた出力物に GPL が
+              # 伝染しない。
+              UNIFONT_SRC = "${pkgs.unifont.src}";
+              UNIFONT_VERSION = pkgs.unifont.version;
             };
 
             shellHook = ''
@@ -105,6 +125,7 @@
               echo "  lld      : $(${pkgs.lld}/bin/ld.lld --version | head -1)"
               echo "  qemu     : $(${pkgs.qemu}/bin/qemu-system-x86_64 --version | head -1)"
               echo "  targets  : $BTRON_TARGET_X64 / $BTRON_TARGET_ARM64"
+              echo "  unifont  : $UNIFONT_VERSION (B8。ビルド時に .hex から生成)"
               ${
                 if isAarch64 then
                   ''echo "  UEFI fw  : arm64 = $ARM64_UEFI_FD"''

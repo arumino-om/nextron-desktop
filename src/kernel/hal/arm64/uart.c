@@ -73,12 +73,31 @@ EXPORT void hal_console_putc(B c)
 	mmio_write(PL011_DR, (UW)(UB)c);
 }
 
+/* 出力の複製先。画面コンソールが登録する。 */
+LOCAL void (*tee)(CONST B *s);
+
+EXPORT void hal_console_tee(void (*fn)(CONST B *s))
+{
+	tee = fn;
+}
+
 EXPORT void hal_console_puts(CONST B *s)
 {
-	for (; *s != '\0'; s++) {
-		if (*s == '\n') {
+	CONST B *p = s;
+
+	for (; *p != '\0'; p++) {
+		if (*p == '\n') {
 			hal_console_putc('\r');
 		}
-		hal_console_putc(*s);
+		hal_console_putc(*p);
+	}
+	if (tee != 0) {
+		/* 複製先の中で hal_console_puts() を呼ばれると無限に潜る。
+		 * 画面コンソールは呼ばないが、念のため呼び出し中は外す。 */
+		void (*fn)(CONST B *) = tee;
+
+		tee = 0;
+		fn(s);
+		tee = fn;
 	}
 }
