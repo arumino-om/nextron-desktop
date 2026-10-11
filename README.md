@@ -15,6 +15,7 @@ BTRON3 の四層構造（中心核 / 周辺核 / ディスプレイプリミテ�
 μT-Kernel 3.0 (IEEE 2050-2018) を用います。
 
 設計判断とその根拠は **[`docs/design-issues.md`](docs/design-issues.md)** に、
+作業単位と受入条件は **[`docs/tasks.md`](docs/tasks.md)** に、
 仕様書から抽出した API 一覧は **[`docs/api/`](docs/api/)** にあります。
 
 実装は仕様書のみを根拠とする独立実装であり、既存の製品やそのバイナリに
