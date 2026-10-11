@@ -25,5 +25,17 @@
   "buildPresets": [
     { "name": "arm64",  "configurePreset": "arm64" },
     { "name": "x86_64", "configurePreset": "x86_64" }
+  ],
+  "testPresets": [
+    {
+      "name": "arm64",
+      "configurePreset": "arm64",
+      "output": { "outputOnFailure": true, "verbosity": "verbose" }
+    },
+    {
+      "name": "x86_64",
+      "configurePreset": "x86_64",
+      "output": { "outputOnFailure": true, "verbosity": "verbose" }
+    }
   ]
 }

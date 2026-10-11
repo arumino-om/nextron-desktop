@@ -1,8 +1,12 @@
 /*
  * boot.c — arm64 の C 側入口
  *
- * Phase 1 の最初のマイルストーン。起動して、シリアルに出し、
- * 実行時にも設計上の不変条件を検査して終了する。
+ * 起動は 2 段構えになっている。
+ *
+ *   boot_early()  物理アドレスで走る。コンソールとページテーブルを用意し
+ *                 MMU を有効にして戻る。恒等写像が残っているので戻れる。
+ *   boot_main()   start.S が上位半分 (BTRON_KERNEL_BASE) へジャンプした
+ *                 後に走る。ここで恒等写像を捨て、TTBR0 をプロセスに明け渡す。
  */
 
 #include <btron/hal.h>
@@ -10,6 +14,7 @@
 #include <btron/test.h>
 #include <btron/vmem.h>
 
+EXPORT void boot_early(UD dtb);
 EXPORT void boot_main(UD dtb);
 
 IMPORT B __kernel_start[];
@@ -20,8 +25,40 @@ IMPORT B __kernel_end[];
  * D8 で決めた UEFI 経由にすればメモリマップを正しく取得できる。 */
 #define EARLY_POOL_SIZE (16UL * 1024 * 1024)
 
-EXPORT void boot_main(UD dtb)
+LOCAL void put_dec(UD v)
 {
+	B buf[24];
+	W i = 0;
+
+	do {
+		buf[i++] = (B)('0' + (v % 10));
+		v /= 10;
+	} while (v > 0 && i < (W)sizeof(buf));
+	while (i > 0) {
+		hal_console_putc(buf[--i]);
+	}
+}
+
+LOCAL void put_hex(UD v)
+{
+	CONST B *digits = "0123456789abcdef";
+	W i;
+
+	hal_console_puts("0x");
+	for (i = 60; i >= 0; i -= 4) {
+		hal_console_putc(digits[(v >> (UW)i) & 0xF]);
+	}
+}
+
+/* ------------------------------------------------------------------ */
+/* 第 1 段: 物理アドレスで走る                                         */
+/* ------------------------------------------------------------------ */
+
+EXPORT void boot_early(UD dtb)
+{
+	UD ps;
+	UD pool;
+
 	hal_console_init();
 	hal_exception_init(); /* これより後のフォルトは無言のハングではなく報告になる */
 
@@ -30,8 +67,47 @@ EXPORT void boot_main(UD dtb)
 	hal_console_puts("  DTB   : ");
 	hal_console_puts(dtb != 0 ? "あり\n" : "なし\n");
 
-	/* コンパイル時だけでなく実行時にも確かめる。
-	 * 実機で型の幅やアライメントが崩れていないことの確認になる。 */
+	/* ページテーブルの置き場。カーネルの物理終端の先に取る。
+	 *
+	 * ここでは __kernel_end のアドレスを直接使ってはいけない。物理で
+	 * 走っている間、adrp が返すのは物理アドレスで、上位半分へ移った後は
+	 * VMA になる。段によらず同じ値を返す HAL 経由で取る。 */
+	ps = (UD)hal_page_size();
+	pool = (hal_kernel_pa_end() + ps - 1) & ~(ps - 1);
+	pmem_early_init(pool, EARLY_POOL_SIZE);
+
+	if (hal_vm_init() != 0) {
+		hal_console_puts("  hal_vm_init に失敗\n");
+		hal_exit(1);
+	}
+	/* ここに到達した時点で MMU は有効。まだ恒等写像の上で走っている。 */
+}
+
+/* ------------------------------------------------------------------ */
+/* 第 2 段: 上位半分で走る                                             */
+/* ------------------------------------------------------------------ */
+
+EXPORT void boot_main(UD dtb)
+{
+	(void)dtb;
+
+	/* UART を MMIO 区画の別名に切り替える。これで恒等写像を捨てられる。 */
+	hal_console_remap();
+
+	/* 例外ベクタを張り直す。第 1 段で入れた VBAR_EL1 は btron_vectors の
+	 * 物理アドレスを指しており、恒等写像を捨てると届かなくなる。
+	 * ここは上位半分なので adrp は VMA を返す。 */
+	hal_exception_init();
+
+	hal_console_puts("  上位半分へ移行しました\n");
+	hal_console_puts("  カーネル VMA : ");
+	put_hex((UD)(VP)__kernel_start);
+	hal_console_puts("\n  カーネル PA  : ");
+	put_hex(hal_kva_to_pa((UD)(VP)__kernel_start));
+	hal_console_puts("\n  ページテーブル: ");
+	put_dec(pmem_early_used() / 1024);
+	hal_console_puts(" KB\n");
+
 	BTRON_TEST("基本データタイプの幅", {
 		BTRON_CHECK("幅", sizeof(B) == 1);
 		BTRON_CHECK("幅", sizeof(H) == 2);
@@ -79,36 +155,6 @@ EXPORT void boot_main(UD dtb)
 		BTRON_CHECK("仕様", BTRON_SPEC == (SPEC_BTRON | 0x320));
 	});
 
-	/* ---- ページングの立ち上げ (§3.2 / 規律 R3・R4) ---- */
-	{
-		UD ps = (UD)hal_page_size();
-		UD pool = ((UD)(VP)__kernel_end + ps - 1) & ~(ps - 1);
-
-		pmem_early_init(pool, EARLY_POOL_SIZE);
-
-		BTRON_TEST("MMU を有効にする (§3.2)", {
-			BTRON_CHECK("有効化前", hal_vm_enabled() == False);
-			BTRON_CHECK("hal_vm_init", hal_vm_init() == 0);
-			/* ここに到達した時点で、MMU 有効のまま命令が流れている */
-			BTRON_CHECK("有効化後", hal_vm_enabled() == True);
-		});
-
-		hal_console_puts("  ページテーブルに使った量: ");
-		{
-			UD used = pmem_early_used() / 1024;
-			B buf[8];
-			W i = 0;
-			do {
-				buf[i++] = (B)('0' + (used % 10));
-				used /= 10;
-			} while (used > 0 && i < 8);
-			while (i > 0) {
-				hal_console_putc(buf[--i]);
-			}
-		}
-		hal_console_puts(" KB\n");
-	}
-
 	BTRON_TEST("アドレス空間レイアウト (§3.2-1 / BTRON3 §1.5)", {
 		/* BTRON3 §1.5「共有・システムメモリは負、ローカルは正」 */
 		BTRON_CHECK("共有は負", (D)BTRON_SHARED_BASE < 0);
@@ -126,12 +172,44 @@ EXPORT void boot_main(UD dtb)
 		BTRON_CHECK("kernel", (BTRON_KERNEL_BASE % g) == 0);
 	});
 
+	BTRON_TEST("カーネルは上位半分で走っている", {
+		UD pc;
+		__asm__ volatile("adr %0, ." : "=r"(pc));
+		BTRON_CHECK("PC が上位半分", pc >= BTRON_SHARED_BASE);
+		BTRON_CHECK("PC がカーネル区画", pc >= BTRON_KERNEL_BASE);
+		BTRON_CHECK("リンク先も上位半分",
+		            (UD)(VP)__kernel_start >= BTRON_KERNEL_BASE);
+		/* スタックも上位半分にある */
+		BTRON_CHECK("SP が上位半分", (UD)(VP)&pc >= BTRON_SHARED_BASE);
+	});
+
+	BTRON_TEST("VMA <-> LMA の換算 (R4 の前提)", {
+		BTRON_CHECK("基準", hal_kva_to_pa(BTRON_KERNEL_BASE) == hal_kernel_pa_base());
+		BTRON_CHECK("整合",
+		            hal_kva_to_pa((UD)(VP)__kernel_start) == hal_kernel_pa_base());
+		BTRON_CHECK("終端",
+		            hal_kva_to_pa((UD)(VP)__kernel_end) == hal_kernel_pa_end());
+		BTRON_CHECK("物理は低位", hal_kernel_pa_base() < BTRON_USER_LIMIT);
+		BTRON_CHECK("大きさ",
+		            hal_kernel_pa_end() - hal_kernel_pa_base()
+		                == (UD)(VP)__kernel_end - (UD)(VP)__kernel_start);
+	});
+
 	BTRON_TEST("直接マップが引ける", {
 		CONST AddrSpace *ks = hal_vm_kernel_space();
-		UD kpa = (UD)(VP)__kernel_start & ~((UD)hal_page_size() - 1);
+		UD kpa = hal_kva_to_pa((UD)(VP)__kernel_start);
 		BTRON_CHECK("往復", hal_vm_translate(ks, BTRON_PA_TO_VA(kpa)) == kpa);
-		/* 直接マップ経由で自分のコードが読めること */
 		BTRON_CHECK("読める", *(volatile UW *)(VP)BTRON_PA_TO_VA(kpa) != 0);
+	});
+
+	/* ---- 恒等写像を捨てて、下位半分をプロセスに明け渡す ---- */
+	BTRON_TEST("恒等写像を捨てる", {
+		UD kpa = hal_kva_to_pa((UD)(VP)__kernel_start);
+		hal_vm_drop_identity();
+		/* ここに到達できれば、上位半分だけで実行が続いている */
+		BTRON_CHECK("生存", hal_vm_enabled() == True);
+		BTRON_CHECK("直接マップは健在",
+		            *(volatile UW *)(VP)BTRON_PA_TO_VA(kpa) != 0);
 	});
 
 	BTRON_TEST("アドレス空間の生成と切替 (規律 R3)", {
@@ -147,17 +225,20 @@ EXPORT void boot_main(UD dtb)
 		BTRON_CHECK("変換", hal_vm_translate(&as, va) == pa);
 		BTRON_CHECK("未マップは 0", hal_vm_translate(&as, va + 0x10000000ULL) == 0);
 
-		/* 【足場】いまカーネルは低位アドレスで走っているので、TTBR0 を
-		 * 差し替える前に逃げ道を張る。上位半分へ移したら不要になる。 */
-		BTRON_CHECK("足場", hal_vm_identity_kernel(&as) == 0);
-
-		/* 切り替えて、新しい空間でしか見えないページに書いて読む */
+		/* 足場なしで切り替えられる。カーネルは上位半分で走り続ける。 */
 		hal_vm_switch(&as);
 		*(volatile UW *)(VP)va = 0xB7120000U;
 		BTRON_CHECK("書いて読める", *(volatile UW *)(VP)va == 0xB7120000U);
-		/* 直接マップ（上位半分）からも同じ物理ページが見える */
 		BTRON_CHECK("共有側から同一視",
 		            *(volatile UW *)(VP)BTRON_PA_TO_VA(pa) == 0xB7120000U);
+
+		/* 別の空間へ切り替えると、さっきのページは見えなくなる */
+		{
+			AddrSpace other;
+			BTRON_CHECK("2 つめ", hal_vm_create(&other) == 0);
+			hal_vm_switch(&other);
+			BTRON_CHECK("分離", hal_vm_translate(&other, va) == 0);
+		}
 	});
 
 	hal_exit(btron_test_report());

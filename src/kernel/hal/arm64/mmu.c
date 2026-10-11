@@ -54,18 +54,51 @@
 /* L0 は T0SZ=17 により 256 エントリ。上位半分の確保量 (規律 R4) もこれで決まる。 */
 #define L0_ENTRIES (PTE_PER_TABLE >> (T0SZ - 16ULL))
 
+/* リンカスクリプトが提供する。__kernel_* は VMA（上位半分）。 */
 IMPORT B __kernel_start[];
 IMPORT B __kernel_end[];
+/* リンカスクリプトが .rodata 内に置いた 64bit の値。
+ * 絶対シンボルではなくデータなので adrp の射程に入る。 */
+IMPORT CONST UD __kernel_vma_base;
+IMPORT CONST UD __kernel_lma_base;
 
 #define PL011_PA 0x09000000ULL
 
 LOCAL AddrSpace kernel_space; /* 上位半分 (TTBR1) */
+LOCAL UD empty_root;          /* 恒等写像を捨てた後に TTBR0 が指す空の表 */
 LOCAL Bool vm_on = False;
 LOCAL UW next_asid = 1;
 
 /* ------------------------------------------------------------------ */
 /* 補助                                                                */
 /* ------------------------------------------------------------------ */
+
+/* カーネルイメージの大きさ。
+ *
+ * 【重要】C から取ったシンボルのアドレスは、実行している段によって値が
+ * 変わる。clang は adrp/add で求めるので、物理で走っている第 1 段では
+ * 物理アドレス、上位半分へ移った第 2 段では VMA になる。
+ * 差分だけは段によらず一定なので、大きさはこれで求める。
+ * 基準アドレスの方はリンカが .rodata に置いた値を読む。 */
+LOCAL inline UD kernel_size(void)
+{
+	return (UD)(VP)__kernel_end - (UD)(VP)__kernel_start;
+}
+
+EXPORT UD hal_kernel_pa_base(void)
+{
+	return __kernel_lma_base;
+}
+
+EXPORT UD hal_kernel_pa_end(void)
+{
+	return __kernel_lma_base + kernel_size();
+}
+
+EXPORT UD hal_kva_to_pa(UD kva)
+{
+	return kva - __kernel_vma_base + __kernel_lma_base;
+}
 
 LOCAL inline UD *table_ptr(UD pa)
 {
@@ -188,19 +221,22 @@ EXPORT ERR hal_vm_create(AddrSpace *as)
 	return 0;
 }
 
-/* 【足場】詳細は vmem.h の宣言を参照。カーネルを上位半分へ移したら削除する。 */
-EXPORT ERR hal_vm_identity_kernel(AddrSpace *as)
+EXPORT void hal_vm_drop_identity(void)
 {
-	UD ps = (UD)hal_page_size();
-	UD kstart = (UD)(VP)__kernel_start & ~(ps - 1);
-	UD kend = (pmem_early_limit() + ps - 1) & ~(ps - 1);
+	/* TTBR0 を空の表に向ける。これで下位半分には何も写像されていない状態になり、
+	 * プロセスに明け渡せる。カーネルは上位半分 (TTBR1) で走り続ける。 */
+	AddrSpace none;
 
-	if (hal_vm_map(as, kstart, kstart, kend - kstart,
-	               BTRON_PG_READ | BTRON_PG_WRITE | BTRON_PG_EXEC) != 0) {
-		return -1;
-	}
-	return hal_vm_map(as, PL011_PA, PL011_PA, ps,
-	                  BTRON_PG_READ | BTRON_PG_WRITE | BTRON_PG_DEVICE);
+	none.root_pa = empty_root;
+	none.asid = 0;
+	none.resv = 0;
+	hal_vm_switch(&none);
+
+	__asm__ volatile(
+		"dsb ishst\n"
+		"tlbi vmalle1\n"
+		"dsb ish\n"
+		"isb\n" ::: "memory");
 }
 
 EXPORT void hal_vm_destroy(AddrSpace *as)
@@ -237,14 +273,25 @@ EXPORT Bool hal_vm_enabled(void)
 EXPORT ERR hal_vm_init(void)
 {
 	UD ps = (UD)hal_page_size();
-	UD kstart = (UD)(VP)__kernel_start & ~(ps - 1);
-	UD kend = ((UD)(VP)__kernel_end + ps - 1) & ~(ps - 1);
+	/* この関数は物理で走る（第 1 段）。シンボルのアドレスは当てにできない
+	 * ので、基準はリンカが .rodata に置いた値、大きさは差分から取る。 */
+	UD ksize = (kernel_size() + ps - 1) & ~(ps - 1);
+	UD kvma = __kernel_vma_base;
+	UD kvma_end = kvma + ksize;
+	UD kstart = __kernel_lma_base;
+	UD kend = kstart + ksize;
 	AddrSpace low;
 	UD mair = MAIR_VALUE;
 	UD tcr;
 	UD sctlr;
 	UW i;
 	UD *l0;
+
+	/* リンカスクリプトの KERNEL_VMA と vmem.h の BTRON_KERNEL_BASE が
+	 * 食い違っていると、以後の VMA <-> LMA 換算が全部狂う。先に落とす。 */
+	if (__kernel_vma_base != BTRON_KERNEL_BASE) {
+		return -1;
+	}
 
 	/* --- 上位半分 (TTBR1 / 共有) ----------------------------------- */
 	kernel_space.root_pa = pmem_early_alloc_page();
@@ -290,6 +337,13 @@ EXPORT ERR hal_vm_init(void)
 			return -1;
 		}
 	}
+	/* カーネル本体を上位半分 (BTRON_KERNEL_BASE) に写像する。
+	 * ここへ移ることで TTBR0 を丸ごとプロセスに明け渡せるようになる。 */
+	if (hal_vm_map(&kernel_space, kvma, kstart, kvma_end - kvma,
+	               BTRON_PG_READ | BTRON_PG_WRITE | BTRON_PG_EXEC) != 0) {
+		return -1;
+	}
+
 	/* MMIO 区画に UART を置く */
 	if (hal_vm_map(&kernel_space, BTRON_MMIO_BASE + PL011_PA, PL011_PA, ps,
 	               BTRON_PG_READ | BTRON_PG_WRITE | BTRON_PG_DEVICE) != 0) {
@@ -297,9 +351,9 @@ EXPORT ERR hal_vm_init(void)
 	}
 
 	/* --- 下位半分 (TTBR0) ------------------------------------------
-	 * MMU を有効にした瞬間に PC とスタックが無効になると即死するので、
-	 * カーネルと UART を恒等写像しておく。カーネルを上位半分へ移したら
-	 * この恒等写像は外す。 */
+	 * MMU を有効にした瞬間、まだ物理アドレスで走っているので
+	 * カーネルと UART を恒等写像しておく。上位半分へジャンプした後に
+	 * hal_vm_drop_identity() でこれを捨てる。 */
 	if (hal_vm_create(&low) != 0) {
 		return -1;
 	}
@@ -362,6 +416,13 @@ EXPORT ERR hal_vm_init(void)
 		: "memory");
 
 	vm_on = True;
+
+	/* 恒等写像を捨てるときに TTBR0 が指す空の表を用意しておく。
+	 * MMU 有効後に確保するので、直接マップ経由でゼロクリアされる。 */
+	empty_root = pmem_early_alloc_page();
+	if (empty_root == 0) {
+		return -1;
+	}
 	return 0;
 }
 

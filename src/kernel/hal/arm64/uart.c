@@ -9,9 +9,14 @@
  */
 
 #include <btron/hal.h>
+#include <btron/vmem.h>
 
-/* QEMU virt の PL011 UART0 */
-#define PL011_BASE 0x09000000UL
+/* QEMU virt の PL011 UART0 の物理アドレス。
+ * 起動直後は恒等写像でここを触り、カーネルが上位半分へ移った後に
+ * hal_console_remap() で MMIO 区画の別名へ切り替える。 */
+#define PL011_PA 0x09000000UL
+
+LOCAL UD pl011_base = PL011_PA;
 
 #define PL011_DR 0x000   /* Data Register */
 #define PL011_FR 0x018   /* Flag Register */
@@ -20,12 +25,17 @@
 
 LOCAL inline UW mmio_read(UW off)
 {
-	return *(volatile UW *)(PL011_BASE + off);
+	return *(volatile UW *)(VP)(pl011_base + off);
 }
 
 LOCAL inline void mmio_write(UW off, UW v)
 {
-	*(volatile UW *)(PL011_BASE + off) = v;
+	*(volatile UW *)(VP)(pl011_base + off) = v;
+}
+
+EXPORT void hal_console_remap(void)
+{
+	pl011_base = BTRON_MMIO_BASE + PL011_PA;
 }
 
 EXPORT void hal_console_init(void)

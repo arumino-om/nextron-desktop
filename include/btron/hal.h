@@ -17,6 +17,11 @@ IMPORT void hal_console_init(void);
 IMPORT void hal_console_putc(B c);
 IMPORT void hal_console_puts(CONST B *s);
 
+/* 起動直後は物理アドレス（恒等写像）で UART を触る。カーネルが上位半分へ
+ * 移った後、MMIO 区画の別名 (BTRON_MMIO_BASE + 物理) に切り替える。
+ * これ以降は恒等写像を捨てられる。宛先はドライバ自身が知っている。 */
+IMPORT void hal_console_remap(void);
+
 /* --- ページサイズ (R2) --------------------------------------------
  * A13 で 4KB と決めたが、定数として配らず HAL 経由で参照する。
  * 将来 16KB granule へ移行する余地を残すため。            */

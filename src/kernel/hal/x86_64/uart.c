@@ -40,6 +40,12 @@ EXPORT void hal_console_init(void)
 	outb((UH)(COM1 + UART_FCR), 0xC7); /* FIFO 有効・クリア */
 }
 
+EXPORT void hal_console_remap(void)
+{
+	/* COM1 はポート I/O なのでアドレス空間に現れない。移す先が無い。
+	 * arm64 の PL011 (MMIO) との差を吸収するために空実装を置く。 */
+}
+
 EXPORT void hal_console_putc(B c)
 {
 	while (!(inb((UH)(COM1 + UART_LSR)) & LSR_THRE)) {

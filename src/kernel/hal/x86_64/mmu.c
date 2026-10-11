@@ -48,6 +48,14 @@
 /* CR4.PCIDE が有効なときだけ PCID を使う */
 #define CR4_PCIDE (1ULL << 17)
 
+/* arm64 と同じ形でリンカスクリプトが .rodata の中に値として置く。
+ * x86_64 のブート経路を作るときに同じ約束で用意すること。 */
+IMPORT CONST UD __kernel_vma_base;
+IMPORT CONST UD __kernel_lma_base;
+
+IMPORT B __kernel_start[];
+IMPORT B __kernel_end[];
+
 LOCAL AddrSpace kernel_space;
 LOCAL Bool vm_on = False;
 LOCAL Bool pcid_on = False;
@@ -67,6 +75,31 @@ LOCAL inline UD read_cr4(void)
 	UD v;
 	__asm__ volatile("mov %%cr4, %0" : "=r"(v));
 	return v;
+}
+
+/* カーネルイメージの大きさ。
+ *
+ * 【重要】C から取ったシンボルのアドレスは実行している段によって変わる。
+ * 物理で走っている第 1 段では物理アドレス、上位半分へ移った第 2 段では
+ * VMA になる。差分だけは段によらず一定。詳細は arm64 側の同名関数。 */
+LOCAL inline UD kernel_size(void)
+{
+	return (UD)(VP)__kernel_end - (UD)(VP)__kernel_start;
+}
+
+EXPORT UD hal_kernel_pa_base(void)
+{
+	return __kernel_lma_base;
+}
+
+EXPORT UD hal_kernel_pa_end(void)
+{
+	return __kernel_lma_base + kernel_size();
+}
+
+EXPORT UD hal_kva_to_pa(UD kva)
+{
+	return kva - __kernel_vma_base + __kernel_lma_base;
 }
 
 LOCAL inline UD *table_ptr(UD pa)
@@ -199,6 +232,23 @@ EXPORT void hal_vm_destroy(AddrSpace *as)
 	as->asid = 0;
 }
 
+EXPORT void hal_vm_drop_identity(void)
+{
+	/* CR3 は 1 本しかないので、恒等写像は共有側と同じ木の下位半分に
+	 * 入っている。下位 256 エントリを空にすれば下位半分は丸ごと空く。
+	 *
+	 * arm64 は TTBR0 を空の表に向け替えるだけで済む。ここが構造差。 */
+	UD *pml4 = table_ptr(kernel_space.root_pa);
+	UW i;
+
+	for (i = 0; i < PML4_SHARED_FIRST; i++) {
+		pml4[i] = 0;
+	}
+	/* PCID を使っていても、この木の TLB は捨てなければならない。
+	 * bit63 を立てずに書くと当該 PCID のエントリが無効化される。 */
+	write_cr3(kernel_space.root_pa & E_ADDR_MASK);
+}
+
 EXPORT void hal_vm_switch(CONST AddrSpace *as)
 {
 	UD cr3 = as->root_pa & E_ADDR_MASK;
@@ -227,16 +277,19 @@ EXPORT CONST AddrSpace *hal_vm_kernel_space(void)
 /* 未検証。x86_64 のブート経路（UEFI / multiboot）ができてから確認する。 */
 /* ------------------------------------------------------------------ */
 
-IMPORT B __kernel_start[];
-IMPORT B __kernel_end[];
-
 EXPORT ERR hal_vm_init(void)
 {
 	UD ps = (UD)hal_page_size();
-	UD kstart = (UD)(VP)__kernel_start & ~(ps - 1);
-	UD kend = ((UD)(VP)__kernel_end + ps - 1) & ~(ps - 1);
+	/* この関数は物理で走る（第 1 段）。シンボルのアドレスは当てにできない。 */
+	UD ksize = (kernel_size() + ps - 1) & ~(ps - 1);
+	UD kvma = __kernel_vma_base;
+	UD kstart = __kernel_lma_base;
 	UD *pml4;
 	UW i;
+
+	if (kvma != BTRON_KERNEL_BASE) {
+		return -1;
+	}
 
 	pcid_on = (read_cr4() & CR4_PCIDE) != 0;
 
@@ -259,13 +312,37 @@ EXPORT ERR hal_vm_init(void)
 		pml4[i] = (t & E_ADDR_MASK) | E_P | E_RW;
 	}
 
-	if (hal_vm_map(&kernel_space, BTRON_PA_TO_VA(kstart), kstart, kend - kstart,
-	               BTRON_PG_READ | BTRON_PG_WRITE | BTRON_PG_EXEC | BTRON_PG_GLOBAL) != 0) {
+	/* 物理メモリの直接マップ。ページテーブル自身が置かれている早期プールを
+	 * 必ず含めること。切替後 table_ptr() は直接マップ経由でテーブルを読む。 */
+	{
+		UD dm_start = kstart;
+		UD dm_end = pmem_early_limit();
+
+		if (pmem_early_base() < dm_start) {
+			dm_start = pmem_early_base();
+		}
+		if (kstart + ksize > dm_end) {
+			dm_end = kstart + ksize;
+		}
+		dm_start &= ~(ps - 1);
+		dm_end = (dm_end + ps - 1) & ~(ps - 1);
+
+		if (hal_vm_map(&kernel_space, BTRON_PA_TO_VA(dm_start), dm_start,
+		               dm_end - dm_start,
+		               BTRON_PG_READ | BTRON_PG_WRITE | BTRON_PG_EXEC
+		                   | BTRON_PG_GLOBAL) != 0) {
+			return -1;
+		}
+	}
+	/* カーネル本体を上位半分 (BTRON_KERNEL_BASE) に写像する。 */
+	if (hal_vm_map(&kernel_space, kvma, kstart, ksize,
+	               BTRON_PG_READ | BTRON_PG_WRITE | BTRON_PG_EXEC
+	                   | BTRON_PG_GLOBAL) != 0) {
 		return -1;
 	}
-	/* MMU を切り替えた瞬間に PC が無効にならないよう恒等写像も張る。
-	 * カーネルを上位半分へ移したら外す。 */
-	if (hal_vm_map(&kernel_space, kstart, kstart, kend - kstart,
+	/* CR3 を切り替えた瞬間に PC が無効にならないよう恒等写像も張る。
+	 * 上位半分へジャンプした後 hal_vm_drop_identity() で捨てる。 */
+	if (hal_vm_map(&kernel_space, kstart, kstart, ksize,
 	               BTRON_PG_READ | BTRON_PG_WRITE | BTRON_PG_EXEC) != 0) {
 		return -1;
 	}

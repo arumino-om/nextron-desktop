@@ -21,6 +21,34 @@ LOCAL void put_hex(UD v)
 	}
 }
 
+/* アボートの原因 (ESR_EL1.ISS の DFSC/IFSC = bits[5:0]) を出す。
+ *
+ * 「ページが無い」のか「物理メモリが無い」のか「権限が無い」のかで
+ * 原因が全く違う。無言のハングに戻らないよう、ここを細かく出す。 */
+LOCAL void put_fault(UD esr)
+{
+	UD fsc = esr & 0x3FULL;
+
+	if ((fsc & 0x3CULL) == 0x04ULL) {
+		hal_console_puts("（変換フォルト = 写像が無い, level ");
+	} else if ((fsc & 0x3CULL) == 0x08ULL) {
+		hal_console_puts("（アクセスフラグ = AF 未設定, level ");
+	} else if ((fsc & 0x3CULL) == 0x0CULL) {
+		hal_console_puts("（権限フォルト, level ");
+	} else if (fsc == 0x10ULL) {
+		hal_console_puts("（外部アボート = その物理アドレスに何も無い");
+	} else if ((fsc & 0x3CULL) == 0x00ULL) {
+		hal_console_puts("（アドレスサイズフォルト, level ");
+	} else {
+		hal_console_puts("（FSC = ");
+		put_hex(fsc);
+	}
+	if ((fsc & 0x30ULL) == 0x00ULL && fsc != 0x10ULL) {
+		hal_console_putc((B)('0' + (W)(fsc & 3ULL)));
+	}
+	hal_console_puts("）\n");
+}
+
 EXPORT void hal_exception_init(void)
 {
 	UD vbar = (UD)(VP)btron_vectors;
@@ -51,11 +79,13 @@ EXPORT void hal_exception_report(UD esr, UD far, UD elr)
 	switch (ec) {
 	case 0x20:
 	case 0x21:
-		hal_console_puts("  命令アボート（実行しようとしたページが無い）\n");
+		hal_console_puts("  命令アボート");
+		put_fault(esr);
 		break;
 	case 0x24:
 	case 0x25:
-		hal_console_puts("  データアボート（アクセスしたページが無い）\n");
+		hal_console_puts("  データアボート");
+		put_fault(esr);
 		break;
 	case 0x16:
 		hal_console_puts("  HVC / SMC\n");

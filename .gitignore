@@ -48,3 +48,6 @@ __pycache__/
 *~
 .vscode/
 .idea/
+
+# clangd / ccls のインデックスキャッシュ（毎回差分に出るのでコミットしない）
+.cache/
