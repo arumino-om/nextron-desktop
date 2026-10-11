@@ -1766,7 +1766,7 @@ LOCAL void test_task(INT stacd, VP exinf)
 
 		hal_console_puts("\n  PANICTEST の印があるので、ここでわざと例外を"
 		                 "起こします\n");
-		hal_console_puts("  （緊急画面に出しました、と読めれば成功です）\n");
+		hal_console_puts("  （この直後の例外が画面に出れば成功です）\n");
 		/* 上位半分の、何も写像していない番地を読む。
 		 * 変換フォルトになり、同期例外の経路へ入る。 */
 		bad = (volatile UW *)(VP)(BTRON_RESERVED_BASE + 0x1000ULL);

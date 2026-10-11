@@ -110,8 +110,5 @@ EXPORT void hal_exception_report(UD esr, UD far, UD elr)
 		break;
 	}
 
-	if (screen_panic_active()) {
-		hal_console_puts("  緊急画面に出しました（外殻の協力なし。E24 / R18）\n");
-	}
 	hal_exit(2);
 }

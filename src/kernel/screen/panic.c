@@ -114,10 +114,25 @@ EXPORT Bool screen_panic_begin(CONST B *title)
 	bg = screen_rgb(PANIC_BG);
 	fg = screen_rgb(PANIC_FG);
 
+	/* 切り替えたことをシリアルにだけ残す。
+	 *
+	 * **画面には出さない。** 利用者に見せるのは「何が起きたか」であって
+	 * カーネルの内部事情ではない。一方で「緊急画面が本当に出たか」を
+	 * 機械的に確かめる手がかりは要る（検査 panic-screen-arm64）。
+	 * 複製先をいったん外してから書けば、シリアルにだけ残る。
+	 *
+	 * **見出しも一緒に出す。** 自己検査も緊急画面を 1 度開くので、
+	 * 見出しが無いと「検査が開いた分」と「本物の例外が開いた分」を
+	 * 区別できず、本物の経路が壊れても検査が通ってしまう。 */
+	hal_console_tee(0);
+	hal_console_puts("  緊急画面へ切り替えました: ");
+	hal_console_puts(title);
+	hal_console_puts("（外殻の協力なし。E24 / R18）\n");
+
 	/* 画面を占有する。貸出先が何を描いていようと上書きする。 */
 	screen_clear(bg);
 	screen_text_at(LEFT_COL, 0, title, screen_rgb(PANIC_TITLE), bg);
-	screen_text_at(LEFT_COL, 1, "システムを停止しました。詳細はシリアルにも出ています。",
+	screen_text_at(LEFT_COL, 1, "OSで致命的なエラーが発生したため，動作を停止しました．",
 	               screen_rgb(PANIC_SUB), bg);
 	/* 見出しと本文の区切り。細い罫 1 本だけにする。 */
 	screen_fill(0, 2 * 16 + 6, (W)s->width, 2, screen_rgb(PANIC_RULE));
