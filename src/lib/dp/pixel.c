@@ -208,6 +208,18 @@ EXPORT Bool dp_mode_ok(DCM mode)
 	return True;
 }
 
+EXPORT Bool dp_in_fore(CONST DEnv *e, W rx, W ry)
+{
+	W i;
+
+	for (i = 0; i < e->nfore; i++) {
+		if (dp_rect_in(&e->fore[i], rx, ry)) {
+			return True;
+		}
+	}
+	return False;
+}
+
 EXPORT void dp_plot(CONST DEnv *e, CONST RECT *clip, W rx, W ry, UW src,
                     DCM mode)
 {
@@ -216,6 +228,10 @@ EXPORT void dp_plot(CONST DEnv *e, CONST RECT *clip, W rx, W ry, UW src,
 	UW dest;
 
 	if (!dp_rect_in(clip, rx, ry)) {
+		return;
+	}
+	/* 仕様 §2.2.4: 前置長方形リストに含まれる領域は描画対象から外れる。 */
+	if (e->nfore > 0 && dp_in_fore(e, rx, ry)) {
 		return;
 	}
 	ax = DP_ABS_X(e, rx);

@@ -152,6 +152,10 @@ if(BTRON_ARCH STREQUAL "arm64")
     src/kernel/periph/memory.c
     src/kernel/periph/message.c
     src/kernel/periph/gname.c
+    src/kernel/periph/event.c
+    src/kernel/periph/device.c
+    src/drivers/serial/serdev.c
+    src/drivers/ramdisk/ramdisk.c
     src/kernel/periph/clock.c
     src/kernel/periph/system.c
     src/kernel/core/time.c
@@ -172,6 +176,7 @@ if(BTRON_ARCH STREQUAL "arm64")
     src/kernel/mm/kheap.c
     src/subsystems/mgr/manager.c
     src/subsystems/font/fontman.c
+    src/subsystems/window/winman.c
     src/lib/appl/font/fontcli.c
     src/lib/dp/pixel.c
     src/lib/dp/env.c

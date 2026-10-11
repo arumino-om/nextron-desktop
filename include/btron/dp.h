@@ -32,7 +32,6 @@
  *   内部パターンイメージ (gsiz_pat / gcre_pat)              EG_NOSPT
  *   実線以外の線種                                          EG_NOSPT
  *   任意領域クリッピング (GRGN の ns > 0)                   EG_NOSPT
- *   前置長方形リスト (gset_for / gget_for)                  未実装
  *   ポインタ制御 (§2.6)                      マウスドライバ (§1.7/§1.8) 待ち
  *   フォント切替 (gset_fon / gset_scr)        フォントマネージャの本体待ち
  */
@@ -355,6 +354,7 @@ typedef W GID; /* 描画環境 ID */
 
 /* 実装の制限値 (D9。暫定) */
 #define DP_MAX_GID 32     /* 同時に開ける描画環境の数 */
+#define DP_MAX_FORE 16    /* 前置長方形リストの要素数 */
 #define DP_DEVNAME_LEN 10 /* デバイス名の長さ（gget_dev は 11 要素を要求） */
 
 /* 必ずサポートするデバイス（仕様 §2.2.4） */
@@ -403,6 +403,20 @@ IMPORT ERR gset_fra(GID gid, RECT r);
 IMPORT ERR gget_fra(GID gid, RECT *rp);
 IMPORT ERR gset_vis(GID gid, RECT r);
 IMPORT ERR gget_vis(GID gid, RECT *rp);
+
+/* 前置長方形リスト。**ここに含まれる領域には描画しない。**
+ *
+ * 仕様 §2.2.4「実際に…描画が行なわれる領域は、対象ビットマップの境界
+ * 長方形、フレーム長方形、表示長方形、設定されたクリッピング領域に含まれ、
+ * かつ、**前置長方形リストに含まれない**領域となる」。
+ *
+ * ウィンドウマネージャがこれを使う — 手前にあるウィンドウの矩形を並べて
+ * おけば、奥のウィンドウが手前を上書きしなくなる。これが無いと
+ * 重なり合うウィンドウを正しく描けない。
+ *
+ * `rlp = NULL` でリストを空にする。 */
+IMPORT ERR gset_for(GID gid, CONST RLIST *rlp);
+IMPORT ERR gget_for(GID gid, RLIST *rlp);
 
 /* 対象ビットマップと座標系。 */
 IMPORT ERR gget_bmp(GID gid, BMP *bmap);

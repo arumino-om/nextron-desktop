@@ -17,6 +17,8 @@
 
 #include <btron/hal.h>
 #include <btron/clock.h>
+#include <btron/device.h>
+#include <btron/event.h>
 #include <btron/gname.h>
 #include <btron/intc.h>
 #include <btron/kernel.h>
@@ -24,6 +26,7 @@
 #include <btron/message.h>
 #include <btron/proc.h>
 #include <btron/taskcomm.h>
+#include <btron/window.h>
 #include <btron/vmem.h>
 
 typedef struct TCB TCB;

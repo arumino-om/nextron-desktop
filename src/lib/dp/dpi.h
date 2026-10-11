@@ -39,6 +39,11 @@ typedef struct DEnv {
 	RECT clip;    /* クリッピング領域（矩形のみ） */
 	Bool has_clip;
 
+	/* 前置長方形リスト。ここに含まれる領域には描画しない。
+	 * ウィンドウの重なりを表すのに使う。 */
+	RECT fore[DP_MAX_FORE];
+	W nfore;
+
 	/* 文字属性 */
 	W chx;
 	W chy;
@@ -92,7 +97,10 @@ IMPORT Bool dp_pat(CONST DEnv *e, CONST PAT *pat, W rx, W ry, UW *pix);
 /* パターンが使えるか（kind と中身の検査）。 */
 IMPORT ERR dp_pat_check(CONST PAT *pat);
 
-/* 1 ピクセル描く。相対座標。クリップとマスクを見る。 */
+/* 点が前置長方形リストに入っているか。入っていれば描画しない。 */
+IMPORT Bool dp_in_fore(CONST DEnv *e, W rx, W ry);
+
+/* 1 ピクセル描く。相対座標。クリップと前置長方形とマスクを見る。 */
 IMPORT void dp_plot(CONST DEnv *e, CONST RECT *clip, W rx, W ry, UW src,
                     DCM mode);
 

@@ -729,6 +729,15 @@ LOCAL void teardown(W pid, W code, W msgtype, Bool self)
 	/* DELEXIT 指定の同期通信オブジェクトを捨てる (§1.3)。 */
 	tobj_release_process(pid);
 
+	/* イベントメッセージ要求を外す (§1.7.6)。 */
+	evt_release_process(pid);
+
+	/* 開いたままのデバイスを閉じる (§1.8.4)。 */
+	dev_release_process(pid);
+
+	/* 残っているウィンドウを閉じる（外殻 §3.1）。 */
+	win_release_process(pid);
+
 	/* §1.5 のメモリブロックを返す。**アドレス空間を壊す前に呼ぶ。**
 	 * ローカルメモリの物理ページはプロセスのページテーブルを辿らないと
 	 * 分からないので、表を解放した後では回収できない。 */

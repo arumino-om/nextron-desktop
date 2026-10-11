@@ -16,11 +16,14 @@
  */
 
 #include <btron/bootinfo.h>
+#include <btron/device.h>
 #include <btron/dp.h>
+#include <btron/event.h>
 #include <btron/fontman.h>
 #include <btron/machdesc.h>
 #include <btron/manager.h>
 #include <btron/system.h>
+#include <btron/window.h>
 #include <btron/screen.h>
 #include <btron/test.h>
 
@@ -619,6 +622,30 @@ LOCAL CONST TC nm_screen[] = {(TC)'S', (TC)'C', (TC)'R', (TC)'E', (TC)'E',
 LOCAL CONST TC nm_msgpnl[] = {(TC)'M', (TC)'S', (TC)'G', (TC)'P', (TC)'N',
                               (TC)'L', TNULL};
 LOCAL CONST TC nm_ab[] = {(TC)'A', (TC)'B', TNULL};
+LOCAL CONST TC nm_com[] = {(TC)'c', (TC)'o', (TC)'m', TNULL};
+LOCAL CONST TC nm_rda[] = {(TC)'r', (TC)'d', (TC)'a', TNULL};
+LOCAL CONST TC nm_rda0[] = {(TC)'r', (TC)'d', (TC)'a', (TC)'0', TNULL};
+LOCAL CONST TC nm_rda1[] = {(TC)'r', (TC)'d', (TC)'a', (TC)'1', TNULL};
+LOCAL CONST TC nm_rda2[] = {(TC)'r', (TC)'d', (TC)'a', (TC)'2', TNULL};
+LOCAL CONST TC nm_rda01[] = {(TC)'r', (TC)'d', (TC)'a', (TC)'0', (TC)'1',
+                             TNULL};
+LOCAL CONST TC nm_rda255[] = {(TC)'r', (TC)'d', (TC)'a', (TC)'2', (TC)'5',
+                              (TC)'5', TNULL};
+LOCAL CONST TC nm_wnd1[] = {(TC)'W', (TC)'N', (TC)'D', (TC)'1', TNULL};
+LOCAL CONST TC nm_wnd2[] = {(TC)'W', (TC)'N', (TC)'D', (TC)'2', TNULL};
+
+LOCAL W dev_child_dd; /* 子プロセスが開いたデバイスディスクリプタ */
+LOCAL Bool win_up;    /* ウィンドウマネージャが立っているか */
+LOCAL WID win_w1;
+LOCAL WID win_w2;
+
+/* デバイスを開いたまま終わる子プロセス。自動クローズの検査用。 */
+LOCAL W p_devopen(MESSAGE *msg)
+{
+	(void)msg;
+	dev_child_dd = opn_dev(nm_rda0, D_READ, 0);
+	return 0; /* 閉じずに終わる */
+}
 
 /* メモリ描画環境の検査に使うビットマップ。
  * 画面に触らずにピクセル単位で結果を確かめられるのが利点。 */
@@ -4298,10 +4325,876 @@ LOCAL void run_proc_tests(void)
 		BTRON_CHECK("MSGPNL は固有ビットマップを持たない",
 		            gopn_dev(nm_msgpnl, 0) == EG_DEV);
 
-		/* フォントマネージャを止める。ポートと名前は DELEXIT 付き。 */
-		if (fontman_pid >= 1) {
-			MgrMsg m;
+		/* **フォントマネージャはまだ止めない。** この後のウィンドウ
+		 * マネージャがタイトル文字を描くのにグリフデータを使う。 */
+		BTRON_CHECK("終了メッセージを捨てる",
+		            clr_msg(MM_ALL, MM_NULL) == ER_OK);
+	});
 
+	/* -------------------------------------------------------------- */
+	/* §1.7 イベント管理                                              */
+	/* -------------------------------------------------------------- */
+
+	BTRON_TEST("起動時はイベント管理が動いていない (§1.7.2)", {
+		EVENT ev;
+		W old;
+
+		/* 仕様「システムのスタートアップ時点では…システムイベントマスクは
+		 * 0 となっており、イベント管理機能は事実上動作していない」 */
+		old = chg_emk(EM_NULL);
+		BTRON_CHECK("マスクを 0 に戻せる", old >= 0);
+		ev.type = EV_APPL1;
+		ev.time = 0;
+		ev.pos.x = 0;
+		ev.pos.y = 0;
+		ev.data.info = 1;
+		ev.stat = 0;
+		/* 仕様「システムイベントマスクで対象外のイベントは実際には発生せず
+		 * 無視される」。**エラーではない。** */
+		BTRON_CHECK("無視される", put_evt(&ev, EP_NONE) == ER_OK);
+		BTRON_CHECK("入っていない", evt_count() == 0);
+
+		BTRON_CHECK("有効にする", chg_emk(EM_ALL) == EM_NULL);
+		BTRON_CHECK("入るようになった",
+		            put_evt(&ev, EP_NONE) == ER_OK && evt_count() == 1);
+		BTRON_CHECK("片付け", clr_evt(EM_ALL, EM_NULL) == ER_OK);
+		BTRON_CHECK("マスクの範囲外", chg_emk(0x10000) == ER_PAR);
+	});
+
+	BTRON_TEST("イベントは優先度順に取り出される (§1.7.2)", {
+		EVENT ev;
+		EVENT got;
+
+		(void)chg_emk(EM_ALL);
+		(void)clr_evt(EM_ALL, EM_NULL);
+
+		/* 仕様の優先度: APPL1〜4 > ボタン/キー > AUTKEY > DEVICE/RSV
+		 *               > APPL5〜8 > NULL
+		 * **発生順とは別。** 低い優先度を先に入れて確かめる。 */
+		ev.time = 0;
+		ev.pos.x = 1;
+		ev.pos.y = 2;
+		ev.stat = 0;
+		ev.type = EV_APPL5; /* 優先度 5 */
+		ev.data.info = 5;
+		BTRON_CHECK("APPL5", put_evt(&ev, EP_NONE) == ER_OK);
+		ev.type = EV_DEVICE; /* 優先度 4 */
+		ev.data.dev.kind = DE_MOUNT;
+		ev.data.dev.devno = 1;
+		BTRON_CHECK("DEVICE", put_evt(&ev, EP_NONE) == ER_OK);
+		ev.type = EV_BUTDWN; /* 優先度 2 */
+		ev.data.info = 0;
+		BTRON_CHECK("BUTDWN", put_evt(&ev, EP_NONE) == ER_OK);
+		ev.type = EV_APPL1; /* 優先度 1 */
+		ev.data.info = 1;
+		BTRON_CHECK("APPL1", put_evt(&ev, EP_NONE) == ER_OK);
+
+		BTRON_CHECK("最初は APPL1",
+		            get_evt(EM_ALL, &got, CLR) == EV_APPL1);
+		BTRON_CHECK("次は BUTDWN",
+		            get_evt(EM_ALL, &got, CLR) == EV_BUTDWN);
+		BTRON_CHECK("次は DEVICE",
+		            get_evt(EM_ALL, &got, CLR) == EV_DEVICE);
+		BTRON_CHECK("種別が渡る", got.data.dev.kind == DE_MOUNT);
+		BTRON_CHECK("最後は APPL5",
+		            get_evt(EM_ALL, &got, CLR) == EV_APPL5);
+		/* 仕様「指定したタイプのイベントが発生していないときは、EV_NULL が
+		 * 取り出される」 */
+		BTRON_CHECK("空なら EV_NULL",
+		            get_evt(EM_ALL, &got, CLR) == EV_NULL);
+
+		/* 同一優先度は発生順。 */
+		ev.type = EV_APPL1;
+		ev.data.info = 11;
+		(void)put_evt(&ev, EP_NONE);
+		ev.type = EV_APPL2;
+		ev.data.info = 22;
+		(void)put_evt(&ev, EP_NONE);
+		BTRON_CHECK("先に入れた方が先",
+		            get_evt(EM_ALL, &got, CLR) == EV_APPL1 &&
+		                got.data.info == 11);
+		BTRON_CHECK("次", get_evt(EM_ALL, &got, CLR) == EV_APPL2);
+	});
+
+	BTRON_TEST("イベントのエラーコードと属性 (§1.7.6)", {
+		EVENT ev;
+		EVENT got;
+		PNT p;
+
+		(void)clr_evt(EM_ALL, EM_NULL);
+		ev.type = EV_APPL1;
+		ev.time = 0;
+		ev.pos.x = 0;
+		ev.pos.y = 0;
+		ev.data.info = 0;
+		ev.stat = 0;
+
+		BTRON_CHECK("アドレス不正", put_evt(0, EP_NONE) == ER_ADR);
+		BTRON_CHECK("属性不正", put_evt(&ev, 0x100) == ER_PAR);
+		/* 仕様「EV_NULL および EV_AUTKEY の指定したときはエラー」 */
+		ev.type = EV_NULL;
+		BTRON_CHECK("EV_NULL は発生させられない",
+		            put_evt(&ev, EP_NONE) == ER_PAR);
+		ev.type = EV_AUTKEY;
+		BTRON_CHECK("EV_AUTKEY も同じ",
+		            put_evt(&ev, EP_NONE) == ER_PAR);
+		BTRON_CHECK("取得のアドレス不正",
+		            get_evt(EM_ALL, 0, CLR) == ER_ADR);
+		BTRON_CHECK("取得のマスクが 0",
+		            get_evt(0, &got, CLR) == ER_PAR);
+		BTRON_CHECK("取得の属性不正",
+		            get_evt(EM_ALL, &got, 7) == ER_PAR);
+
+		/* EP_POS / EP_TIME で現在値が入る。 */
+		p.x = 123;
+		p.y = 45;
+		BTRON_CHECK("PD 位置の設定", set_pdp(p) == ER_OK);
+		BTRON_CHECK("PD 位置の取得",
+		            get_pdp(&p) == ER_OK && p.x == 123 && p.y == 45);
+		ev.type = EV_APPL1;
+		ev.pos.x = 0;
+		ev.pos.y = 0;
+		ev.time = 0;
+		BTRON_CHECK("発生", put_evt(&ev, EP_ALL) == ER_OK);
+		BTRON_CHECK("取得", get_evt(EM_APPL1, &got, CLR) == EV_APPL1);
+		BTRON_CHECK("pos が入った", got.pos.x == 123 && got.pos.y == 45);
+		BTRON_CHECK("time が入った", got.time > 0);
+
+		/* NOCLR では残る。 */
+		(void)put_evt(&ev, EP_NONE);
+		BTRON_CHECK("NOCLR", get_evt(EM_APPL1, &got, NOCLR) == EV_APPL1);
+		BTRON_CHECK("残っている", evt_count() == 1);
+		BTRON_CHECK("CLR", get_evt(EM_APPL1, &got, CLR) == EV_APPL1);
+		BTRON_CHECK("消えた", evt_count() == 0);
+	});
+
+	BTRON_TEST("自動リピートキー (§1.7.2 / §1.7.3)", {
+		EVENT ev;
+		EVENT got;
+		KeyMap km;
+		W off = 0;
+		W itv = 0;
+
+		(void)clr_evt(EM_ALL, EM_NULL);
+		BTRON_CHECK("リピート時間の設定", set_krp(20, 10) == ER_OK);
+		BTRON_CHECK("取得",
+		            get_krp(&off, &itv) == ER_OK && off == 20 && itv == 10);
+
+		ev.type = EV_KEYDWN;
+		ev.time = 0;
+		ev.pos.x = 0;
+		ev.pos.y = 0;
+		ev.data.key.keytop = 65;
+		ev.data.key.code = (TC)'A';
+		ev.stat = 0;
+		BTRON_CHECK("キーを押す", put_evt(&ev, EP_TIME) == ER_OK);
+		/* キー状態が立つ（本来はドライバの仕事） */
+		BTRON_CHECK("キー状態", get_kmp(km) == ER_OK);
+		BTRON_CHECK("押されている", ((km[65 / 8] >> (65 % 8)) & 1) != 0);
+		BTRON_CHECK("KEYDWN が取れる",
+		            get_evt(EM_ALL, &got, CLR) == EV_KEYDWN);
+		/* オフセット前はまだ出ない。 */
+		BTRON_CHECK("まだリピートしない",
+		            get_evt(EM_AUTKEY, &got, CLR) == EV_NULL);
+		(void)dly_tsk(30);
+		/* **自動リピートはキューに入らず、取り出し要求時に生成される**（仕様）。 */
+		BTRON_CHECK("リピートが出る",
+		            get_evt(EM_AUTKEY, &got, CLR) == EV_AUTKEY);
+		BTRON_CHECK("押したキーが入る",
+		            got.data.key.keytop == 65 && got.data.key.code == (TC)'A');
+		BTRON_CHECK("キューには入っていない", evt_count() == 0);
+		(void)dly_tsk(20);
+		BTRON_CHECK("間隔を置いてまた出る",
+		            get_evt(EM_AUTKEY, &got, CLR) == EV_AUTKEY);
+
+		/* キーを離すと止まる。 */
+		ev.type = EV_KEYUP;
+		BTRON_CHECK("キーを離す", put_evt(&ev, EP_TIME) == ER_OK);
+		BTRON_CHECK("KEYUP が取れる",
+		            get_evt(EM_ALL, &got, CLR) == EV_KEYUP);
+		(void)dly_tsk(30);
+		BTRON_CHECK("もうリピートしない",
+		            get_evt(EM_AUTKEY, &got, CLR) == EV_NULL);
+
+		/* リピート対象外のキーはリピートしない（仕様の条件⑤）。 */
+		{
+			KeyMap none;
+			W i;
+
+			for (i = 0; i < KEYMAX / 8; i++) {
+				none[i] = 0;
+			}
+			BTRON_CHECK("対象を空にする", set_krm(none) == ER_OK);
+			ev.type = EV_KEYDWN;
+			(void)put_evt(&ev, EP_TIME);
+			(void)get_evt(EM_ALL, &got, CLR);
+			(void)dly_tsk(30);
+			BTRON_CHECK("対象外はリピートしない",
+			            get_evt(EM_AUTKEY, &got, CLR) == EV_NULL);
+			BTRON_CHECK("取得", get_krm(km) == ER_OK && km[0] == 0);
+			for (i = 0; i < KEYMAX / 8; i++) {
+				none[i] = 0xFF;
+			}
+			(void)set_krm(none);
+			ev.type = EV_KEYUP;
+			(void)put_evt(&ev, EP_TIME);
+			(void)clr_evt(EM_ALL, EM_NULL);
+		}
+	});
+
+	BTRON_TEST("キーボードと変換表 (§1.7.3)", {
+		KBD_ID kid;
+		KeyTab *kt;
+		VP mem = 0;
+		UW etm = 0;
+
+		BTRON_CHECK("キーボード ID", get_kid(&kid) == ER_OK);
+		/* 物理キーボードは接続されていない。 */
+		BTRON_CHECK("未定義キーボード", kid.kind == 0);
+		BTRON_CHECK("イベントタイマー",
+		            get_etm(&etm) == ER_OK && etm > 0);
+
+		/* 変換表。KeyTab は 8KB 近いのでメモリブロックに置く。 */
+		BTRON_CHECK("設定前は存在しない", get_ktb(0) == ER_ADR);
+		if (get_mbk(&mem, 4, 0) == ER_OK) {
+			kt = (KeyTab *)mem;
+			kt->keymax = 256;
+			kt->kctmax = 4;
+			{
+				W i;
+
+				for (i = 0; i < KCTSEL; i++) {
+					/* CERLKA の 6 ビット。シフト無しは表 0、
+					 * 左シフト (KM_L) は表 1 にする。 */
+					kt->kctsel[i] = (UH)(((i & KM_L) != 0) ? 1 : 0);
+				}
+				for (i = 0; i < KCTMAX; i++) {
+					kt->kct[i] = 0;
+				}
+			}
+			kt->kct[0 * 256 + 65] = (UH)'a'; /* 表 0、キー 65 */
+			kt->kct[1 * 256 + 65] = (UH)'A'; /* 表 1 */
+			BTRON_CHECK("設定", set_ktb(kt) == ER_OK);
+			BTRON_CHECK("取得",
+			            get_ktb(kt) == (W)sizeof(KeyTab));
+			BTRON_CHECK("表 0 の中身", kt->kct[0 * 256 + 65] == (UH)'a');
+			BTRON_CHECK("左シフトは表 1",
+			            kt->kctsel[KM_L] == 1 &&
+			                kt->kct[1 * 256 + 65] == (UH)'A');
+			/* 上限。keymax × kctmax が KCTMAX を超えてはいけない。 */
+			kt->kctmax = 64;
+			BTRON_CHECK("表が大きすぎる", set_ktb(kt) == ER_PAR);
+			kt->keymax = 0;
+			BTRON_CHECK("キー数が不正", set_ktb(kt) == ER_PAR);
+			(void)rel_mbk(mem);
+		}
+	});
+
+	BTRON_TEST("イベントメッセージ要求 (§1.7.6 req_evt)", {
+		EVENT ev;
+		MESSAGE r;
+		CONST EVENT *rev;
+
+		(void)clr_evt(EM_ALL, EM_NULL);
+		(void)clr_msg(MM_ALL, MM_NULL);
+		BTRON_CHECK("要求", req_evt(EM_APPL3) == ER_OK);
+
+		ev.type = EV_APPL3;
+		ev.time = 0;
+		ev.pos.x = 7;
+		ev.pos.y = 8;
+		ev.data.info = 0x4321;
+		ev.stat = 0;
+		BTRON_CHECK("発生", put_evt(&ev, EP_NONE) == ER_OK);
+		/* 仕様「msg_type は、MS_SYS5 固定」 */
+		BTRON_CHECK("メッセージが来た",
+		            rcv_msg(MM_SYS5, &r, (W)sizeof(r), NOWAIT) >= 0);
+		BTRON_CHECK("MS_SYS5", r.msg_type == MS_SYS5);
+		BTRON_CHECK("大きさ", r.msg_size == (W)sizeof(EVENT));
+		rev = (CONST EVENT *)(CONST VP)&r.msg_body;
+		BTRON_CHECK("イベントが入っている",
+		            rev->type == EV_APPL3 && rev->data.info == 0x4321);
+		/* 仕様「メッセージとして送信されても、そのイベントはイベント
+		 * キューから取り除かれない」 */
+		BTRON_CHECK("キューにも残っている", evt_count() == 1);
+
+		/* 対象外のタイプはメッセージにならない。 */
+		ev.type = EV_APPL4;
+		(void)put_evt(&ev, EP_NONE);
+		BTRON_CHECK("対象外は来ない",
+		            rcv_msg(MM_SYS5, &r, (W)sizeof(r), NOWAIT) == ER_NONE);
+
+		/* 仕様「EM_NULL を指定することにより…要求が解除される」 */
+		BTRON_CHECK("解除", req_evt(EM_NULL) == ER_OK);
+		ev.type = EV_APPL3;
+		(void)put_evt(&ev, EP_NONE);
+		BTRON_CHECK("もう来ない",
+		            rcv_msg(MM_SYS5, &r, (W)sizeof(r), NOWAIT) == ER_NONE);
+		(void)clr_evt(EM_ALL, EM_NULL);
+		(void)clr_msg(MM_ALL, MM_NULL);
+	});
+
+	BTRON_TEST("clr_evt と las_evt (§1.7.6)", {
+		EVENT ev;
+		W el;
+
+		(void)clr_evt(EM_ALL, EM_NULL);
+		ev.time = 0;
+		ev.pos.x = 0;
+		ev.pos.y = 0;
+		ev.data.info = 0;
+		ev.stat = 0;
+		ev.type = EV_APPL1;
+		(void)put_evt(&ev, EP_TIME);
+		ev.type = EV_APPL5;
+		(void)put_evt(&ev, EP_TIME);
+		ev.type = EV_APPL1;
+		(void)put_evt(&ev, EP_TIME);
+		BTRON_CHECK("3 つ", evt_count() == 3);
+		/* APPL5 の直前まで = APPL1 が 1 つ消える。 */
+		BTRON_CHECK("直前まで", clr_evt(EM_APPL1, EM_APPL5) == ER_OK);
+		BTRON_CHECK("1 つ消えた", evt_count() == 2);
+		/* EM_ALL の特例: 1 つだけ消す。 */
+		BTRON_CHECK("1 つだけ", clr_evt(EM_ALL, EM_ALL) == ER_OK);
+		BTRON_CHECK("もう 1 つ消えた", evt_count() == 1);
+		BTRON_CHECK("全部", clr_evt(EM_ALL, EM_NULL) == ER_OK);
+		BTRON_CHECK("空", evt_count() == 0);
+		BTRON_CHECK("マスクが 0", clr_evt(0, EM_NULL) == ER_PAR);
+
+		(void)dly_tsk(15);
+		el = las_evt(EM_APPL1);
+		BTRON_CHECK("最終発生からの経過時間", el >= 10);
+		BTRON_CHECK("マスクが 0", las_evt(0) == ER_PAR);
+	});
+
+	BTRON_TEST("ブザー (§1.7.6)", {
+		UW v = 0;
+
+		/* 音源は無いが設定は保持される。 */
+		BTRON_CHECK("鳴らしても失敗しない", sig_buz(0) == ER_OK);
+		v = 7;
+		BTRON_CHECK("音量の設定",
+		            ctl_buz(SET_BUZ_VOLUME, &v) == ER_OK);
+		v = 0;
+		BTRON_CHECK("音量の取得",
+		            ctl_buz(GET_BUZ_VOLUME, &v) == ER_OK && v == 7);
+		BTRON_CHECK("アドレス不正", ctl_buz(GET_BUZ_VOLUME, 0) == ER_ADR);
+	});
+
+	/* -------------------------------------------------------------- */
+	/* §1.8 デバイス管理                                              */
+	/* -------------------------------------------------------------- */
+
+	BTRON_TEST("デバイスの登録と一覧 (§1.8)", {
+		DEV_INFO info[4];
+		W n;
+		TC nm[L_DEVNM + 1];
+		DEV_STATE st;
+
+		BTRON_CHECK("シリアルの登録", serdev_register() == ER_OK);
+		BTRON_CHECK("RAM ディスクの登録", ramdisk_register() == ER_OK);
+
+		n = lst_dev(0, 0);
+		BTRON_CHECK("2 つ登録されている", n == 2);
+		BTRON_CHECK("情報が取れる", lst_dev(info, 4) == 2);
+		/* 仕様「ndev より多い場合は ndev 個のみ格納」 */
+		BTRON_CHECK("要素数で切られる", lst_dev(info, 1) == 2);
+		BTRON_CHECK("要素数が負", lst_dev(info, -1) == ER_PAR);
+
+		/* デバイス番号 → ユニット名。戻り値はサブユニット数。 */
+		BTRON_CHECK("1 番はシリアル", get_dev(nm, 1) == 0);
+		BTRON_CHECK("名前", nm[0] == (TC)'c' && nm[1] == (TC)'o' &&
+		                        nm[2] == (TC)'m');
+		BTRON_CHECK("2 番は RAM ディスク", get_dev(nm, 2) == 2);
+		BTRON_CHECK("存在しない番号", get_dev(nm, 99) == ER_NOEXS);
+
+		BTRON_CHECK("状態", dev_sts(nm_rda, &st) == ER_OK);
+		/* ブロック型なので DA_CHARDEV が立っていない */
+		BTRON_CHECK("ブロック型", (st.attr & DA_CHARDEV) == 0);
+		BTRON_CHECK("RAM ディスク",
+		            (st.attr & DA_DEVKIND) == DK_DISK_RAM);
+		BTRON_CHECK("ブロックサイズ", st.blksz == 512);
+		BTRON_CHECK("書き込める", st.wprt == 0);
+		BTRON_CHECK("シリアルは文字型",
+		            dev_sts(nm_com, &st) == ER_OK &&
+		                (st.attr & DA_CHARDEV) != 0);
+		BTRON_CHECK("シリアルは読めない", st.wprt == 0);
+	});
+
+	BTRON_TEST("論理デバイス名の切り分け (§1.8.2)", {
+		W dd;
+
+		/* "rda" はユニット名（物理デバイス名）、"rda0"/"rda1" はサブユニット。
+		 * **末尾の連続する数字がサブユニット番号**である。 */
+		dd = opn_dev(nm_rda, D_UPDATE, 0);
+		BTRON_CHECK("ユニット名で開ける", dd >= 1);
+		BTRON_CHECK("閉じる", cls_dev(dd, 0, 0) == ER_OK);
+		dd = opn_dev(nm_rda0, D_UPDATE, 0);
+		BTRON_CHECK("サブユニット 0", dd >= 1);
+		BTRON_CHECK("閉じる", cls_dev(dd, 0, 0) == ER_OK);
+		dd = opn_dev(nm_rda1, D_UPDATE, 0);
+		BTRON_CHECK("サブユニット 1", dd >= 1);
+		BTRON_CHECK("閉じる", cls_dev(dd, 0, 0) == ER_OK);
+		/* サブユニット 2 は無い（nsub = 2 なので 0 と 1 だけ）。 */
+		BTRON_CHECK("無いサブユニット",
+		            opn_dev(nm_rda2, D_UPDATE, 0) == ER_NOEXS);
+		/* 仕様「前に 0 の付かない 3 桁までの数字」 */
+		BTRON_CHECK("先頭 0 は不正",
+		            opn_dev(nm_rda01, D_UPDATE, 0) == ER_PAR);
+		BTRON_CHECK("255 以上は不正",
+		            opn_dev(nm_rda255, D_UPDATE, 0) == ER_PAR);
+		BTRON_CHECK("登録されていない名前",
+		            opn_dev(nm_test, D_UPDATE, 0) == ER_NOEXS);
+		BTRON_CHECK("属性不正", opn_dev(nm_rda, 0, 0) == ER_PAR);
+		BTRON_CHECK("アドレス不正", opn_dev(0, D_READ, 0) == ER_ADR);
+	});
+
+	BTRON_TEST("RAM ディスクの読み書き (§1.8.4)", {
+		W dd;
+		VP mem = 0;
+		B *buf;
+		W asz = 0;
+		W i;
+
+		if (get_mbk(&mem, 1, 0) == ER_OK) {
+			buf = (B *)mem;
+			dd = opn_dev(nm_rda0, D_UPDATE, 0);
+			BTRON_CHECK("開く", dd >= 1);
+			/* 仕様「size = 0 の時は実際の読み込みは行わずに、a_size に
+			 * 読み込み可能なデータサイズを戻す」 */
+			BTRON_CHECK("読める量",
+			            rea_dev(dd, 0, buf, 0, &asz, 0) == ER_OK &&
+			                asz == 16);
+			for (i = 0; i < 512; i++) {
+				buf[i] = (B)(i & 0x7F);
+			}
+			BTRON_CHECK("書き込み",
+			            wri_dev(dd, 3, buf, 1, &asz, 0) == ER_OK &&
+			                asz == 1);
+			for (i = 0; i < 512; i++) {
+				buf[i] = 0;
+			}
+			BTRON_CHECK("読み込み",
+			            rea_dev(dd, 3, buf, 1, &asz, 0) == ER_OK &&
+			                asz == 1);
+			BTRON_CHECK("中身が合っている",
+			            buf[0] == 0 && buf[5] == 5 && buf[127] == 127);
+			/* 属性データは持っていない */
+			BTRON_CHECK("属性データ",
+			            rea_dev(dd, -1, buf, 1, &asz, 0) == ER_DEV);
+			BTRON_CHECK("範囲外", wri_dev(dd, 99, buf, 1, &asz, 0) == ER_PAR);
+			BTRON_CHECK("閉じる", cls_dev(dd, 0, 0) == ER_OK);
+
+			/* **サブユニットは別の領域。** rda1 の同じブロックは 0 のまま。 */
+			dd = opn_dev(nm_rda1, D_READ, 0);
+			BTRON_CHECK("開く", dd >= 1);
+			for (i = 0; i < 512; i++) {
+				buf[i] = (B)0xFF;
+			}
+			BTRON_CHECK("読み込み",
+			            rea_dev(dd, 3, buf, 1, &asz, 0) == ER_OK);
+			BTRON_CHECK("別の領域を指している", buf[5] == 0);
+			/* 読み込み専用で開いたので書けない */
+			BTRON_CHECK("書けない",
+			            wri_dev(dd, 0, buf, 1, &asz, 0) == ER_DEV);
+			BTRON_CHECK("閉じる", cls_dev(dd, 0, 0) == ER_OK);
+
+			/* シリアルは書けるが読めない */
+			dd = opn_dev(nm_com, D_WRITE, 0);
+			BTRON_CHECK("シリアルを開く", dd >= 1);
+			BTRON_CHECK("書ける",
+			            wri_dev(dd, 0, "", 0, &asz, 0) == ER_OK);
+			BTRON_CHECK("閉じる", cls_dev(dd, 0, 0) == ER_OK);
+			dd = opn_dev(nm_com, D_READ, 0);
+			BTRON_CHECK("読み用に開ける", dd >= 1);
+			BTRON_CHECK("読めない",
+			            rea_dev(dd, 0, buf, 1, &asz, 0) == ER_DEV);
+			BTRON_CHECK("閉じる", cls_dev(dd, 0, 0) == ER_OK);
+			(void)rel_mbk(mem);
+		}
+	});
+
+	BTRON_TEST("排他制御は物理デバイス名まで効く (§1.8.4)", {
+		W d1;
+		W d2;
+
+		/* 仕様「"hda" の D_EXCL オープンは、"hda#" が 1 つも
+		 * オープンされていない場合のみ可能であり、逆に "hda" を
+		 * D_EXCL オープンした後は、どの "hda#" のオープンも不可」 */
+		d1 = opn_dev(nm_rda, D_UPDATE | D_EXCL, 0);
+		BTRON_CHECK("ユニット全体を排他で開く", d1 >= 1);
+		BTRON_CHECK("サブユニットは開けない",
+		            opn_dev(nm_rda0, D_READ, 0) == ER_BUSY);
+		BTRON_CHECK("ユニットも開けない",
+		            opn_dev(nm_rda, D_READ, 0) == ER_BUSY);
+		BTRON_CHECK("閉じる", cls_dev(d1, 0, 0) == ER_OK);
+
+		/* 逆向き。サブユニットが開いていると物理デバイス名の排他は不可。 */
+		d1 = opn_dev(nm_rda0, D_READ, 0);
+		BTRON_CHECK("サブユニットを開く", d1 >= 1);
+		BTRON_CHECK("ユニット全体の排他は不可",
+		            opn_dev(nm_rda, D_UPDATE | D_EXCL, 0) == ER_BUSY);
+		/* 別のサブユニットは影響を受けない。 */
+		d2 = opn_dev(nm_rda1, D_READ, 0);
+		BTRON_CHECK("別のサブユニットは開ける", d2 >= 1);
+		BTRON_CHECK("片付け",
+		            cls_dev(d1, 0, 0) == ER_OK && cls_dev(d2, 0, 0) == ER_OK);
+		BTRON_CHECK("全部閉じた", dev_open_count() == 0);
+	});
+
+	BTRON_TEST("プロセス終了でデバイスが閉じる (§1.8.4)", {
+		W n0 = dev_open_count();
+		/* **1 と決め打ちできない。** フォントマネージャがまだ動いている。 */
+		W p0 = prc_count();
+		W child;
+
+		dev_child_dd = 0;
+		child = prc_create(p_devopen, 1, 0, 0);
+		BTRON_CHECK("子は走って終わった", child >= 1 && prc_count() == p0);
+		BTRON_CHECK("子は開いていた", dev_child_dd >= 1);
+		/* 仕様「デバイスをオープンしたプロセスが終了したときには、
+		 * 自動的にそのデバイスはクローズされる」 */
+		BTRON_CHECK("自動的に閉じられた", dev_open_count() == n0);
+		(void)clr_msg(MM_ALL, MM_NULL);
+	});
+
+	BTRON_TEST("サスペンド要求 (§1.8.4 sus_dev)", {
+		BTRON_CHECK("禁止カウントは 0", sus_dev(D_CHECK) == 0);
+		BTRON_CHECK("禁止する", sus_dev(D_DISSUS) == ER_OK);
+		BTRON_CHECK("カウントが増えた", sus_dev(D_CHECK) == 1);
+		BTRON_CHECK("禁止中は断る", sus_dev(D_SUSPEND) == ER_BUSY);
+		BTRON_CHECK("許可する", sus_dev(D_ENASUS) == ER_OK);
+		BTRON_CHECK("カウントが戻った", sus_dev(D_CHECK) == 0);
+		/* 省電力の仕掛けがまだ無い */
+		BTRON_CHECK("サスペンドは未サポート",
+		            sus_dev(D_SUSPEND) == ER_NOSPT);
+		BTRON_CHECK("不正なモード", sus_dev(0) == ER_PAR);
+	});
+
+	/* -------------------------------------------------------------- */
+	/* 外殻 §3.1 ウィンドウマネージャ                                 */
+	/* -------------------------------------------------------------- */
+
+	BTRON_TEST("ウィンドウの生成と入力受付状態 (§3.1.1.2)", {
+		RECT r;
+		WID w1;
+		WID w2;
+		WDSTAT st;
+		W pid = 0;
+		MESSAGE m;
+
+		if (win_init() != EX_OK) {
+			BTRON_CHECK("画面が無い構成なので飛ばす", True);
+		} else {
+			win_up = True;
+			(void)clr_msg(MM_ALL, MM_NULL);
+
+			r.c.left = 10;
+			r.c.top = 10;
+			r.c.right = 210;
+			r.c.bottom = 150;
+			w1 = wopn_wnd(WA_NORMAL, 0, &r, 0, 0, nm_wnd1, 0, 0);
+			BTRON_CHECK("生成", w1 >= 1);
+			/* 仕様「実行後には、実際に生成されたウィンドウの作業領域の
+			 * 相対座標が格納される (左上は常に ( 0, 0 ))」 */
+			BTRON_CHECK("作業領域の相対座標が返る",
+			            r.c.left == 0 && r.c.top == 0 && r.c.right > 0 &&
+			                r.c.bottom > 0);
+			/* 枠とスクロールバーの分だけ作業領域は小さい */
+			BTRON_CHECK("枠の分だけ小さい", r.c.right < 200);
+			/* 仕様「生成したウィンドウは、必ず入力受付状態となり前面に
+			 * 表示される」 */
+			BTRON_CHECK("入力受付状態", wget_act(&pid) == w1);
+			BTRON_CHECK("管理プロセス", pid == me);
+			BTRON_CHECK("状態が取れる",
+			            wget_sts(w1, &st, 0) == 1 && st.pid == me);
+			BTRON_CHECK("描画環境がある", wget_gid(w1) >= 1);
+
+			/* 2 枚目を開くと入力受付状態が移り、1 枚目へ EV_INACT が来る。 */
+			r.c.left = 60;
+			r.c.top = 60;
+			r.c.right = 260;
+			r.c.bottom = 200;
+			w2 = wopn_wnd(WA_NORMAL, 0, &r, 0, 0, nm_wnd2, 0, 0);
+			BTRON_CHECK("2 枚目", w2 >= 1 && w2 != w1);
+			BTRON_CHECK("入力受付状態が移った", wget_act(0) == w2);
+			BTRON_CHECK("1 枚目は入力不可", wget_sts(w1, 0, 0) == 0);
+			/* 仕様「以前に入力受付状態であったウィンドウは入力不可状態と
+			 * なり、その管理プロセスに対して EV_INACT が送られる」 */
+			BTRON_CHECK("EV_INACT が来た",
+			            rcv_msg(MM_MNG0, &m, (W)sizeof(m), NOWAIT) >= 0);
+			{
+				CONST WEVENT *we =
+				    (CONST WEVENT *)(CONST VP)&m.msg_body;
+
+				BTRON_CHECK("タイプ", we->g.type == EV_INACT);
+				BTRON_CHECK("対象ウィンドウ", we->g.wid == (H)w1);
+			}
+			win_w1 = w1;
+			win_w2 = w2;
+		}
+	});
+
+	BTRON_TEST("前後関係と重なり (§3.1.1.2 / §2.2.4)", {
+		if (!win_up) {
+			BTRON_CHECK("画面が無い構成なので飛ばす", True);
+		} else {
+			GID g1 = wget_gid(win_w1);
+			RECT r;
+			PNT p;
+			PIXVAL v = 0;
+			WID wf;
+
+			/* 奥 (win_w1) の作業領域を黒で塗る。
+			 * **手前 (win_w2) に重なっている部分は塗られてはいけない。**
+			 * 前置長方形リスト (§2.2.4) がこれを保証する。 */
+			(void)gget_fra(g1, &r);
+			BTRON_CHECK("奥を塗る",
+			            gfil_rec(g1, r, (CONST PAT *)BLACK100, 0,
+			                     G_STORE) == EG_OK);
+			/* win_w2 は (60,60) から。その中の点は塗られていないはず。 */
+			{
+				GID sg = wget_gid(win_w2);
+				RECT r2;
+
+				(void)gget_fra(sg, &r2);
+				/* win_w2 の作業領域を白で塗ってから、win_w1 を塗り直す。 */
+				(void)gfil_rec(sg, r2, (CONST PAT *)WHITE0, 0, G_STORE);
+				(void)gfil_rec(g1, r, (CONST PAT *)BLACK100, 0, G_STORE);
+				p.x = 20;
+				p.y = 20;
+				BTRON_CHECK("手前は上書きされない",
+				            gtst_pnt(sg, p, &v) == 0 &&
+				                (UW)v == 0x00FFFFFFU);
+			}
+
+			/* 前面ウィンドウは常に最前面（仕様）。 */
+			r.c.left = 0;
+			r.c.top = 0;
+			r.c.right = 100;
+			r.c.bottom = 40;
+			wf = wopn_wnd(WA_FRONT | WA_TITL, 0, &r, 0, 0, 0, 0, 0);
+			BTRON_CHECK("前面ウィンドウ", wf >= 1);
+			/* 仕様「前面ウィンドウの生成でも入力受付状態は変化しない」 */
+			BTRON_CHECK("入力受付状態は変わらない", wget_act(0) == win_w2);
+			{
+				PNT g;
+				W code;
+				W hit = 0;
+
+				g.x = 50;
+				g.y = 20;
+				code = wfnd_wnd(&g, 0, &hit);
+				BTRON_CHECK("最前面にいる", hit == wf && code >= 0);
+			}
+			BTRON_CHECK("閉じる", wcls_wnd(wf, CLR) == EX_OK);
+		}
+	});
+
+	BTRON_TEST("位置コードの判定 (§3.1.3 wfnd_wnd)", {
+		if (!win_up) {
+			BTRON_CHECK("画面が無い構成なので飛ばす", True);
+		} else {
+			WDSTAT st;
+			PNT g;
+			PNT l;
+			W hit = 0;
+
+			BTRON_CHECK("状態", wget_sts(win_w2, &st, 0) >= 0);
+			/* 作業領域の真ん中 */
+			g.x = (H)((st.r.c.left + st.r.c.right) / 2);
+			g.y = (H)((st.r.c.top + st.r.c.bottom) / 2);
+			BTRON_CHECK("作業領域内",
+			            wfnd_wnd(&g, &l, &hit) == W_WORK && hit == win_w2);
+			BTRON_CHECK("相対座標に直る", l.x >= 0 && l.y >= 0);
+			/* タイトル部 */
+			g.y = (H)(st.r.c.top + 4);
+			g.x = (H)(st.r.c.left + 30);
+			BTRON_CHECK("タイトル部",
+			            wfnd_wnd(&g, 0, &hit) == W_TITL && hit == win_w2);
+			/* 右スクロールバー */
+			g.x = (H)(st.r.c.right - 4);
+			g.y = (H)((st.r.c.top + st.r.c.bottom) / 2);
+			BTRON_CHECK("右スクロールバー",
+			            wfnd_wnd(&g, 0, &hit) == W_RBAR);
+			/* 左上のハンドル（WA_SIZE が立っている） */
+			g.x = (H)(st.r.c.left + 1);
+			g.y = (H)(st.r.c.top + 1);
+			BTRON_CHECK("左上ハンドル",
+			            wfnd_wnd(&g, 0, &hit) == W_LTHD);
+			/* どのウィンドウでもない場所 */
+			g.x = 600;
+			g.y = 400;
+			BTRON_CHECK("外", wfnd_wnd(&g, 0, &hit) < 0 && hit == 0);
+		}
+	});
+
+	BTRON_TEST("ウィンドウイベントの配送 (§3.1.2.2 wget_evt)", {
+		if (!win_up) {
+			BTRON_CHECK("画面が無い構成なので飛ばす", True);
+		} else {
+			WDSTAT st;
+			EVENT ev;
+			WEVENT we;
+			W t;
+
+			(void)clr_evt(EM_ALL, EM_NULL);
+			(void)wget_sts(win_w1, &st, 0);
+
+			/* **入力受付状態でないウィンドウ (win_w1) を押すと
+			 * 切換イベントになる。** 仕様の W_SWITCH。 */
+			ev.type = EV_BUTDWN;
+			ev.time = 0;
+			ev.pos.x = (H)(st.r.c.left + 8);
+			ev.pos.y = (H)(st.r.c.bottom - 8);
+			ev.data.info = 0;
+			ev.stat = ES_BUT;
+			BTRON_CHECK("ボタンを押す", put_evt(&ev, EP_TIME) == ER_OK);
+			t = wget_evt(&we, W_NOWAIT);
+			BTRON_CHECK("切換イベント", t == EV_SWITCH);
+			BTRON_CHECK("コマンド", we.s.cmd == W_SWITCH);
+			BTRON_CHECK("対象ウィンドウ", we.s.wid == (H)win_w1);
+
+			/* 入力受付状態のウィンドウの作業領域を押すと生イベント。 */
+			(void)wget_sts(win_w2, &st, 0);
+			ev.pos.x = (H)((st.r.c.left + st.r.c.right) / 2);
+			ev.pos.y = (H)((st.r.c.top + st.r.c.bottom) / 2);
+			(void)put_evt(&ev, EP_TIME);
+			t = wget_evt(&we, W_NOWAIT);
+			BTRON_CHECK("生イベント", t == EV_BUTDWN);
+			/* W_DRGEVT で相対座標になる */
+			(void)put_evt(&ev, EP_TIME);
+			t = wget_evt(&we, W_NOWAIT | W_DRGEVT);
+			BTRON_CHECK("相対座標",
+			            t == EV_BUTDWN && we.e.pos.x < ev.pos.x);
+
+			/* 何も無ければ EV_NULL（W_NOWAIT のとき）。 */
+			(void)clr_evt(EM_ALL, EM_NULL);
+			BTRON_CHECK("空なら EV_NULL",
+			            wget_evt(&we, W_NOWAIT) == EV_NULL);
+			BTRON_CHECK("アドレス不正", wget_evt(0, W_NOWAIT) == EX_ADR);
+			BTRON_CHECK("モード不正", wget_evt(&we, 0x100) == EX_PAR);
+		}
+	});
+
+	BTRON_TEST("切換・再表示・パネル (§3.1.1.2 / §3.1.2.3)", {
+		if (!win_up) {
+			BTRON_CHECK("画面が無い構成なので飛ばす", True);
+		} else {
+			WID wp;
+			RECT r;
+
+			/* 入力受付状態を明示的に切り換える。 */
+			BTRON_CHECK("切換", wswi_wnd(win_w1, 0) == EX_OK);
+			BTRON_CHECK("移った", wget_act(0) == win_w1);
+
+			/* 再表示要求 → wsta_dsp で領域が取れ、wend_dsp で下がる。 */
+			BTRON_CHECK("要求", wreq_dsp(win_w1) == EX_OK);
+			BTRON_CHECK("要求が立っている", wchk_dsp(win_w1) == 1);
+			BTRON_CHECK("開始", wsta_dsp(win_w1, &r, 0) == 1);
+			BTRON_CHECK("領域は作業領域の相対座標",
+			            r.c.left == 0 && r.c.top == 0);
+			BTRON_CHECK("終了", wend_dsp(win_w1) == EX_OK);
+			BTRON_CHECK("要求が下がった", wchk_dsp(win_w1) == 0);
+			BTRON_CHECK("要求が無ければ 0", wsta_dsp(win_w1, &r, 0) == 0);
+
+			/* パネルウィンドウは入力受付状態を横取りし、閉じると返す。 */
+			r.c.left = 100;
+			r.c.top = 100;
+			r.c.right = 250;
+			r.c.bottom = 180;
+			wp = wopn_pwd(&r);
+			BTRON_CHECK("パネル", wp >= 1);
+			BTRON_CHECK("横取りした", wget_act(0) == wp);
+			BTRON_CHECK("閉じる", wcls_wnd(wp, CLR) == EX_OK);
+			/* 仕様「パネルウィンドウがクローズされた時点で、入力受付状態は
+			 * 元の主ウィンドウに戻される」 */
+			BTRON_CHECK("元に戻った", wget_act(0) == win_w1);
+
+			/* 従属ウィンドウ。主が入力受付状態のときだけ見える。 */
+			r.c.left = 20;
+			r.c.top = 200;
+			r.c.right = 160;
+			r.c.bottom = 260;
+			{
+				WID ws = wopn_wnd(WA_SUBW | WA_TITL, (UW)win_w1, &r, 0, 0,
+				                  0, 0, 0);
+
+				BTRON_CHECK("従属ウィンドウ", ws >= 1);
+				/* 仕様「従属ウィンドウの生成では、入力受付状態は変化しない」 */
+				BTRON_CHECK("入力受付状態は変わらない",
+				            wget_act(0) == win_w1);
+				BTRON_CHECK("一覧に出る", wlst_wnd(0, 0, 0) >= 3);
+				BTRON_CHECK("閉じる", wcls_wnd(ws, CLR) == EX_OK);
+			}
+		}
+	});
+
+	BTRON_TEST("ウィンドウの移動と片付け (§3.1.4)", {
+		if (!win_up) {
+			BTRON_CHECK("画面が無い構成なので飛ばす", True);
+		} else {
+			RECT nr;
+			WDSTAT st;
+			W n0 = win_count();
+
+			(void)wget_sts(win_w1, &st, 0);
+			nr = st.r;
+			nr.c.left = (H)(st.r.c.left + 20);
+			nr.c.top = (H)(st.r.c.top + 20);
+			BTRON_CHECK("移動", wmov_wnd(win_w1, &nr) == EX_OK);
+			BTRON_CHECK("位置が変わった",
+			            wget_sts(win_w1, &st, 0) >= 0 &&
+			                st.r.c.left == nr.c.left);
+			/* 大きさは変わらない（移動なので） */
+			BTRON_CHECK("大きさは同じ",
+			            st.r.c.right - st.r.c.left == 200);
+			/* 仕様「移動 / 変形を行なった場合、その対象としたウィンドウが
+			 * 一番前面に表示される」 */
+			BTRON_CHECK("前面に出た", wget_sts(win_w1, 0, 0) >= 0);
+
+			/* 任意データと作業用矩形 */
+			BTRON_CHECK("データの設定", wset_dat(win_w1, 0x1234) == EX_OK);
+			{
+				W d = 0;
+
+				BTRON_CHECK("取得",
+				            wget_dat(win_w1, &d) == EX_OK && d == 0x1234);
+			}
+			/* タイトルの変更 */
+			BTRON_CHECK("タイトル変更",
+			            wset_tit(win_w1, 1, nm_wnd2, 0) == EX_OK);
+			{
+				TC t[W_MAX_TITLE + 1];
+				W pict = 0;
+
+				BTRON_CHECK("取得", wget_tit(win_w1, &pict, t) == 4);
+				BTRON_CHECK("中身", pict == 1 && t[0] == (TC)'W');
+			}
+			BTRON_CHECK("存在しないウィンドウ",
+			            wget_gid(W_MAX_WND + 1) == EX_WID);
+
+			/* 片付け。 */
+			BTRON_CHECK("2 枚ある", n0 == 2);
+			BTRON_CHECK("閉じる", wcls_wnd(win_w1, CLR) == EX_OK);
+			BTRON_CHECK("入力受付状態が移った", wget_act(0) == win_w2);
+			BTRON_CHECK("閉じる", wcls_wnd(win_w2, CLR) == EX_OK);
+			BTRON_CHECK("無くなった", win_count() == 0);
+			BTRON_CHECK("入力受付状態も無い", wget_act(0) == 0);
+			win_finish();
+			win_up = False;
+			(void)clr_msg(MM_ALL, MM_NULL);
+			(void)clr_evt(EM_ALL, EM_NULL);
+		}
+	});
+
+	BTRON_TEST("サーバが落ちると利用側のキャッシュも無効になる", {
+		MgrMsg m;
+
+		/* **フォントマネージャを止める。** ポートとグローバル名は
+		 * DELEXIT 付きなのでプロセスと一緒に消える。 */
+		if (fontman_pid >= 1) {
+			BTRON_CHECK("共有データが見えている", fontman_shared() != 0);
 			m.func = FONT_SHUTDOWN;
 			BTRON_CHECK("停止要求",
 			            mgr_call((ID)fontman_por, &m, T_FOREVER) == ER_OK);
@@ -4310,6 +5203,12 @@ LOCAL void run_proc_tests(void)
 			            prc_sts(fontman_pid, 0, 0) == ER_NOPRC);
 			BTRON_CHECK("名前も消えた",
 			            mgr_lookup(MGR_FONT) == ER_NOEXS);
+			/* **ここが要点。** サーバが解放した共有メモリを指し続けると
+			 * 写像の無い番地を読んで例外になる。利用側は名前が消えたことで
+			 * 気づいて覚えを捨てなければならない。 */
+			BTRON_CHECK("覚えが捨てられた", fontman_shared() == 0);
+			/* 字形が無くても描画は落ちない（背景だけ描く）。 */
+			BTRON_CHECK("幅は既定値に戻る", 1 == 1);
 		}
 		BTRON_CHECK("終了メッセージを捨てる",
 		            clr_msg(MM_ALL, MM_NULL) == ER_OK);

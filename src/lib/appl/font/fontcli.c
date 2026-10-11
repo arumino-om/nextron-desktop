@@ -87,7 +87,18 @@ EXPORT CONST FontShared *fontman_shared(void)
 	MgrMsg m;
 
 	if (cached != 0) {
-		return cached; /* 2 回目以降は IPC を起こさない */
+		/* **覚えた置き場がまだ生きているか確かめる。**
+		 *
+		 * サーバが落ちると共有メモリは解放される。覚えたアドレスを
+		 * そのまま使うと、写像が無くなった番地を読んで例外になる。
+		 *
+		 * サーバのポートはグローバル名に DELEXIT 付きで登録してあるので、
+		 * **名前が消えていればサーバは死んでいる**。名前を引くだけなので
+		 * IPC は起きず、文字ごとに呼ばれても重くない。 */
+		if (mgr_lookup(MGR_FONT) >= 1) {
+			return cached;
+		}
+		cached = 0;
 	}
 	m.func = FONT_GET_INF;
 	m.arg[0] = 0;

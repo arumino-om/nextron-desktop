@@ -201,6 +201,7 @@ LOCAL void init_fields(DEnv *e)
 	e->frame = e->bmp.bounds;  /* ビットマップの bounds */
 	e->visible = e->bmp.bounds;
 	e->has_clip = False;       /* 未定義 */
+	e->nfore = 0;              /* 前置長方形リストも未定義 */
 	e->chfgc = COL_BLACK;      /* 前景：黒(0x10000000) */
 	e->chbgc = COL_WHITE;      /* 背景：白(0x10FFFFFF) */
 	e->chdir = TORIGHT;
@@ -643,6 +644,47 @@ EXPORT ERR gget_vis(GID gid, RECT *rp)
 		return EG_ADR;
 	}
 	*rp = e->visible;
+	return EG_OK;
+}
+
+EXPORT ERR gset_for(GID gid, CONST RLIST *rlp)
+{
+	DEnv *e = dp_get(gid);
+	CONST RLIST *p;
+	W n = 0;
+
+	if (e == 0) {
+		return EG_GID;
+	}
+	for (p = rlp; p != 0 && n < DP_MAX_FORE; p = p->next) {
+		if (dp_rect_empty(&p->comp)) {
+			continue; /* 空の長方形は意味を持たない */
+		}
+		e->fore[n++] = p->comp;
+	}
+	if (p != 0) {
+		/* 入り切らなかった。**途中まで設定した状態にはしない** —
+		 * 手前のウィンドウを 1 つ取りこぼすと、そこを上書きしてしまう。 */
+		e->nfore = 0;
+		return EG_LIMIT;
+	}
+	e->nfore = n;
+	return EG_OK;
+}
+
+EXPORT ERR gget_for(GID gid, RLIST *rlp)
+{
+	DEnv *e = dp_get(gid);
+	RLIST *p = rlp;
+	W i;
+
+	if (e == 0) {
+		return EG_GID;
+	}
+	for (i = 0; i < e->nfore && p != 0; i++) {
+		p->comp = e->fore[i];
+		p = p->next;
+	}
 	return EG_OK;
 }
 
