@@ -118,6 +118,9 @@ def main() -> int:
                          "arm64 で ACPI を切り Device Tree を使わせるなら virt,acpi=off")
     ap.add_argument("--extra", action="append", default=[], metavar="ARG",
                     help="QEMU に素通しする引数（複数可）")
+    ap.add_argument("--expect-exit", type=int, default=None, metavar="N",
+                    help="この終了コードを正常とみなす。"
+                         "わざと落として挙動を見る検査（緊急画面など）で使う")
     args = ap.parse_args()
 
     if not args.image.exists():
@@ -154,6 +157,8 @@ def main() -> int:
         problems.append(f"{args.timeout} 秒でタイムアウトした")
     # x86_64 の isa-debug-exit は (code << 1) | 1 を返すので 1 は正常終了。
     ok_rc = (0,) if args.arch == "arm64" else (0, 1)
+    if args.expect_exit is not None:
+        ok_rc = (args.expect_exit,)
     if not timed_out and rc not in ok_rc:
         problems.append(f"終了コード {rc}")
     for s in args.expect:

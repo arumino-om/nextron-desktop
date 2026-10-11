@@ -31,6 +31,8 @@ TRON Forum のいずれとも関係はなく、これらによる承認も受け
 > 時間管理に加え、外殻サーバの IPC の土台になるランデブ（周辺核 §1.3）も
 > 動きます。残りはタスク例外と SMP、それに周辺核（Phase 2）です。
 > **画面にかな・漢字が出ます**（GNU Unifont をビルド時に取得。B8）。
+> 例外が起きると画面を占有して情報を出す**緊急画面**も動きます — 外殻の
+> 協力を必要としないので、ウィンドウマネージャが落ちても使えます。
 > x86_64 は HAL を型検査しているだけで未検証です。
 
 ## 開発環境の構築
@@ -82,7 +84,7 @@ cmake --preset x86_64  && cmake --build --preset x86_64
 ### 実行
 
 ```sh
-ctest --preset arm64   # 直接起動 / UEFI(ACPI) / Device Tree / GICv3+SMP / GOP の 7 通り
+ctest --preset arm64   # 直接起動 / UEFI(ACPI) / DT / GICv3+SMP / GOP / 緊急画面 の 8 通り
 
 python3 tools/run_qemu.py --arch arm64 --uefi --interactive build/arm64/btron-arm64.img
 python3 tools/run_qemu.py --arch arm64 --interactive        build/arm64/btron-arm64.elf

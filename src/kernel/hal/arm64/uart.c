@@ -65,32 +65,66 @@ EXPORT void hal_console_init(void)
 	 * 実機では分周比とライン制御の設定が要る。 */
 }
 
+/* 出力の複製先。画面コンソールが登録する。 */
+LOCAL void (*tee)(CONST B *s);
+
+/* hal_console_puts() の中にいる間は putc 側で複製しない。
+ * 二重に出るのを防ぐためと、**UTF-8 の途中で切らない**ため。
+ * 画面コンソールは NUL 終端の文字列から UTF-8 を切り出すので、
+ * 1 バイトずつ渡すとマルチバイト文字が壊れる。 */
+LOCAL Bool in_puts = False;
+
+LOCAL void tee_char(B c);
+
 EXPORT void hal_console_putc(B c)
 {
 	while (mmio_read(PL011_FR) & FR_TXFF) {
 		/* 送信 FIFO が空くまで待つ */
 	}
 	mmio_write(PL011_DR, (UW)(UB)c);
+	tee_char(c);
 }
-
-/* 出力の複製先。画面コンソールが登録する。 */
-LOCAL void (*tee)(CONST B *s);
 
 EXPORT void hal_console_tee(void (*fn)(CONST B *s))
 {
 	tee = fn;
 }
 
+/* putc 単体で出された文字も複製する。
+ *
+ * **これが無いと数値が画面に出ない。** 例外の報告やテストの出力は
+ * 「ラベルを puts、数字を putc」という形で書かれていて、putc の分だけ
+ * 落ちる。実際に緊急画面が `ESR_EL1 = 0x` で止まって気づいた。 */
+LOCAL void tee_char(B c)
+{
+	B buf[2];
+
+	if (tee == 0 || in_puts) {
+		return;
+	}
+	buf[0] = c;
+	buf[1] = '\0';
+	{
+		void (*fn)(CONST B *) = tee;
+
+		tee = 0;
+		fn(buf);
+		tee = fn;
+	}
+}
+
 EXPORT void hal_console_puts(CONST B *s)
 {
 	CONST B *p = s;
 
+	in_puts = True;
 	for (; *p != '\0'; p++) {
 		if (*p == '\n') {
 			hal_console_putc('\r');
 		}
 		hal_console_putc(*p);
 	}
+	in_puts = False;
 	if (tee != 0) {
 		/* 複製先の中で hal_console_puts() を呼ばれると無限に潜る。
 		 * 画面コンソールは呼ばないが、念のため呼び出し中は外す。 */

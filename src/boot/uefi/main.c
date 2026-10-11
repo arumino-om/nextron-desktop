@@ -28,6 +28,9 @@
 /* カーネルイメージのパス。ESP 上に置く。 */
 #define KERNEL_PATH L"\\BTRON\\KERNEL.ELF"
 
+/* 緊急画面の検査用の印。あれば BootInfo.flags に立てる（T4-02）。 */
+#define PANIC_TEST_PATH L"\\BTRON\\PANICTEST"
+
 #define EFI_PAGE_SIZE 4096ULL
 #define PAGES_OF(n) (((n) + EFI_PAGE_SIZE - 1) / EFI_PAGE_SIZE)
 
@@ -144,14 +147,14 @@ typedef struct KernelImage {
 	UD size;  /* バイト数（.bss と起動スタックを含む） */
 } KernelImage;
 
-LOCAL EFI_FILE_PROTOCOL *open_kernel(EFI_HANDLE image)
+/* 起動したボリュームの根。open_kernel() と印の確認で共用する。 */
+LOCAL EFI_FILE_PROTOCOL *volume_root(EFI_HANDLE image)
 {
 	CONST EFI_GUID li_guid = EFI_LOADED_IMAGE_PROTOCOL_GUID;
 	CONST EFI_GUID fs_guid = EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_GUID;
 	EFI_LOADED_IMAGE_PROTOCOL *li = 0;
 	EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *fs = 0;
 	EFI_FILE_PROTOCOL *root = 0;
-	EFI_FILE_PROTOCOL *f = 0;
 	EFI_STATUS st;
 
 	st = BS->HandleProtocol(image, &li_guid, (VP *)&li);
@@ -166,6 +169,31 @@ LOCAL EFI_FILE_PROTOCOL *open_kernel(EFI_HANDLE image)
 	if (EFI_ERROR(st)) {
 		die("OpenVolume", st);
 	}
+	return root;
+}
+
+/* 検査用の印があるか見る。無いのが普通なのでエラーにしない。 */
+LOCAL Bool has_panic_test(EFI_HANDLE image)
+{
+	EFI_FILE_PROTOCOL *root = volume_root(image);
+	EFI_FILE_PROTOCOL *f = 0;
+	EFI_STATUS st;
+
+	st = root->Open(root, &f, (CONST EFI_CHAR16 *)PANIC_TEST_PATH, EFI_FILE_MODE_READ,
+	                0);
+	if (EFI_ERROR(st)) {
+		return False;
+	}
+	f->Close(f);
+	return True;
+}
+
+LOCAL EFI_FILE_PROTOCOL *open_kernel(EFI_HANDLE image)
+{
+	EFI_FILE_PROTOCOL *root = volume_root(image);
+	EFI_FILE_PROTOCOL *f = 0;
+	EFI_STATUS st;
+
 	st = root->Open(root, &f, (CONST EFI_CHAR16 *)KERNEL_PATH, EFI_FILE_MODE_READ, 0);
 	if (EFI_ERROR(st)) {
 		lcon_puts("  探したパス: \\BTRON\\KERNEL.ELF\n");
@@ -545,6 +573,10 @@ EXPORT EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *systab)
 	bi->kernel_size = ki.size;
 	bi->mem_pa = (UD)(VP)regions;
 	bi->efi_system_table = (UD)(VP)systab;
+	bi->flags = has_panic_test(image) ? BI_F_PANIC_TEST : 0;
+	if (bi->flags != 0) {
+		lcon_puts("  印        : PANICTEST（緊急画面の検査用）\n");
+	}
 
 	find_tables(bi);
 	find_framebuffer(bi);

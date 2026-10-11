@@ -15,7 +15,9 @@
  * 3 つのタスクで実行順を記録し、head/tail を取り違えると落ちるようにしてある。
  */
 
+#include <btron/bootinfo.h>
 #include <btron/machdesc.h>
+#include <btron/screen.h>
 #include <btron/test.h>
 
 #include "knl.h"
@@ -1678,6 +1680,56 @@ LOCAL void run_tests(void)
 		BTRON_CHECK("削除", del_por(por1) == ER_OK);
 	});
 
+	BTRON_TEST("緊急画面 (E24 / T4-02 / 規律 R18)", {
+		CONST Screen *sc = screen();
+
+		if (sc == 0) {
+			/* 画面が無い構成。begin は False を返し、何も起きない。 */
+			BTRON_CHECK("画面が無ければ何もしない",
+			            screen_panic_begin("test") == False);
+			BTRON_CHECK("占有していない", screen_panic_active() == False);
+		} else {
+			UW before = screen_get(10, 300);
+			UW after;
+
+			BTRON_CHECK("占有できた", screen_panic_begin("*** 検査 ***") == True);
+			BTRON_CHECK("占有中", screen_panic_active() == True);
+			/* 画面が塗り替わったこと。**画素を読み返して確かめる**ので
+			 * スクリーンショット比較が要らない（Phase 1 ㉗）。 */
+			after = screen_get(10, 300);
+			BTRON_CHECK("面が変わった", after != before || before == 0);
+			BTRON_CHECK("赤い面", after == screen_rgb(0x30, 0x00, 0x08));
+			/* 表題帯が描かれていること */
+			BTRON_CHECK("帯がある", screen_get(400, 4) == screen_rgb(0xB0, 0x10, 0x20));
+
+			/* 以後の hal_console_puts() が緊急画面へ流れる。
+			 * 文字が描かれたかは、行の中に前景色の画素があるかで見る。 */
+			hal_console_puts("緊急画面の検査中\n");
+			{
+				W x;
+				Bool drew = False;
+
+				for (x = 16; x < 400; x++) {
+					W y;
+
+					for (y = 3 * 16 + 4; y < 4 * 16 + 4; y++) {
+						if (screen_get(x, y) == screen_rgb(0xFF, 0xE0, 0xE0)) {
+							drew = True;
+						}
+					}
+				}
+				BTRON_CHECK("文字が描かれた", drew == True);
+			}
+
+			/* 畳んで普通の画面コンソールに戻す。
+			 * 本物のパニックでは戻らないので、ここは検査のためだけ。 */
+			screen_panic_end();
+			BTRON_CHECK("畳んだ", screen_panic_active() == False);
+			screen_clear(screen_rgb(0x10, 0x14, 0x20));
+			hal_console_puts("  （緊急画面の検査が終わり、画面を戻しました）\n");
+		}
+	});
+
 	BTRON_TEST("中心核が動いている", {
 		BTRON_CHECK("起動済み", knl_running() == True);
 		BTRON_CHECK("自タスクがいる", tk_get_tid() >= 1);
@@ -1691,10 +1743,33 @@ LOCAL void run_tests(void)
 
 LOCAL void test_task(INT stacd, VP exinf)
 {
+	W code;
+
 	(void)stacd;
 	(void)exinf;
 	run_tests();
-	hal_exit(btron_test_report());
+	code = btron_test_report();
+
+	/* ESP に印があれば、ここでわざと例外を起こす（T4-02）。
+	 *
+	 * **緊急画面は「例外から呼ばれても描けること」が要件**なので、
+	 * 描画だけ確かめても足りない。例外ベクタ → hal_exception_report →
+	 * screen_panic_begin という本物の経路を 1 度通す。
+	 *
+	 * 検査が全部終わってから落とすので、`[ DONE ] n/n` は先に出ている。
+	 * 終了コードは hal_exit(2)。ctest 側は --expect-exit 2 で受ける。 */
+	if ((bootinfo()->flags & BI_F_PANIC_TEST) != 0) {
+		volatile UW *bad;
+
+		hal_console_puts("\n  PANICTEST の印があるので、ここでわざと例外を"
+		                 "起こします\n");
+		hal_console_puts("  （緊急画面に出しました、と読めれば成功です）\n");
+		/* 上位半分の、何も写像していない番地を読む。
+		 * 変換フォルトになり、同期例外の経路へ入る。 */
+		bad = (volatile UW *)(VP)(BTRON_RESERVED_BASE + 0x1000ULL);
+		code = (W)*bad;
+	}
+	hal_exit(code);
 }
 
 EXPORT void knl_selftest_start(void)

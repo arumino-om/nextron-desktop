@@ -6,6 +6,7 @@
  */
 
 #include <btron/hal.h>
+#include <btron/screen.h>
 
 IMPORT void btron_vectors(void);
 EXPORT void hal_exception_report(UD esr, UD far, UD elr) __attribute__((noreturn));
@@ -64,6 +65,11 @@ EXPORT void hal_exception_report(UD esr, UD far, UD elr)
 {
 	UD ec = (esr >> 26) & 0x3F;
 
+	/* 画面があれば占有して赤い面に切り替える（E24 / T4-02）。
+	 * 以後の hal_console_puts() がそのままそこへ流れるので、
+	 * 報告の本体は 1 行も変えなくてよい。画面が無ければ何も起きない。 */
+	(void)screen_panic_begin("*** 例外 ***");
+
 	hal_console_puts("\n*** 例外 ***\n");
 	hal_console_puts("  ESR_EL1 = ");
 	put_hex(esr);
@@ -104,5 +110,8 @@ EXPORT void hal_exception_report(UD esr, UD far, UD elr)
 		break;
 	}
 
+	if (screen_panic_active()) {
+		hal_console_puts("  緊急画面に出しました（外殻の協力なし。E24 / R18）\n");
+	}
 	hal_exit(2);
 }

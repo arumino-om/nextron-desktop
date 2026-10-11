@@ -59,7 +59,7 @@ def need(prog: str) -> str:
 
 
 def build_esp(esp: Path, size_mib: int, boot_name: str,
-              loader: Path, kernel: Path) -> None:
+              loader: Path, kernel: Path, panic_test: bool = False) -> None:
     """FAT の ESP イメージを作り、ローダとカーネルを入れる。"""
     need("mformat")
     need("mcopy")
@@ -74,6 +74,19 @@ def build_esp(esp: Path, size_mib: int, boot_name: str,
     run(["mmd", "-i", str(esp), "::/EFI", "::/EFI/BOOT", "::/BTRON"])
     run(["mcopy", "-i", str(esp), str(loader), f"::/EFI/BOOT/{boot_name}"])
     run(["mcopy", "-i", str(esp), str(kernel), "::/BTRON/KERNEL.ELF"])
+
+    if panic_test:
+        # 緊急画面 (T4-02) を実機の経路で検査するための印。
+        #
+        # **カーネルもローダも作り直さない。** フォントを含むカーネルは
+        # 再ビルドが重いので、同じバイナリのまま ESP の中身だけ変えて
+        # 経路を切り替える。ローダがこのファイルの有無を見て
+        # BootInfo.flags に BI_F_PANIC_TEST を立てる。
+        marker = esp.with_suffix(".marker")
+        marker.write_text("緊急画面の検査用。この印があると、起動時検査の"
+                          "あとにわざと例外を起こします。\n", encoding="utf-8")
+        run(["mcopy", "-i", str(esp), str(marker), "::/BTRON/PANICTEST"])
+        marker.unlink()
 
 
 def build_disk(out: Path, esp: Path) -> None:
@@ -109,6 +122,9 @@ def main() -> int:
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--esp-size", type=int, default=48,
                     help="ESP の大きさ (MiB)。FAT32 の下限があるので 33 以上")
+    ap.add_argument("--panic-test", action="store_true",
+                    help="緊急画面 (T4-02) の検査用の印を入れる。"
+                         "起動時検査のあとにわざと例外を起こすようになる")
     args = ap.parse_args()
 
     for p in (args.loader, args.kernel):
@@ -118,12 +134,15 @@ def main() -> int:
         sys.exit("--esp-size は 33 以上にしてください (FAT32 の下限)")
 
     esp = args.out.with_suffix(".esp")
-    build_esp(esp, args.esp_size, DEFAULT_BOOT_NAME[args.arch], args.loader, args.kernel)
+    build_esp(esp, args.esp_size, DEFAULT_BOOT_NAME[args.arch], args.loader,
+              args.kernel, args.panic_test)
     build_disk(args.out, esp)
 
     print(f"{args.out}  ({args.out.stat().st_size // (1024 * 1024)}MiB)")
     print(f"  /EFI/BOOT/{DEFAULT_BOOT_NAME[args.arch]}  <- {args.loader}")
     print(f"  /BTRON/KERNEL.ELF        <- {args.kernel}")
+    if args.panic_test:
+        print("  /BTRON/PANICTEST         <- 緊急画面の検査用の印")
     return 0
 
 

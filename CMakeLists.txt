@@ -158,6 +158,7 @@ if(BTRON_ARCH STREQUAL "arm64")
     src/kernel/screen/fb.c
     src/kernel/screen/font.c
     src/kernel/screen/console.c
+    src/kernel/screen/panic.c
     "${BTRON_FONT_DATA}"
     src/kernel/mm/pmem.c)
 
@@ -208,6 +209,28 @@ if(TARGET btron-kernel)
     VERBATIM)
 
   add_custom_target(btron-image ALL DEPENDS "${BTRON_DISK_IMAGE}")
+
+  # 緊急画面 (T4-02) の検査用イメージ。
+  #
+  # **カーネルもローダも同じバイナリ。** ESP に印のファイルを 1 つ足すだけで、
+  # ローダがそれを見て BootInfo.flags を立て、起動時検査のあとに
+  # わざと例外を起こす経路になる。フォントを含むカーネルの再ビルドを
+  # 避けられるのが要点。
+  set(BTRON_PANIC_IMAGE "${CMAKE_CURRENT_BINARY_DIR}/btron-${BTRON_ARCH}-panic.img")
+
+  add_custom_command(
+    OUTPUT "${BTRON_PANIC_IMAGE}"
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/mkimage.py"
+            --arch ${BTRON_ARCH} --panic-test
+            --loader "${BTRON_UEFI_IMAGE}"
+            --kernel "$<TARGET_FILE:btron-kernel>"
+            --out    "${BTRON_PANIC_IMAGE}"
+    DEPENDS "${BTRON_UEFI_IMAGE}" btron-kernel
+            "${CMAKE_CURRENT_SOURCE_DIR}/tools/mkimage.py"
+    COMMENT "緊急画面の検査用ディスクイメージ"
+    VERBATIM)
+
+  add_custom_target(btron-panic-image ALL DEPENDS "${BTRON_PANIC_IMAGE}")
 
   # UEFI 経由の起動。直接起動と違い、メモリマップ・ACPI/DT・GOP が来る。
   #
@@ -267,6 +290,24 @@ if(TARGET btron-kernel)
                 "${BTRON_DISK_IMAGE}")
     endforeach()
   endif()
+
+  # 緊急画面 (T4-02)。**わざと例外を起こして**、画面に出ることを確かめる。
+  #
+  # 落ちるのが正常なので --expect-exit で終了コードを指定する。
+  # ここを普通の検査にすると「落ちなかったこと」しか確かめられない。
+  add_test(NAME panic-screen-${BTRON_ARCH}
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/run_qemu.py"
+            --arch ${BTRON_ARCH} --uefi --timeout 90
+            --extra=-device --extra=ramfb
+            --expect-exit 2
+            --expect "印        : PANICTEST"
+            --expect "[ DONE ]"
+            --expect "わざと例外を起こします"
+            --expect "*** 例外 ***"
+            --expect "データアボート"
+            --expect "緊急画面に出しました"
+            --deny   "[ FAIL ]"
+            "${BTRON_PANIC_IMAGE}")
 
   # ramfb はリニアなフレームバッファを見せる。virtio-gpu は Blt のみで
   # ExitBootServices 後に使えないので、こちらで確かめる。

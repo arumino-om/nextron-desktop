@@ -71,6 +71,7 @@ EXPORT Bool bootinfo_take(UD arg)
 	info.fb.pitch = src->fb.pitch;
 	info.fb.format = src->fb.format;
 	info.efi_system_table = src->efi_system_table;
+	info.flags = src->flags;
 
 	if (src->mem_pa != 0) {
 		UD n = src->mem_count;
