@@ -1,0 +1,359 @@
+/*
+ * sched.c — スケジューラとディスパッチャ
+ *
+ * 優先度ベースのプリエンプティブ方式。同一優先度内は FCFS。
+ * **時分割はしない**（仕様: 優先順位の高いタスクが実行できる状態にある限り、
+ * それより低いタスクは全く実行されない）。ラウンドロビンは tk_rot_rdq。
+ *
+ * 【仕様の細則】同一優先度内の優先順位について、仕様はこう規定している。
+ *
+ *   実行状態 → 実行可能状態（プリエンプト）  同一優先度で**最高**
+ *   実行状態 → 待ち状態 → 待ち解除            同一優先度で**最低**
+ *   強制待ち状態 → 実行できる状態             同一優先度で**最低**
+ *
+ * つまり**プリエンプトは待ち行列の先頭に戻し、待ち解除は末尾に付ける**。
+ * ここを取り違えると、優先度が同じタスクの実行順が仕様と食い違う。
+ * knl_make_ready() の head 引数がこの区別である。
+ */
+
+#include "knl.h"
+
+EXPORT TCB *knl_cur;
+EXPORT TCB knl_idle;
+EXPORT Bool knl_on = False;
+EXPORT W knl_dsp_disabled;
+
+/* 優先度ごとのレディキュー。添字 1..TK_MAX_TSKPRI。 */
+LOCAL Queue ready[TK_MAX_TSKPRI + 1];
+
+/* どのキューに在るかのビットマップ。bit (pri-1)。
+ * TK_MAX_TSKPRI = 32 なので UW 1 枚に収まる。 */
+LOCAL UW ready_map;
+
+/* ------------------------------------------------------------------ */
+/* 待ち行列                                                            */
+/* ------------------------------------------------------------------ */
+
+EXPORT void knl_queue_init(Queue *q, ATR order)
+{
+	q->head = 0;
+	q->tail = 0;
+	q->order = order;
+}
+
+EXPORT Bool knl_queue_empty(CONST Queue *q)
+{
+	return (q->head == 0) ? True : False;
+}
+
+EXPORT void knl_queue_insert_tail(Queue *q, TCB *t)
+{
+	t->queue = q;
+	t->next = 0;
+	t->prev = q->tail;
+	if (q->tail != 0) {
+		q->tail->next = t;
+	} else {
+		q->head = t;
+	}
+	q->tail = t;
+}
+
+LOCAL void queue_insert_head(Queue *q, TCB *t)
+{
+	t->queue = q;
+	t->prev = 0;
+	t->next = q->head;
+	if (q->head != 0) {
+		q->head->prev = t;
+	} else {
+		q->tail = t;
+	}
+	q->head = t;
+}
+
+/* 行列の並び方（TA_TFIFO / TA_TPRI）に従って挿入する。
+ * TA_TPRI でも**同じ優先度の中では FIFO**（後から来た方が後ろ）。 */
+EXPORT void knl_queue_insert(Queue *q, TCB *t)
+{
+	TCB *p;
+
+	if ((q->order & TA_TPRI) == 0) {
+		knl_queue_insert_tail(q, t);
+		return;
+	}
+	for (p = q->head; p != 0; p = p->next) {
+		if (p->pri > t->pri) {
+			break;
+		}
+	}
+	if (p == 0) {
+		knl_queue_insert_tail(q, t);
+		return;
+	}
+	t->queue = q;
+	t->prev = p->prev;
+	t->next = p;
+	if (p->prev != 0) {
+		p->prev->next = t;
+	} else {
+		q->head = t;
+	}
+	p->prev = t;
+}
+
+EXPORT void knl_queue_remove(TCB *t)
+{
+	Queue *q = t->queue;
+
+	if (q == 0) {
+		return;
+	}
+	if (t->prev != 0) {
+		t->prev->next = t->next;
+	} else {
+		q->head = t->next;
+	}
+	if (t->next != 0) {
+		t->next->prev = t->prev;
+	} else {
+		q->tail = t->prev;
+	}
+	t->next = 0;
+	t->prev = 0;
+	t->queue = 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* レディキュー                                                        */
+/* ------------------------------------------------------------------ */
+
+EXPORT void knl_sched_init(void)
+{
+	W i;
+
+	for (i = 0; i <= TK_MAX_TSKPRI; i++) {
+		knl_queue_init(&ready[i], TA_TFIFO);
+	}
+	ready_map = 0;
+	knl_dsp_disabled = 0;
+}
+
+EXPORT void knl_make_ready(TCB *t, Bool head)
+{
+	t->state = TTS_RDY;
+	if (t == &knl_idle) {
+		return; /* アイドルはキューに入れない。常に実行可能扱い */
+	}
+	if (head) {
+		queue_insert_head(&ready[t->pri], t);
+	} else {
+		knl_queue_insert_tail(&ready[t->pri], t);
+	}
+	ready_map |= 1U << (UW)(t->pri - 1);
+}
+
+EXPORT void knl_unready(TCB *t)
+{
+	PRI pri = t->pri;
+
+	if (t->queue != &ready[pri]) {
+		return;
+	}
+	knl_queue_remove(t);
+	if (knl_queue_empty(&ready[pri])) {
+		ready_map &= ~(1U << (UW)(pri - 1));
+	}
+}
+
+EXPORT TCB *knl_highest(void)
+{
+	UW m = ready_map;
+
+	if (m == 0) {
+		return 0;
+	}
+	/* 立っている最下位ビット = 最も小さい優先度番号 = 最高優先度 */
+	return ready[__builtin_ctz(m) + 1].head;
+}
+
+/* ------------------------------------------------------------------ */
+/* ディスパッチャ                                                      */
+/* ------------------------------------------------------------------ */
+
+EXPORT void knl_dispatch(void)
+{
+	TCB *prev = knl_cur;
+	TCB *next;
+
+	/* 中心核が起動する前は切り替えない。knl_start() より前に
+	 * tk_sta_tsk() されたタスクは、レディキューに積まれるだけになる。 */
+	if (!knl_on || knl_dsp_disabled > 0) {
+		return;
+	}
+	next = knl_highest();
+	if (next == 0) {
+		next = &knl_idle;
+	}
+	if (next == prev) {
+		/* 自分がそのまま選ばれた。tk_rot_rdq のようにレディキューへ
+		 * 入れてから呼ばれる場合があるので、入っていたら外して戻す。 */
+		knl_unready(prev);
+		prev->state = TTS_RUN;
+		return;
+	}
+
+	if (prev->state == TTS_RUN) {
+		/* **同一優先度のタスクには奪わせない。**
+		 * 仕様は「異なる優先度では高い方が、同じ優先度では先に実行できる
+		 * 状態になった方が高い優先順位」と規定している。走っている方が
+		 * 先になっているので、同順位の相手に譲る理由がない。
+		 * ここを `!=` で書くと、同優先度のタスクを起動した瞬間に
+		 * 切り替わってしまい FCFS が壊れる。 */
+		if (next->pri >= prev->pri) {
+			return;
+		}
+		if (prev == &knl_idle) {
+			prev->state = TTS_RDY; /* アイドルはキューに入れない */
+		} else {
+			/* プリエンプトは同一優先度の**先頭**に戻る（仕様） */
+			knl_make_ready(prev, True);
+		}
+	}
+	/* prev が TTS_RUN でない = 待ち・休止・自ら譲った。無条件に切り替える。 */
+
+	knl_unready(next);
+	next->state = TTS_RUN;
+	knl_cur = next;
+	hal_ctx_switch(&prev->sp, next->sp);
+	/* 戻ってきた = このタスクが再び選ばれた。割込みは禁止のまま。 */
+}
+
+/* 割込みハンドラの最後に呼ばれる (intc.c)。 */
+EXPORT void knl_dispatch_from_irq(void)
+{
+	if (!knl_on) {
+		return;
+	}
+	knl_dispatch();
+}
+
+EXPORT Bool knl_running(void)
+{
+	return knl_on;
+}
+
+/* ------------------------------------------------------------------ */
+/* 待ちと解除                                                          */
+/* ------------------------------------------------------------------ */
+
+EXPORT ER knl_wait(Queue *q, UW cause, ID wid, TMO tmout)
+{
+	TCB *me = knl_cur;
+
+	me->state = TTS_WAI;
+	me->waitcause = cause;
+	me->wid = wid;
+	me->waitresult = E_OK;
+	me->timeout = (tmout == TMO_FEVR) ? 0 : knl_otm + (SYSTIM)tmout;
+	if (q != 0) {
+		knl_queue_insert(q, me);
+	}
+	knl_unready(me); /* 念のため。RUN なら入っていない */
+	knl_dispatch();
+	return me->waitresult;
+}
+
+EXPORT void knl_wait_release(TCB *t, ER result)
+{
+	knl_queue_remove(t);
+	t->waitresult = result;
+	t->timeout = 0;
+	t->waitcause = 0;
+	t->wid = 0;
+	t->wait_flgptn = 0;
+
+	if ((t->state & TTS_SUS) != 0) {
+		/* 二重待ち → 強制待ち。実行できる状態には戻さない。 */
+		t->state = TTS_SUS;
+		return;
+	}
+	/* 待ち解除は同一優先度で**最低**の優先順位（仕様） */
+	knl_make_ready(t, False);
+}
+
+EXPORT void knl_timeout_check(void)
+{
+	W i;
+
+	for (i = 1; i <= TK_MAX_TSKID; i++) {
+		TCB *t = &knl_tcb[i];
+
+		if (!t->used || (t->state & TTS_WAI) == 0 || t->timeout == 0) {
+			continue;
+		}
+		if (knl_otm < t->timeout) {
+			continue;
+		}
+		/* tk_dly_tsk は時間が来たら正常終了。それ以外はタイムアウト。 */
+		knl_wait_release(t, (t->waitcause == TTW_DLY) ? E_OK : E_TMOUT);
+	}
+}
+
+/* ------------------------------------------------------------------ */
+/* tk_rot_rdq / ディスパッチ禁止                                       */
+/* ------------------------------------------------------------------ */
+
+EXPORT ER tk_rot_rdq(PRI tskpri)
+{
+	UD state;
+	PRI pri;
+
+	if (tskpri < 0 || tskpri > TK_MAX_TSKPRI) {
+		return E_PAR;
+	}
+	state = hal_int_disable();
+	pri = (tskpri == 0) ? knl_cur->pri : tskpri;
+
+	if (pri < 1 || pri > TK_MAX_TSKPRI) {
+		hal_int_restore(state);
+		return E_PAR;
+	}
+	if (knl_cur != &knl_idle && pri == knl_cur->pri) {
+		/* 自分の優先度を回す = 同一優先度の次のタスクに譲る。
+		 * 自タスクは末尾に付く（プリエンプトではないので先頭には戻さない）。 */
+		knl_make_ready(knl_cur, False);
+		knl_dispatch();
+	} else if (!knl_queue_empty(&ready[pri])) {
+		TCB *t = ready[pri].head;
+
+		knl_queue_remove(t);
+		knl_queue_insert_tail(&ready[pri], t);
+		knl_dispatch();
+	}
+	hal_int_restore(state);
+	return E_OK;
+}
+
+EXPORT ER tk_dis_dsp(void)
+{
+	UD state = hal_int_disable();
+
+	knl_dsp_disabled++;
+	hal_int_restore(state);
+	return E_OK;
+}
+
+EXPORT ER tk_ena_dsp(void)
+{
+	UD state = hal_int_disable();
+
+	if (knl_dsp_disabled > 0) {
+		knl_dsp_disabled--;
+	}
+	if (knl_dsp_disabled == 0) {
+		knl_dispatch();
+	}
+	hal_int_restore(state);
+	return E_OK;
+}

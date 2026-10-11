@@ -111,6 +111,19 @@ if(BTRON_ARCH STREQUAL "arm64")
     src/kernel/hal/arm64/vectors.S
     src/kernel/hal/arm64/exception.c
     src/kernel/hal/arm64/timer.c
+    src/kernel/hal/arm64/cpu.c
+    src/kernel/hal/arm64/gic.c
+    src/kernel/hal/arm64/irq.c
+    src/kernel/hal/arm64/context.c
+    src/kernel/hal/arm64/context.S
+    src/kernel/core/sched.c
+    src/kernel/core/task.c
+    src/kernel/core/tasksync.c
+    src/kernel/core/sem.c
+    src/kernel/core/flag.c
+    src/kernel/core/time.c
+    src/kernel/core/intc.c
+    src/kernel/core/selftest.c
     src/kernel/boot/bootinfo.c
     src/kernel/boot/machdesc.c
     src/kernel/boot/fdt.c
@@ -131,6 +144,7 @@ if(BTRON_ARCH STREQUAL "arm64")
             --arch arm64 --timeout 30
             --expect "BTRON3 準拠 OS"
             --expect "QEMU -kernel"
+            --expect "中心核は起動しない"
             --deny   "[ FAIL ]"
             "$<TARGET_FILE:btron-kernel>")
 endif()

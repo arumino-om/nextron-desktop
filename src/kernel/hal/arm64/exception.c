@@ -87,6 +87,15 @@ EXPORT void hal_exception_report(UD esr, UD far, UD elr)
 		hal_console_puts("  データアボート");
 		put_fault(esr);
 		break;
+	case 0x07:
+		/* これで CPACR_EL1.FPEN の設定漏れを見つけた。
+		 * カーネルが明示的に FP を使わなくても、コンテキスト切替が
+		 * d8-d15 を退避するので許可が必要になる (hal_cpu_init)。 */
+		hal_console_puts("  SIMD / 浮動小数点のトラップ（CPACR_EL1.FPEN 未設定）\n");
+		break;
+	case 0x15:
+		hal_console_puts("  SVC（システムコール）\n");
+		break;
 	case 0x16:
 		hal_console_puts("  HVC / SMC\n");
 		break;

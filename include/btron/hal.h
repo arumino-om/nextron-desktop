@@ -11,6 +11,11 @@
 
 #include <btron/typedef.h>
 
+/* --- CPU の起動時設定 ----------------------------------------------
+ * 起動第 1 段のいちばん最初に呼ぶ。MMU より前でよい。 */
+
+IMPORT void hal_cpu_init(void);
+
 /* --- コンソール（起動初期のシリアル出力） ------------------------- */
 
 IMPORT void hal_console_init(void);
@@ -52,6 +57,24 @@ IMPORT void hal_exit(W code) __attribute__((noreturn));
  * ベクタが無いとフォルトが無言のハングになる。起動直後に入れる。 */
 
 IMPORT void hal_exception_init(void);
+
+/* --- タスクコンテキストの切替 --------------------------------------
+ * 中心核のディスパッチャが使う。保存するのは AAPCS64 の呼び出され側保存
+ * レジスタ (x19-x30, d8-d15) と SP だけ。呼び出し側保存レジスタは
+ * 普通の関数呼び出しと同じ扱いなので、呼び出し元が面倒を見ている。
+ *
+ * 割込みハンドラの中から呼んでもよい。その場合、割込み入口で全レジスタを
+ * 退避した上にこのフレームが積まれ、復帰時に逆順に戻る。 */
+
+/* 新しいタスクの初期スタックを作り、切替に渡す SP を返す。
+ * 最初の hal_ctx_switch() で entry(stacd, exinf) が呼ばれるように仕込む。 */
+IMPORT UD hal_ctx_init(UD stack_top, void (*entry)(W stacd, VP exinf), W stacd, VP exinf);
+
+/* *save_sp に現在の SP を保存し、new_sp へ切り替える。 */
+IMPORT void hal_ctx_switch(UD *save_sp, UD new_sp);
+
+/* 保存フレームの大きさ。スタックサイズの検査に使う。 */
+#define HAL_CTX_FRAME_SIZE 0xA0
 
 /* --- 時間の読み出し ------------------------------------------------
  * 中心核の時間管理（BTRON3 §1.3）の土台。いまは単調カウンタの読み出しだけで、

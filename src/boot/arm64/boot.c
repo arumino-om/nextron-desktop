@@ -11,6 +11,8 @@
 
 #include <btron/bootinfo.h>
 #include <btron/hal.h>
+#include <btron/intc.h>
+#include <btron/kernel.h>
 #include <btron/machdesc.h>
 #include <btron/machine.h>
 #include <btron/test.h>
@@ -18,6 +20,9 @@
 
 EXPORT void boot_early(UD arg);
 EXPORT void boot_main(UD arg);
+
+/* src/kernel/core/selftest.c。検査タスクを作って中心核を起動する。戻らない。 */
+IMPORT void knl_selftest_start(void) __attribute__((noreturn));
 
 IMPORT B __kernel_start[];
 IMPORT B __kernel_end[];
@@ -67,6 +72,7 @@ EXPORT void boot_early(UD arg)
 	UD ps;
 	UD pool;
 
+	hal_cpu_init();       /* SIMD/FP のトラップを外す。コンテキスト切替が要求する */
 	hal_console_init();
 	hal_exception_init(); /* これより後のフォルトは無言のハングではなく報告になる */
 
@@ -553,5 +559,31 @@ EXPORT void boot_main(UD arg)
 		}
 	});
 
-	hal_exit(btron_test_report());
+	/* ハードウェア記述が無いと中心核は起動できない。
+	 *
+	 * 割込みコントローラとタイマの位置が分からないので、タイマ割込みも
+	 * ディスパッチも仕掛けられない。規律 R19 により決め打ちはしない。
+	 * QEMU の -kernel 直接起動がこの経路で、ここまでの検査だけで終わる。 */
+	if (machdesc()->source == MD_SRC_NONE) {
+		hal_console_puts("\n  ハードウェア記述が無いので中心核は起動しない\n");
+		hal_console_puts("  （割込みコントローラとタイマの位置が不明。規律 R19）\n");
+		hal_console_puts("  UEFI 経由なら中心核の検査まで走る\n");
+		hal_exit(btron_test_report());
+	}
+
+	BTRON_TEST("中心核の初期化 (D10 / T1-01 / T1-02)", {
+		BTRON_CHECK("knl_init", knl_init() == E_OK);
+		BTRON_CHECK("GIC の版",
+		            hal_intc_version() == 2 || hal_intc_version() == 3);
+		BTRON_CHECK("まだ未起動", knl_running() == False);
+		BTRON_CHECK("タイマ周波数", hal_timer_freq() > 0);
+	});
+
+	/* ここから先は中心核のタスクの中で検査する。
+	 *
+	 * タスクを待ち状態にするシステムコールは**タスク独立部から呼べない**
+	 * （仕様は E_CTX とする）。boot_main はまだどのタスクでもないので、
+	 * 検査タスクを作って起動し、そこで残りを走らせる。
+	 * knl_selftest_start() は戻らず、最後に hal_exit() する。 */
+	knl_selftest_start();
 }
