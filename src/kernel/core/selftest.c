@@ -5303,6 +5303,14 @@ LOCAL void test_task(INT stacd, VP exinf)
 	 *
 	 * 検査が全部終わってから落とすので、`[ DONE ] n/n` は先に出ている。
 	 * 終了コードは hal_exit(2)。ctest 側は --expect-exit 2 で受ける。 */
+	/* ESP に HOLD の印があれば、電源を落とさず画面を残す。
+	 * 手で画面を見るための経路（run_qemu.py --gui）。 */
+	if ((bootinfo()->flags & BI_F_HOLD) != 0) {
+		hal_console_puts("\n  HOLD の印があるので、電源を落とさず画面を"
+		                 "残します\n");
+		win_demo_hold(); /* 戻らない */
+	}
+
 	if ((bootinfo()->flags & BI_F_PANIC_TEST) != 0) {
 		volatile UW *bad;
 

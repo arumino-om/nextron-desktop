@@ -177,6 +177,7 @@ if(BTRON_ARCH STREQUAL "arm64")
     src/subsystems/mgr/manager.c
     src/subsystems/font/fontman.c
     src/subsystems/window/winman.c
+    src/subsystems/window/demo.c
     src/lib/appl/font/fontcli.c
     src/lib/dp/pixel.c
     src/lib/dp/env.c
@@ -253,6 +254,27 @@ if(TARGET btron-kernel)
     VERBATIM)
 
   add_custom_target(btron-panic-image ALL DEPENDS "${BTRON_PANIC_IMAGE}")
+
+  # 手で画面を見るためのイメージ。ESP に HOLD の印を置くだけで、
+  # カーネルもローダも同じものを使う（Phase 1 ㉙）。
+  #
+  #   python3 tools/run_qemu.py --arch arm64 --uefi --gui \
+  #           build/arm64/btron-arm64-gui.img
+  set(BTRON_GUI_IMAGE "${CMAKE_CURRENT_BINARY_DIR}/btron-${BTRON_ARCH}-gui.img")
+
+  add_custom_command(
+    OUTPUT "${BTRON_GUI_IMAGE}"
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/mkimage.py"
+            --arch ${BTRON_ARCH} --hold
+            --loader "${BTRON_UEFI_IMAGE}"
+            --kernel "$<TARGET_FILE:btron-kernel>"
+            --out    "${BTRON_GUI_IMAGE}"
+    DEPENDS "${BTRON_UEFI_IMAGE}" btron-kernel
+            "${CMAKE_CURRENT_SOURCE_DIR}/tools/mkimage.py"
+    COMMENT "画面を手で見るためのディスクイメージ"
+    VERBATIM)
+
+  add_custom_target(btron-gui-image ALL DEPENDS "${BTRON_GUI_IMAGE}")
 
   # UEFI 経由の起動。直接起動と違い、メモリマップ・ACPI/DT・GOP が来る。
   #

@@ -101,13 +101,36 @@ cmake --preset x86_64  && cmake --build --preset x86_64
 32bit と 64bit の暗黙の縮小変換を禁じる設計規律を、文書上の約束ではなく
 ビルドで強制するためです。
 
-ビルドすると次の 3 つができます。
+ビルドすると次のものができます。
 
 | | |
 |---|---|
 | `btron-arm64.elf` | カーネル本体 |
 | `BOOTAA64.EFI` | UEFI ブートローダ（PE/COFF。カーネルとは別のトリプルでビルドされます） |
 | `btron-arm64.img` | 起動可能なディスクイメージ（GPT + ESP） |
+| `btron-arm64-gui.img` | 画面を見るためのイメージ。検査のあと電源を落とさず画面を残します |
+| `btron-arm64-panic.img` | 緊急画面の検査用。わざと例外を起こします |
+
+後ろの 2 つは**カーネルもローダも同じもの**で、ESP に置く印のファイルだけが
+違います（`\BTRON\HOLD` と `\BTRON\PANICTEST`）。フォントを含むカーネルは
+再ビルドが重いので、イメージの中身だけで振る舞いを切り替えています。
+
+### 画面を見る
+
+既定では `-nographic` で動かすので**画面はどこにも出ません**。
+見るには次のどちらかを使います。
+
+```sh
+# 本物の窓を開く。ウィンドウが 2 枚出たまま止まります
+python3 tools/run_qemu.py --arch arm64 --uefi --gui build/arm64/btron-arm64-gui.img
+
+# 窓を開かずに画面を PNG に落とす（表示が無い環境でも、CI でも使える）
+python3 tools/run_qemu.py --arch arm64 --uefi --timeout 30 \
+        --screenshot /tmp/shots build/arm64/btron-arm64-gui.img
+```
+
+`--gui` は終了しないので、閉じるのは窓を閉じるか `Ctrl-C` です。
+`--screenshot` は**変化したフレームだけ**を残します。
 
 ### 実行
 

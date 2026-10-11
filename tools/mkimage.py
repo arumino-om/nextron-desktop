@@ -59,7 +59,8 @@ def need(prog: str) -> str:
 
 
 def build_esp(esp: Path, size_mib: int, boot_name: str,
-              loader: Path, kernel: Path, panic_test: bool = False) -> None:
+              loader: Path, kernel: Path, panic_test: bool = False,
+              hold: bool = False) -> None:
     """FAT の ESP イメージを作り、ローダとカーネルを入れる。"""
     need("mformat")
     need("mcopy")
@@ -86,6 +87,17 @@ def build_esp(esp: Path, size_mib: int, boot_name: str,
         marker.write_text("緊急画面の検査用。この印があると、起動時検査の"
                           "あとにわざと例外を起こします。\n", encoding="utf-8")
         run(["mcopy", "-i", str(esp), str(marker), "::/BTRON/PANICTEST"])
+        marker.unlink()
+
+    if hold:
+        # 起動時検査が終わっても電源を落とさず、画面を残して居座る印。
+        # 手で画面を見るためにある（run_qemu.py --gui）。
+        # これも**カーネルを作り直さない**。
+        marker = esp.with_suffix(".hold")
+        marker.write_text("画面を見るための印。これがあると、起動時検査の"
+                          "あとも電源を落とさず画面を残します。\n",
+                          encoding="utf-8")
+        run(["mcopy", "-i", str(esp), str(marker), "::/BTRON/HOLD"])
         marker.unlink()
 
 
@@ -122,6 +134,9 @@ def main() -> int:
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--esp-size", type=int, default=48,
                     help="ESP の大きさ (MiB)。FAT32 の下限があるので 33 以上")
+    ap.add_argument("--hold", action="store_true",
+                    help="検査のあとも電源を落とさず画面を残す印を入れる。"
+                         "手で画面を見るときに使う")
     ap.add_argument("--panic-test", action="store_true",
                     help="緊急画面 (T4-02) の検査用の印を入れる。"
                          "起動時検査のあとにわざと例外を起こすようになる")
@@ -135,7 +150,7 @@ def main() -> int:
 
     esp = args.out.with_suffix(".esp")
     build_esp(esp, args.esp_size, DEFAULT_BOOT_NAME[args.arch], args.loader,
-              args.kernel, args.panic_test)
+              args.kernel, args.panic_test, args.hold)
     build_disk(args.out, esp)
 
     print(f"{args.out}  ({args.out.stat().st_size // (1024 * 1024)}MiB)")
@@ -143,6 +158,8 @@ def main() -> int:
     print(f"  /BTRON/KERNEL.ELF        <- {args.kernel}")
     if args.panic_test:
         print("  /BTRON/PANICTEST         <- 緊急画面の検査用の印")
+    if args.hold:
+        print("  /BTRON/HOLD              <- 検査後も画面を残す印")
     return 0
 
 

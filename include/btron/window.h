@@ -304,4 +304,9 @@ IMPORT void win_release_process(W pid);
 
 IMPORT W win_count(void); /* 検証用 */
 
+/* 画面を手で見るための常駐デモ。**仕様ではない。**
+ * ESP に `\BTRON\HOLD` があるときだけ、起動時検査の後に呼ばれる。
+ * 戻らない（電源を落とさずに画面を残す）。 */
+IMPORT void win_demo_hold(void) __attribute__((noreturn));
+
 #endif /* __BTRON_WINDOW_H__ */

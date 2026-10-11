@@ -31,6 +31,9 @@
 /* 緊急画面の検査用の印。あれば BootInfo.flags に立てる（T4-02）。 */
 #define PANIC_TEST_PATH L"\\BTRON\\PANICTEST"
 
+/* 検査のあとも電源を落とさず画面を残す印。手で画面を見るためのもの。 */
+#define HOLD_PATH L"\\BTRON\\HOLD"
+
 #define EFI_PAGE_SIZE 4096ULL
 #define PAGES_OF(n) (((n) + EFI_PAGE_SIZE - 1) / EFI_PAGE_SIZE)
 
@@ -173,14 +176,15 @@ LOCAL EFI_FILE_PROTOCOL *volume_root(EFI_HANDLE image)
 }
 
 /* 検査用の印があるか見る。無いのが普通なのでエラーにしない。 */
-LOCAL Bool has_panic_test(EFI_HANDLE image)
+/* ESP に印のファイルが置かれているか見るだけ。
+ * **カーネルを作り直さずに振る舞いを切り替える**ための仕掛け（Phase 1 ㉙）。 */
+LOCAL Bool has_marker(EFI_HANDLE image, CONST EFI_CHAR16 *path)
 {
 	EFI_FILE_PROTOCOL *root = volume_root(image);
 	EFI_FILE_PROTOCOL *f = 0;
 	EFI_STATUS st;
 
-	st = root->Open(root, &f, (CONST EFI_CHAR16 *)PANIC_TEST_PATH, EFI_FILE_MODE_READ,
-	                0);
+	st = root->Open(root, &f, path, EFI_FILE_MODE_READ, 0);
 	if (EFI_ERROR(st)) {
 		return False;
 	}
@@ -573,9 +577,14 @@ EXPORT EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *systab)
 	bi->kernel_size = ki.size;
 	bi->mem_pa = (UD)(VP)regions;
 	bi->efi_system_table = (UD)(VP)systab;
-	bi->flags = has_panic_test(image) ? BI_F_PANIC_TEST : 0;
-	if (bi->flags != 0) {
+	bi->flags = 0;
+	if (has_marker(image, (CONST EFI_CHAR16 *)PANIC_TEST_PATH)) {
+		bi->flags |= BI_F_PANIC_TEST;
 		lcon_puts("  印        : PANICTEST（緊急画面の検査用）\n");
+	}
+	if (has_marker(image, (CONST EFI_CHAR16 *)HOLD_PATH)) {
+		bi->flags |= BI_F_HOLD;
+		lcon_puts("  印        : HOLD（検査後も画面を残す）\n");
 	}
 
 	find_tables(bi);
