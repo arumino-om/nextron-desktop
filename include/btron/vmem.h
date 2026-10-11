@@ -50,6 +50,22 @@
 
 #define BTRON_DIRECTMAP_SIZE 0x0000200000000000ULL /* 32TB。扱える物理メモリの上限 */
 
+/* ------------------------------------------------------------------ */
+/* 下位半分の区画（プロセス固有）                                      */
+/*                                                                     */
+/* BTRON3 §1.5「メモリ管理機能のある CPU の場合には、原則として、       */
+/* 共有メモリ、システムメモリは負のアドレスとなり、ローカルメモリは     */
+/* 正のアドレスとなる」。ローカルメモリはここに入る。                   */
+/*                                                                     */
+/* 先頭の 4MB は**意図的に空けてある**。NULL ポインタの参照と、         */
+/* 小さい整数をポインタと間違えた参照を変換フォルトで捕まえるため。     */
+/* ------------------------------------------------------------------ */
+
+#define BTRON_PROC_TEXT_BASE 0x0000000000400000ULL  /* 実行プログラム (Phase 3) */
+#define BTRON_PROC_LOCAL_BASE 0x0000010000000000ULL /* ローカルメモリ 64TB */
+#define BTRON_PROC_LOCAL_LIMIT 0x0000400000000000ULL
+#define BTRON_PROC_STACK_TOP 0x0000800000000000ULL  /* スタック。上から下へ */
+
 /* 物理アドレスを直接マップ上の仮想アドレスに直す */
 #define BTRON_PA_TO_VA(pa) (BTRON_DIRECTMAP_BASE + (UD)(pa))
 
@@ -108,6 +124,16 @@ IMPORT void hal_vm_destroy(AddrSpace *as);
 /* size はページサイズの倍数であること。va / pa も同様。 */
 IMPORT ERR hal_vm_map(AddrSpace *as, UD va, UD pa, UD size, UW attr);
 
+/* 写像を外す。size はページサイズの倍数であること。
+ *
+ * **物理ページは解放しない。** 何を解放すべきかは写像した側が知っている
+ * （共有メモリの別名・フレームバッファ・直接マップ。規律 R18）。
+ * 解放したい側は先に hal_vm_translate() で物理アドレスを拾う。
+ *
+ * TLB は外した範囲について無効化する。arm64 は VA 単位で全 ASID を
+ * 流すので、いま有効でないアドレス空間に対しても正しく効く。 */
+IMPORT ERR hal_vm_unmap(AddrSpace *as, UD va, UD size);
+
 /* 検証・デバッグ用。対応付けが無ければ 0 を返す。 */
 IMPORT UD hal_vm_translate(CONST AddrSpace *as, UD va);
 
@@ -121,6 +147,21 @@ IMPORT UD hal_vm_translate(CONST AddrSpace *as, UD va);
  * この写像はカーネルの上位半分にあり、プロセスへの貸出とは独立に
  * 存在し続ける（規律 R18）。 */
 IMPORT UD hal_vm_map_device(UD pa, UD size);
+
+/* 共有側（上位半分）に写像する / 外す。
+ *
+ * 上位半分は**全プロセスで共通**（arm64 は TTBR1 が切り替わらない、
+ * x86_64 は上位 256 PML4 エントリを複製してある。§3.2-4 / 規律 R4）
+ * なので、1 回張れば全プロセスから同じアドレスで見える。
+ * BTRON3 §1.5 の共有メモリ (M_COMMON) とシステムメモリ (M_SYSTEM) が
+ * これを使う。「共有・システムは負のアドレス」という仕様の原則が、
+ * 上位半分 = 負のアドレスという配置でそのまま満たされる。
+ *
+ * `BTRON_PG_USER` を付けると EL0 / ring3 からも触れる。arm64 では
+ * 上位半分 (TTBR1) であっても AP[1] が立っていれば EL0 から参照できる
+ * （TTBR0 / TTBR1 の選択は VA の上位ビットだけで決まり、特権とは独立）。 */
+IMPORT ERR hal_vm_map_shared(UD va, UD pa, UD size, UW attr);
+IMPORT ERR hal_vm_unmap_shared(UD va, UD size);
 
 /* 現在 MMU が有効か */
 IMPORT Bool hal_vm_enabled(void);

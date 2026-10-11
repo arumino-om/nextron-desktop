@@ -237,6 +237,41 @@ EXPORT ERR hal_vm_map(AddrSpace *as, UD va, UD pa, UD size, UW attr)
 	return 0;
 }
 
+EXPORT ERR hal_vm_unmap(AddrSpace *as, UD va, UD size)
+{
+	UD ps = (UD)hal_page_size();
+	UD off;
+
+	if ((va | size) & (ps - 1)) {
+		return -1;
+	}
+	for (off = 0; off < size; off += ps) {
+		UD *e = walk(as->root_pa, va + off, False);
+
+		if (e == 0) {
+			continue; /* 途中の表が無い = もともと張られていない */
+		}
+		*e = 0;
+		/* **invlpg は現在の CR3 の TLB にしか効かない。**
+		 * 他のプロセスのアドレス空間から外した場合は、そのプロセスへ
+		 * 切り替えるときの CR3 書き込みで流れる（PCID を使っている
+		 * ときは bit63 を立てずに書くのでその PCID が無効化される）。
+		 * SMP では他コアへの shootdown が必要になる。T1-10 で足す。 */
+		__asm__ volatile("invlpg (%0)" ::"r"((VP)(va + off)) : "memory");
+	}
+	return 0;
+}
+
+EXPORT ERR hal_vm_map_shared(UD va, UD pa, UD size, UW attr)
+{
+	return hal_vm_map(&kernel_space, va, pa, size, attr | BTRON_PG_GLOBAL);
+}
+
+EXPORT ERR hal_vm_unmap_shared(UD va, UD size)
+{
+	return hal_vm_unmap(&kernel_space, va, size);
+}
+
 EXPORT UD hal_vm_translate(CONST AddrSpace *as, UD va)
 {
 	UD ps = (UD)hal_page_size();

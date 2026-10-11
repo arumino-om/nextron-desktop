@@ -254,6 +254,46 @@ EXPORT ERR hal_vm_map(AddrSpace *as, UD va, UD pa, UD size, UW attr)
 	return 0;
 }
 
+EXPORT ERR hal_vm_unmap(AddrSpace *as, UD va, UD size)
+{
+	UD ps = (UD)hal_page_size();
+	UD off;
+
+	if ((va | size) & (ps - 1)) {
+		return -1;
+	}
+	for (off = 0; off < size; off += ps) {
+		UD *e = walk(as->root_pa, va + off, False);
+
+		if (e == 0) {
+			continue; /* 途中の表が無い = もともと張られていない */
+		}
+		*e = 0;
+	}
+	__asm__ volatile("dsb ishst" ::: "memory");
+	for (off = 0; off < size; off += ps) {
+		/* vaae1is = この VA を**全 ASID について**無効化する。
+		 * いま TTBR0 に入っていないアドレス空間の写像を外すときも、
+		 * これなら取りこぼさない。 */
+		__asm__ volatile("tlbi vaae1is, %0" ::"r"((va + off) >> PAGE_SHIFT)
+		                 : "memory");
+	}
+	__asm__ volatile(
+		"dsb ish\n"
+		"isb\n" ::: "memory");
+	return 0;
+}
+
+EXPORT ERR hal_vm_map_shared(UD va, UD pa, UD size, UW attr)
+{
+	return hal_vm_map(&kernel_space, va, pa, size, attr | BTRON_PG_GLOBAL);
+}
+
+EXPORT ERR hal_vm_unmap_shared(UD va, UD size)
+{
+	return hal_vm_unmap(&kernel_space, va, size);
+}
+
 EXPORT UD hal_vm_translate(CONST AddrSpace *as, UD va)
 {
 	UD ps = (UD)hal_page_size();

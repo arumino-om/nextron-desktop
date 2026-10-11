@@ -18,6 +18,7 @@
 #include <btron/hal.h>
 #include <btron/intc.h>
 #include <btron/kernel.h>
+#include <btron/memory.h>
 #include <btron/proc.h>
 #include <btron/taskcomm.h>
 #include <btron/vmem.h>

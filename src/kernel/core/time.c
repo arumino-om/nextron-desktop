@@ -109,6 +109,7 @@ EXPORT ER knl_init(void)
 	knl_mp_init();
 	knl_cyc_init();
 	(void)prc_init(); /* 周辺核 §1.1。ランデブ (knl_rdv_init) と同じ扱い */
+	(void)mbk_init(); /* 周辺核 §1.5 */
 
 	for (i = 0; i <= TK_MAX_TSKID; i++) {
 		knl_tcb[i].used = False;
