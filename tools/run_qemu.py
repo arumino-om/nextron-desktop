@@ -1,11 +1,23 @@
 #!/usr/bin/env python3
-"""カーネルイメージを QEMU で起動し、シリアル出力を判定する。
+"""カーネルを QEMU で起動し、シリアル出力を判定する。
 
 Phase 1 以降のテスト基盤 (docs/design-issues.md H8)。
 CTest から呼ばれるほか、手で動かして様子を見るのにも使う。
 
+起動経路は 2 つある (詳細 D8)。
+
+  直接起動   QEMU の -kernel に ELF を渡す。速いがメモリマップも DTB も
+             来ないので、カーネルが決め打ちで動く。
+  UEFI 起動  GPT + ESP のディスクイメージをファームウェアに起動させる。
+             D8 で決めた本来の方式。ACPI / DTB / GOP / メモリマップが来る。
+
   python3 tools/run_qemu.py --arch arm64 build/arm64/btron-arm64.elf
-  python3 tools/run_qemu.py --arch arm64 --interactive build/arm64/btron-arm64.elf
+  python3 tools/run_qemu.py --arch arm64 --uefi build/arm64/btron-arm64.img
+  python3 tools/run_qemu.py --arch arm64 --uefi --interactive ...
+
+QEMU + ArmVirtQemu は既定で ACPI を渡してくる。D8 が arm64 に想定している
+Device Tree 経路を試すには --machine virt,acpi=off を付ける。
+GOP（起動時フレームバッファ）を出すには --extra=-device --extra=virtio-gpu-pci。
 
 判定:
   - 終了コードが 0 でなければ失敗
@@ -20,6 +32,7 @@ CTest から呼ばれるほか、手で動かして様子を見るのにも使�
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import subprocess
 import sys
@@ -27,15 +40,33 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 
+# flake.nix の devShell が公開するファームウェアのパス
+FIRMWARE_ENV = {"arm64": "ARM64_UEFI_FD", "x86_64": "X64_UEFI_FD"}
 
-def qemu_argv(arch: str, image: Path, interactive: bool) -> list[str]:
+
+def firmware(arch: str) -> str:
+    var = FIRMWARE_ENV[arch]
+    path = os.environ.get(var)
+    if not path or not Path(path).exists():
+        sys.exit(
+            f"{var} が未設定か、指すファイルがありません。\n"
+            f"  nix develop の中で実行してください。\n"
+            f"  非ネイティブ側は  nix build .#ovmf-x64 / .#ovmf-aarch64  で用意できます。"
+        )
+    return path
+
+
+DEFAULT_MACHINE = {"arm64": "virt", "x86_64": "q35"}
+
+
+def qemu_argv(arch: str, image: Path, interactive: bool, uefi: bool,
+              machine: str, extra: list[str]) -> list[str]:
     if arch == "arm64":
         argv = [
             "qemu-system-aarch64",
-            "-machine", "virt",
+            "-machine", machine,
             "-cpu", "cortex-a72",
             "-m", "512M",
-            "-kernel", str(image),
             "-semihosting",          # hal_exit() が QEMU を終了させるのに使う
             "-nographic",
             "-no-reboot",
@@ -43,9 +74,8 @@ def qemu_argv(arch: str, image: Path, interactive: bool) -> list[str]:
     elif arch == "x86_64":
         argv = [
             "qemu-system-x86_64",
-            "-machine", "q35",
+            "-machine", machine,
             "-m", "512M",
-            "-kernel", str(image),
             "-nographic",
             "-no-reboot",
             "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
@@ -53,6 +83,18 @@ def qemu_argv(arch: str, image: Path, interactive: bool) -> list[str]:
     else:
         sys.exit(f"未知のアーキテクチャ: {arch}")
 
+    if uefi:
+        # -bios で与える。pflash で与えるには 64MB にパディングする必要があり、
+        # NVRAM も要る。取り外し可能メディアの既定パス
+        # (/EFI/BOOT/BOOTAA64.EFI) から起動するので NVRAM の起動項目は不要。
+        argv += [
+            "-bios", firmware(arch),
+            "-drive", f"format=raw,if=virtio,file={image}",
+        ]
+    else:
+        argv += ["-kernel", str(image)]
+
+    argv += extra
     if not interactive:
         argv += ["-monitor", "none", "-serial", "stdio"]
     return argv
@@ -69,12 +111,20 @@ def main() -> int:
                     help="出力に含まれていれば失敗とする文字列（複数可）")
     ap.add_argument("--interactive", action="store_true",
                     help="判定せず、端末をそのまま QEMU につなぐ")
+    ap.add_argument("--uefi", action="store_true",
+                    help="ディスクイメージを UEFI ファームウェアに起動させる (D8)")
+    ap.add_argument("--machine",
+                    help="QEMU の -machine に渡す文字列。"
+                         "arm64 で ACPI を切り Device Tree を使わせるなら virt,acpi=off")
+    ap.add_argument("--extra", action="append", default=[], metavar="ARG",
+                    help="QEMU に素通しする引数（複数可）")
     args = ap.parse_args()
 
     if not args.image.exists():
         sys.exit(f"イメージがありません: {args.image}")
 
-    argv = qemu_argv(args.arch, args.image, args.interactive)
+    argv = qemu_argv(args.arch, args.image, args.interactive, args.uefi,
+                     args.machine or DEFAULT_MACHINE[args.arch], args.extra)
 
     if args.interactive:
         print(f"$ {' '.join(argv)}\n", file=sys.stderr)

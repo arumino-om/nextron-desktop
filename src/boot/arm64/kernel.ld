@@ -62,12 +62,21 @@ SECTIONS
         *(COMMON)
         . = ALIGN(16);
         __bss_end = .;
-    } :data
 
-    . = ALIGN(4096);
-    __boot_stack_bottom = .;
-    . += 0x10000;                   /* 64KB の起動スタック */
-    __boot_stack_top = .;
+        /* 起動スタック。
+         *
+         * .bss の中に置くのは、UEFI ローダが確保すべき大きさを ELF だけから
+         * 決められるようにするため。セクションの外に置くと、どの PT_LOAD の
+         * p_memsz にも入らず、ローダが「ヘッダに書いてある範囲より先まで
+         * カーネルが使う」ことを知る術がなくなる。
+         *
+         * __bss_end より後ろに置くのは、start.S の .bss クリアが
+         * いま自分が使っているスタックを消さないようにするため。 */
+        . = ALIGN(4096);
+        __boot_stack_bottom = .;
+        . += 0x10000;               /* 64KB */
+        __boot_stack_top = .;
+    } :data
 
     . = ALIGN(4096);
     __kernel_end = .;

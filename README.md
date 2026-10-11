@@ -21,9 +21,10 @@ BTRON3 の四層構造（中心核 / 周辺核 / ディスプレイプリミテ�
 由来するコードは含みません。TRON Association / Personal Media Corporation /
 TRON Forum のいずれとも関係はなく、これらによる承認も受けていません。
 
-> **現在の状態:** 設計の根底仕様が固まり、開発環境が整った段階です。
-> **まだ何も起動しません。** カーネルは未着手で、ビルドされるのは公開ヘッダの
-> 自己検査のみです。
+> **現在の状態:** Phase 1（ブート + HAL）の途中です。**arm64 が UEFI 経由で
+> 起動し**、ページングを立ち上げてカーネルを上位半分へ移し、QEMU 上で設計上の
+> 不変条件 18 件を検査するところまで動きます。中心核（タスク・スケジューラ・
+> 割込み・時間管理）は未着手です。x86_64 は HAL を型検査しているだけで未検証です。
 
 ## 開発環境の構築
 
@@ -62,6 +63,27 @@ cmake --preset x86_64  && cmake --build --preset x86_64
 `-Wall -Wextra -Wconversion -Wsign-conversion -Werror` でコンパイルします。
 32bit と 64bit の暗黙の縮小変換を禁じる設計規律を、文書上の約束ではなく
 ビルドで強制するためです。
+
+ビルドすると次の 3 つができます。
+
+| | |
+|---|---|
+| `btron-arm64.elf` | カーネル本体 |
+| `BOOTAA64.EFI` | UEFI ブートローダ（PE/COFF。カーネルとは別のトリプルでビルドされます） |
+| `btron-arm64.img` | 起動可能なディスクイメージ（GPT + ESP） |
+
+### 実行
+
+```sh
+ctest --preset arm64                 # 直接起動 / UEFI / Device Tree / GOP の 4 通り
+
+python3 tools/run_qemu.py --arch arm64 --uefi --interactive build/arm64/btron-arm64.img
+python3 tools/run_qemu.py --arch arm64 --interactive        build/arm64/btron-arm64.elf
+```
+
+UEFI 経由がディスクから起動する本来の経路で、メモリマップ・ACPI / Device Tree・
+フレームバッファを受け取ります。ELF を QEMU の `-kernel` に直接渡す経路も
+残してあり、こちらはファームウェアを通らないので速く、カーネル単体の確認に使います。
 
 ### 仕様文書
 

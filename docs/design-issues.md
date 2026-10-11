@@ -1158,7 +1158,7 @@ for (i = 0; i < 10; i++) {
 | D5 | 例外処理ハンドラ | ★★ | 未着手 | `def_exc`/`ret_exc` を BV は**未実装**にした。実装しないとアプリがページフォルトを捕まえられない |
 | D6 | プロセス木と養子縁組 | ★ | 未着手 | 親終了時に子の親を祖父に差し替え。初期プロセス終了時は親なし状態 |
 | D7 | セキュリティモデル | ★★ | 未着手 | シングルユーザ前提。サンドボックス / 権限最小化 / 署名検証 / ASLR / W^X は**全部仕様外** |
-| D8 | **ブート方式と起動シーケンス** | ★★★ | **決定** | **UEFI + GPT + ACPI(x86_64) / Device Tree(arm64)。** 起動時フレームバッファは UEFI GOP。`/SYS/DEVCONF`・初期プロセス・実行環境ファイル（`/SYS/USR`）の仕組みは**仕様どおり踏襲**。デバッグコンソールはシリアル（x86_64: 16550 / arm64: PL011）で Phase 1 から用意 → **詳細 D8** |
+| D8 | **ブート方式と起動シーケンス** | ★★★ | **決定・arm64 実装済** | **UEFI + GPT + ACPI(x86_64) / Device Tree(arm64)。** 起動時フレームバッファは UEFI GOP。`/SYS/DEVCONF`・初期プロセス・実行環境ファイル（`/SYS/USR`）の仕組みは**仕様どおり踏襲**。デバッグコンソールはシリアル（x86_64: 16550 / arm64: PL011）で Phase 1 から用意 → **詳細 D8**。**実装**: `src/boot/uefi/` + `include/btron/bootinfo.h`。残作業は ① DT / ACPI のパース（いまは入口のアドレスを引き継ぐだけ）② `/SYS/DEVCONF` ③ 初期プロセス ④ x86_64 側 |
 | D10 | **中心核の基準仕様** | ★★★ | **決定** | **μT-Kernel 3.0 (IEEE 2050-2018) を基準とする。** μITRON3.0 ではない → **詳細 D10** |
 | D9 | **各種上限値** | ★★ | 未着手 | プロセス数・サブタスク数・fd 数・セマフォ数等。仕様は `ER_LIMIT` / `ER_NOSPC` を返すことだけ規定し、値は実装依存 |
 
@@ -1514,8 +1514,8 @@ BMS は RAM モニタで**論理アドレスで動作し、内部では全割り
 
 | 論点 | BV | 本OS（推奨） |
 |---|---|---|
-| ブートローダ | MBR + BIOS | **UEFI**（x86_64 / arm64 共通）。MBR は読み取り互換のみ |
-| 区画 | MBR 4 区画固定 | **GPT**。BTRON 区画の GUID を独自定義 |
+| ブートローダ | MBR + BIOS | **UEFI**（x86_64 / arm64 共通）。MBR は読み取り互換のみ — **arm64 実装済** (`src/boot/uefi/`) |
+| 区画 | MBR 4 区画固定 | **GPT**。BTRON 区画の GUID を独自定義 — **実装済** (`tools/mkimage.py`。ESP のみ。BTRON FS 区画は Phase 3) |
 | 設定 | `/SYS/DEVCONF` | **踏襲**（`GetDevConf` API も）。ただし ACPI / DT で自動検出できるものは書かない |
 | ハードウェア列挙 | PC/AT 固定マップ | **ACPI (x86_64) / Device Tree (arm64)** |
 | 起動時フレームバッファ | VESA BIOS | **UEFI GOP**。`VIDEOMODE` は上書き指定として残す（F6） |
@@ -1867,7 +1867,7 @@ ERR  rpl_rdv(W rdv, VP msg, W rmsz);                         /* 応答 */
 | F3 | 論理デバイス名 | ★★ | 未着手 | 種別 + ユニット + サブユニット、最大8文字。「ユニット名の最後の文字は数字であってはいけない」。**NVMe / PCIe / USB をどう命名するか** |
 | F4 | **仕様に無いデバイス** | ★★ | 未着手 | **GPU アクセラレーション / サウンド（ブザーしかない）/ カメラ / センサ / Bluetooth / Wi-Fi** が全部仕様外 |
 | F5 | 必要なドライバ一覧 | ★★ | 未着手 | BV 相当: 時計・システムディスク・KB/PD・RS-232C・電源・スクリーン・コンソール・ブザー・プリンタ・ネットワーク・PCMCIA・USB・HWリソース。現代追加: NVMe/AHCI・xHCI・PCIe・ACPI・virtio・タッチ |
-| F6 | 起動時フレームバッファ | ★★ | 未着手 | UEFI GOP から `DEV_SPEC` を構成する手順。`DN_SCRSPEC` / `DN_SCRLIST` / `DN_SCRBMP` |
+| F6 | 起動時フレームバッファ | ★★ | 調査済・未着手 | UEFI GOP から `DEV_SPEC` を構成する手順。`DN_SCRSPEC` / `DN_SCRLIST` / `DN_SCRBMP`。**ローダ側は完了**（`BootFrameBuffer` として引き継ぐ）。判明: **GOP があってもフレームバッファが見えない実装がある**（`VirtioGpuDxe` は Blt のみで `FrameBufferBase = 0`。ExitBootServices 後は Blt も呼べないので使えない）。arm64 virt でリニアに得るには `-device ramfb` → Phase 1 ⑩ |
 | F7 | 電源管理 | ★ | 未着手 | BV に power デバイスあり。ACPI / サスペンド復帰との対応 |
 
 ### G. ネットワーク
@@ -2178,14 +2178,44 @@ ID 型   PAID(パーツ) MNID(メニュー) PNID(パネル) GID(描画環境) WI
 | PL011 シリアル出力（`src/kernel/hal/arm64/uart.c`） | **完了** QEMU virt の 0x0900_0000 |
 | セミホスティング終了（`exit.c`） | **完了** テストの合否を終了コードで返す |
 | ページサイズの HAL 公開（`page.c`、R2） | **完了** |
-| 実行時の不変条件検査 | **完了** QEMU 上で 14/14 通過 |
+| 実行時の不変条件検査 | **完了** QEMU 上で 18/18 通過（4 通りの起動構成すべて） |
 | 例外ベクタ（`vectors.S` / `exception.c`） | **完了** ESR/FAR/ELR ＋ FSC の分類を出して終了。無言のハングを無くす |
 | **HAL のアドレス空間 2 関数（R3 / §3.2）** | **完了** arm64 で動作 |
 | 起動初期の物理ページ確保（`src/kernel/mm/pmem.c`） | **完了** アーキ中立のバンプアロケータ |
 | **カーネルを上位半分へ移す（`BTRON_KERNEL_BASE`）** | **完了** 恒等写像を捨て TTBR0 をプロセスに明け渡した。足場 `hal_vm_identity_kernel()` は削除 |
+| **UEFI ブート（D8 の本来の方式）** | **完了** GPT + ESP のディスクイメージから起動。メモリマップ・ACPI / Device Tree・GOP を引き継ぐ |
+| 引き継ぎ情報 ABI（`include/btron/bootinfo.h`） | **完了** ローダ (PE) とカーネル (ELF) の間の ABI。カーネル内へ複製して使う |
 | x86_64 の HAL | **型検査のみ完了** ブート経路が無いため未検証。上位半分化・`hal_vm_drop_identity()` まで arm64 と同形で実装済み |
-| UEFI ブート（D8 の本来の方式） | 未着手 |
+| x86_64 の UEFI ローダ | **型検査のみ完了** `BOOTX64.EFI` は生成される。カーネル側の `start.S` 相当が無い |
 | 中心核 | 未着手 |
+
+##### 起動経路（D8 の実装）
+
+```
+ UEFI 経路（本来の方式）                      直接起動（開発用）
+   ファームウェア                               QEMU -kernel
+     ↓ /EFI/BOOT/BOOTAA64.EFI                     ↓
+   BOOTAA64.EFI  (PE/COFF, *-unknown-windows)     │
+     ├ /BTRON/KERNEL.ELF を読み p_paddr へ置く     │
+     ├ ACPI RSDP / DTB / GOP / メモリマップ収集    │
+     ├ BootInfo を EfiLoaderData に組み立て        │
+     ├ ExitBootServices                           │
+     └ MMU とキャッシュを切り x0=BootInfo で br    │
+     ↓                                            ↓
+   _start (ELF, 物理アドレス, MMU 無効) ←─────────┘
+     ├ boot_early()  bootinfo_take / hal_vm_init
+     └ 上位半分へ br
+   boot_main()  恒等写像を捨てる / 中心核へ
+```
+
+`ctest --preset arm64` は 4 通りを回す。
+
+| テスト | 構成 | 確かめること |
+|---|---|---|
+| `boot-arm64` | `-kernel` 直接起動 | 引き継ぎ情報が無くても動く |
+| `boot-uefi-arm64` | UEFI（既定 = ACPI） | ACPI RSDP が来る |
+| `boot-uefi-dt-arm64` | UEFI + `virt,acpi=off` | Device Tree が来る（arm64 の本線） |
+| `boot-uefi-fb-arm64` | UEFI + `-device ramfb` | GOP のフレームバッファが来る |
 
 ##### Phase 1 で判明したこと
 
@@ -2275,10 +2305,57 @@ KERNEL_LMA = 0x40080000                QEMU がロードする物理アドレス
 原因が全く違うので、EC だけ見ていると ⑤ のような
 「アドレス計算そのものが壊れている」類を見落とす。
 
+**⑧ UEFI のテキストコンソールでは日本語が出せない**
+
+ファームウェアの `EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL` は PC-ANSI 端末を仮定して
+いて、ASCII にない CHAR16 を `(char)unicode` で **8bit に切り捨てて**
+シリアルへ送る。実測で「なし」(U+306A U+3057) が `jW` (0x6A 0x57) になった。
+
+**`EFI_SERIAL_IO_PROTOCOL` を使えば生のバイト列を送れる**ので、UTF-8 が
+そのまま通る。ローダはこちらを優先し、取れなければ ConOut に落とす
+(`src/boot/uefi/console.c`)。カーネルは自前の UART ドライバを持っているので
+この問題は起きない。
+
+**⑨ UEFI は MMU を有効にした状態で渡してくる。切り方がアーキで違う**
+
+UEFI はすべての RAM を恒等写像し、MMU とキャッシュを有効にして制御を渡す。
+カーネルの第1段は「MMU 無効・物理アドレス」を前提にしているので切る必要がある。
+
+| | 切り方 |
+|---|---|
+| arm64 | MMU が有効なまま `TCR_EL1` を書くのはアーキテクチャ上禁止 (CONSTRAINED UNPREDICTABLE)。**ローダが `SCTLR_EL1.{M,C,I}` を落としてから渡す** |
+| x86_64 | ロングモードではページングを切れない（CR0.PG を落とすには 32bit へ降りる必要がある）。一方 **CR3 の差し替えは合法**なので、カーネルが恒等写像入りの自前テーブルを作って CR3 を書く。ローダは単にジャンプする |
+
+arm64 側で忘れやすいのが**キャッシュの書き出し**。MMU とデータキャッシュを
+切ると以後のアクセスはキャッシュを経由しないので、dirty な行は見えなくなる。
+切る前に PoC まで `dc civac` する対象は 2 つあり、**(2) を忘れると無言で死ぬ**。
+
+1. 読み込んだカーネルイメージと引き継ぎ情報
+2. **その切り替えを行う関数自身のコード**（切った直後の命令フェッチは
+   物理メモリから行われる。ファームウェアがロード時に PoU までしか
+   書き出していないと古い内容を拾いうる）
+
+**⑩ GOP があってもフレームバッファが見えないことがある**
+
+EDK2 の `VirtioGpuDxe` は `Blt` 呼び出ししか提供せず、
+`Mode->FrameBufferBase` に **0** を入れる。ExitBootServices 後は `Blt` も
+呼べないので、これは使えない。`base == 0` を無効として扱う必要がある。
+
+QEMU + ArmVirtQemu でリニアなフレームバッファを得るには **`-device ramfb`**
+（`QemuRamfbDxe` が拾う。実測 800x600 / pitch 3200）。
+`virtio-vga` と `bochs-display` は arm64 の virt では GOP が立たなかった。
+
+**⑪ UEFI のメモリマップは物理アドレス順ではない**
+
+実測で MMIO の 0x0400_0000 が最後に来た。カーネル側は昇順を前提にしたいので
+ローダで並べ替える。要素長が `DescriptorSize` で可変なのでバイト単位で入れ替える
+（`sizeof(EFI_MEMORY_DESCRIPTOR)` を使ってはならない。仕様が将来の拡張を許している）。
+
 **注記:** `-kernel` で ELF を直接起動した場合、QEMU は x0 に DTB アドレスを
-渡してこない（`DTB : なし`）。D8 で決めた UEFI 経由なら UEFI の
-コンフィグレーションテーブルから DTB / ACPI を得られるので、
-ハードウェア列挙は UEFI 対応後に行う。
+渡してこない（`DTB : なし`）。UEFI 経由なら ACPI RSDP または DTB が
+コンフィグレーションテーブルから得られる（⑧〜⑪ で対応済み）。
+**ハードウェア列挙そのもの（DT のパース / ACPI のテーブル走査）は未着手**で、
+いまは入口のアドレスを引き継いでいるだけ。
 
 検証済みの開発環境（`nix develop`）:
 
@@ -2368,6 +2445,7 @@ T-Kernel 系の開発で実際に取られる手法。
 
 | 日付 | 内容 |
 |---|---|
+| 2026-10-11 | **D8 の本来の起動方式である UEFI ブートを実装。GPT + ESP のディスクイメージから起動し、メモリマップ・ACPI / Device Tree・GOP を引き継ぐ。QEMU 上で 18/18 通過（4 通りの起動構成すべて）。** 新規に `src/boot/uefi/`（PE/COFF の UEFI アプリ。`efi.h` は UEFI 宣言の自前実装 — gnu-efi / EDK2 を取り込まずライセンス検討を増やさないため）、`include/btron/bootinfo.h`（**ローダとカーネルの間の ABI**。ローダは PE・カーネルは ELF で別ビルドなので版管理する）、`src/kernel/boot/bootinfo.c`（ローダ領域は写像されないので第1段でカーネル内へ複製する）、`cmake/uefi-loader.cmake`（カーネルと**トリプルが違う**ので clang と lld-link を直接叩く）、`tools/mkimage.py`（GPT + ESP。BTRON 区画の GUID も定義）、`tools/run_qemu.py --uefi/--machine/--extra`。カーネル側は `hal_kernel_set_pa_base()` を追加し、**ローダが LMA 以外の場所へ置いても動く**ようにした（規律 R17 の帰結）。直接マップはカーネルとページテーブル用プールを**別々の 2 範囲**として張る（UEFI 経由では連続しない）。**新たに判明したこと 4 点** — ⑧ **UEFI のテキストコンソールでは日本語が出せない**（PC-ANSI 端末を仮定して CHAR16 を 8bit に切り捨てる。実測「なし」→`jW`）。`EFI_SERIAL_IO_PROTOCOL` なら生バイトが通る ⑨ **UEFI は MMU 有効で渡してくる**。arm64 は `TCR_EL1` を書けないのでローダが MMU を切る。**切り替えを行う関数自身のコードも PoC まで書き出す**必要がある。x86_64 はロングモードでページングを切れないので CR3 差し替えで対応（構造差） ⑩ **GOP があってもフレームバッファが見えないことがある**（`VirtioGpuDxe` は Blt のみで `FrameBufferBase = 0`）。arm64 virt でリニアに得るには `-device ramfb` ⑪ **UEFI のメモリマップは物理アドレス順ではない**ので並べ替える |
 | 2026-10-11 | **カーネルを上位半分 `BTRON_KERNEL_BASE` へ移し、TTBR0 をプロセスに明け渡した（Phase 1 ④ の解消）。QEMU 上で 14/14 通過。** リンカスクリプトを VMA = 0xFFFF_FF00_0000_0000 / LMA = 0x4008_0000 の `AT()` 方式に書き換え、起動を **第1段 `boot_early()`（物理で走る）/ 第2段 `boot_main()`（上位半分で走る）** に分割。足場 `hal_vm_identity_kernel()` を削除し、代わりに `hal_vm_drop_identity()`（arm64 は TTBR0 を空の表へ、x86_64 は PML4 下位 256 エントリを消去）と `hal_kva_to_pa()` / `hal_kernel_pa_base/end()` を追加。**新たに判明したこと 3 点** — ⑤ **物理で走っている間、C から取ったシンボルのアドレスは `adrp` が PC 相対なので物理アドレスになる**（第2段では VMA）。同じ式が段によって意味が変わるのが落とし穴で、外部アボートとして現れた。基準は**リンカが `.rodata` に値として置いた** `__kernel_vma_base`/`__kernel_lma_base` を読み、大きさはシンボル差分で取ることで解決（絶対シンボルにすると `adrp` の ±4GB 射程を外れてリンクエラー）。規律 **R17** を追加 ⑥ **例外ベクタは上位半分へ移った後に張り直す**（第1段の `VBAR_EL1` は物理を指しており、恒等写像を捨てると届かない）⑦ アボートは `ESR_EL1` の **FSC まで分類して出す**（変換フォルト / 外部アボート / 権限 の区別がないと ⑤ 類を見落とす）。x86_64 側も同形に更新し型検査を通した。`CMakePresets.json` に `testPresets` を追加 |
 | 2026-10-11 | 初版。ライセンス方針・四層構造の把握・アドレス空間レイアウト・文字コード方針・FS 方針を決定。検討事項 約70項目を登録 |
 | 2026-10-11 | C4（循環参照）を調査。`gabage.h` は GC ではなく遅延削除ヘルパと判明。仕様側の答え（参照カウント / くず実身のオンライン回収 / `fsrcv` によるループ屑実身の `TRASH` 回収）を 詳細 C4 に記録。選択肢を整理し、状態を `要調査` → `検討中` に更新 |

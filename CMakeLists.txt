@@ -110,6 +110,7 @@ if(BTRON_ARCH STREQUAL "arm64")
     src/kernel/hal/arm64/mmu.c
     src/kernel/hal/arm64/vectors.S
     src/kernel/hal/arm64/exception.c
+    src/kernel/boot/bootinfo.c
     src/kernel/mm/pmem.c)
 
   target_link_libraries(btron-kernel PRIVATE btron_flags btron_headers btron_test)
@@ -124,8 +125,78 @@ if(BTRON_ARCH STREQUAL "arm64")
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/run_qemu.py"
             --arch arm64 --timeout 30
             --expect "BTRON3 準拠 OS"
+            --expect "QEMU -kernel"
             --deny   "[ FAIL ]"
             "$<TARGET_FILE:btron-kernel>")
+endif()
+
+# --------------------------------------------------------------------------
+# UEFI ブートローダ + 起動可能ディスクイメージ (D8)
+#
+#   ブートローダ  UEFI (x86_64 / arm64 共通)
+#   区画          GPT
+#   ハードウェア列挙  ACPI (x86_64) / Device Tree (arm64)
+#   フレームバッファ  UEFI GOP
+#
+# ローダは PE/COFF なのでトリプルが違う。cmake/uefi-loader.cmake が
+# clang と lld-link を直接叩いて作る。
+# --------------------------------------------------------------------------
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/uefi-loader.cmake")
+
+if(TARGET btron-kernel)
+  set(BTRON_DISK_IMAGE "${CMAKE_CURRENT_BINARY_DIR}/btron-${BTRON_ARCH}.img")
+
+  add_custom_command(
+    OUTPUT "${BTRON_DISK_IMAGE}"
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/mkimage.py"
+            --arch ${BTRON_ARCH}
+            --loader "${BTRON_UEFI_IMAGE}"
+            --kernel "$<TARGET_FILE:btron-kernel>"
+            --out    "${BTRON_DISK_IMAGE}"
+    DEPENDS "${BTRON_UEFI_IMAGE}" btron-kernel
+            "${CMAKE_CURRENT_SOURCE_DIR}/tools/mkimage.py"
+    COMMENT "起動可能ディスクイメージ (GPT + ESP)"
+    VERBATIM)
+
+  add_custom_target(btron-image ALL DEPENDS "${BTRON_DISK_IMAGE}")
+
+  # UEFI 経由の起動。直接起動と違い、メモリマップ・ACPI/DT・GOP が来る。
+  #
+  # QEMU + ArmVirtQemu は既定で ACPI を渡してくる。D8 が arm64 に想定して
+  # いる Device Tree 経路と、GOP のフレームバッファ経路も別々に確かめる。
+  add_test(NAME boot-uefi-${BTRON_ARCH}
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/run_qemu.py"
+            --arch ${BTRON_ARCH} --uefi --timeout 90
+            --expect "BTRON3 準拠 OS — UEFI ローダ"
+            --expect "起動経路  : UEFI"
+            --deny   "[ FAIL ]"
+            --deny   "ローダ異常終了"
+            "${BTRON_DISK_IMAGE}")
+
+  if(BTRON_ARCH STREQUAL "arm64")
+    add_test(NAME boot-uefi-dt-arm64
+      COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/run_qemu.py"
+              --arch arm64 --uefi --timeout 90 --machine "virt,acpi=off"
+              --expect "起動経路  : UEFI"
+              --expect "ACPI RSDP : なし"
+              --deny   "DTB       : なし"
+              --deny   "[ FAIL ]"
+              --deny   "ローダ異常終了"
+              "${BTRON_DISK_IMAGE}")
+  endif()
+
+  # ramfb はリニアなフレームバッファを見せる。virtio-gpu は Blt のみで
+  # ExitBootServices 後に使えないので、こちらで確かめる。
+  add_test(NAME boot-uefi-fb-${BTRON_ARCH}
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/run_qemu.py"
+            --arch ${BTRON_ARCH} --uefi --timeout 90
+            --extra=-device --extra=ramfb
+            --expect "起動経路  : UEFI"
+            --expect "pitch"
+            --deny   "画面      : なし"
+            --deny   "[ FAIL ]"
+            --deny   "ローダ異常終了"
+            "${BTRON_DISK_IMAGE}")
 endif()
 
 # --------------------------------------------------------------------------
@@ -141,6 +212,7 @@ if(BTRON_ARCH STREQUAL "x86_64")
     src/kernel/hal/x86_64/page.c
     src/kernel/hal/x86_64/exit.c
     src/kernel/hal/x86_64/mmu.c
+    src/kernel/boot/bootinfo.c
     src/kernel/mm/pmem.c)
   target_link_libraries(btron_hal_x86_64 PRIVATE btron_flags btron_headers)
 endif()

@@ -122,10 +122,18 @@ IMPORT UD hal_kva_to_pa(UD kva);
 
 /* カーネルイメージの物理範囲。
  *
- * リンカが埋めた LMA 基準とシンボル間の差分から求めるので、物理で走って
+ * シンボル間の差分と「置かれた物理先頭」から求めるので、物理で走って
  * いても上位半分で走っていても同じ値を返す。起動第 1 段で使う。 */
 IMPORT UD hal_kernel_pa_base(void);
 IMPORT UD hal_kernel_pa_end(void);
+
+/* カーネルイメージが実際に置かれた物理先頭を知らせる。
+ *
+ * 起動第 1 段のいちばん最初に 1 度だけ呼ぶ。UEFI ローダはリンク時の
+ * 物理アドレス (LMA) が空いていなければ別の場所へ置くので、そこを
+ * BootInfo.kernel_pa から受け取って教える。
+ * 0 を渡すとリンカスクリプトの LMA を使う（QEMU の -kernel 直接起動）。 */
+IMPORT void hal_kernel_set_pa_base(UD pa);
 
 /* 起動時の恒等写像を捨て、TTBR0 / 下位半分をプロセスに明け渡す。
  *

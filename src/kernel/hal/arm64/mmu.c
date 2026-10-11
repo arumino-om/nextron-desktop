@@ -85,19 +85,28 @@ LOCAL inline UD kernel_size(void)
 	return (UD)(VP)__kernel_end - (UD)(VP)__kernel_start;
 }
 
+/* カーネルイメージが実際に置かれた物理先頭。0 なら未設定で、
+ * リンカスクリプトの LMA を使う。 */
+LOCAL UD kernel_pa = 0;
+
+EXPORT void hal_kernel_set_pa_base(UD pa)
+{
+	kernel_pa = (pa != 0) ? pa : __kernel_lma_base;
+}
+
 EXPORT UD hal_kernel_pa_base(void)
 {
-	return __kernel_lma_base;
+	return (kernel_pa != 0) ? kernel_pa : __kernel_lma_base;
 }
 
 EXPORT UD hal_kernel_pa_end(void)
 {
-	return __kernel_lma_base + kernel_size();
+	return hal_kernel_pa_base() + kernel_size();
 }
 
 EXPORT UD hal_kva_to_pa(UD kva)
 {
-	return kva - __kernel_vma_base + __kernel_lma_base;
+	return kva - __kernel_vma_base + hal_kernel_pa_base();
 }
 
 LOCAL inline UD *table_ptr(UD pa)
@@ -270,6 +279,20 @@ EXPORT Bool hal_vm_enabled(void)
 /* 起動時の初期化                                                      */
 /* ------------------------------------------------------------------ */
 
+/* 物理範囲を直接マップ領域に張る。範囲はページ境界に丸める。 */
+LOCAL ERR map_direct(UD start, UD end)
+{
+	UD ps = (UD)hal_page_size();
+
+	start &= ~(ps - 1);
+	end = (end + ps - 1) & ~(ps - 1);
+	if (end <= start) {
+		return 0;
+	}
+	return hal_vm_map(&kernel_space, BTRON_PA_TO_VA(start), start, end - start,
+	                  BTRON_PG_READ | BTRON_PG_WRITE | BTRON_PG_EXEC);
+}
+
 EXPORT ERR hal_vm_init(void)
 {
 	UD ps = (UD)hal_page_size();
@@ -278,7 +301,7 @@ EXPORT ERR hal_vm_init(void)
 	UD ksize = (kernel_size() + ps - 1) & ~(ps - 1);
 	UD kvma = __kernel_vma_base;
 	UD kvma_end = kvma + ksize;
-	UD kstart = __kernel_lma_base;
+	UD kstart = hal_kernel_pa_base();
 	UD kend = kstart + ksize;
 	AddrSpace low;
 	UD mair = MAIR_VALUE;
@@ -317,25 +340,16 @@ EXPORT ERR hal_vm_init(void)
 	 *
 	 * 重要: ページテーブル自身が置かれている早期プールを必ず含めること。
 	 * MMU を有効にした後、table_ptr() は直接マップ経由でテーブルを読む。
-	 * プールが直接マップに無いと、最初のページウォークで変換フォルトになる。 */
-	{
-		UD dm_start = kstart;
-		UD dm_end = pmem_early_limit();
-
-		if (pmem_early_base() < dm_start) {
-			dm_start = pmem_early_base();
-		}
-		if (kend > dm_end) {
-			dm_end = kend;
-		}
-		dm_start &= ~(ps - 1);
-		dm_end = (dm_end + ps - 1) & ~(ps - 1);
-
-		if (hal_vm_map(&kernel_space, BTRON_PA_TO_VA(dm_start), dm_start,
-		               dm_end - dm_start,
-		               BTRON_PG_READ | BTRON_PG_WRITE | BTRON_PG_EXEC) != 0) {
-			return -1;
-		}
+	 * プールが直接マップに無いと、最初のページウォークで変換フォルトになる。
+	 *
+	 * カーネルとプールは連続しているとは限らない（UEFI 経由だとローダが
+	 * 別々の場所に確保しうる）。1 本に丸めると間の MMIO まで巻き込むので、
+	 * 2 範囲として別々に張る。 */
+	if (map_direct(kstart, kend) != 0) {
+		return -1;
+	}
+	if (map_direct(pmem_early_base(), pmem_early_limit()) != 0) {
+		return -1;
 	}
 	/* カーネル本体を上位半分 (BTRON_KERNEL_BASE) に写像する。
 	 * ここへ移ることで TTBR0 を丸ごとプロセスに明け渡せるようになる。 */

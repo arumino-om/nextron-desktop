@@ -87,19 +87,26 @@ LOCAL inline UD kernel_size(void)
 	return (UD)(VP)__kernel_end - (UD)(VP)__kernel_start;
 }
 
+LOCAL UD kernel_pa = 0;
+
+EXPORT void hal_kernel_set_pa_base(UD pa)
+{
+	kernel_pa = (pa != 0) ? pa : __kernel_lma_base;
+}
+
 EXPORT UD hal_kernel_pa_base(void)
 {
-	return __kernel_lma_base;
+	return (kernel_pa != 0) ? kernel_pa : __kernel_lma_base;
 }
 
 EXPORT UD hal_kernel_pa_end(void)
 {
-	return __kernel_lma_base + kernel_size();
+	return hal_kernel_pa_base() + kernel_size();
 }
 
 EXPORT UD hal_kva_to_pa(UD kva)
 {
-	return kva - __kernel_vma_base + __kernel_lma_base;
+	return kva - __kernel_vma_base + hal_kernel_pa_base();
 }
 
 LOCAL inline UD *table_ptr(UD pa)
@@ -283,7 +290,7 @@ EXPORT ERR hal_vm_init(void)
 	/* この関数は物理で走る（第 1 段）。シンボルのアドレスは当てにできない。 */
 	UD ksize = (kernel_size() + ps - 1) & ~(ps - 1);
 	UD kvma = __kernel_vma_base;
-	UD kstart = __kernel_lma_base;
+	UD kstart = hal_kernel_pa_base();
 	UD *pml4;
 	UW i;
 
