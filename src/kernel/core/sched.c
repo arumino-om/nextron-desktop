@@ -282,6 +282,24 @@ EXPORT void knl_wait_release(TCB *t, ER result)
 	knl_make_ready(t, False);
 }
 
+/* タイムアウトしたときに返す値。**待ち要因によってエラーコードの族が違う。**
+ *
+ * ランデブは BTRON3 §1.3 の API なので周辺核の族 (`ER_*`) を返さなければ
+ * ならない。ここを一律 `E_TMOUT` にすると、`cal_por()` の呼び出し側が
+ * 受け取る族が食い違う（規律 R20）。 */
+LOCAL ER timeout_result(UW cause)
+{
+	switch (cause) {
+	case TTW_DLY:
+		return E_OK; /* tk_dly_tsk は時間が来たら正常終了 */
+	case TTW_CAL:
+	case TTW_ACP:
+		return ER_NONE; /* BTRON3 §1.3: ランデブが成立せずにタイムアウト */
+	default:
+		return E_TMOUT; /* μT-Kernel の待ち */
+	}
+}
+
 EXPORT void knl_timeout_check(void)
 {
 	W i;
@@ -295,9 +313,20 @@ EXPORT void knl_timeout_check(void)
 		if (knl_otm < t->timeout) {
 			continue;
 		}
-		/* tk_dly_tsk は時間が来たら正常終了。それ以外はタイムアウト。 */
-		knl_wait_release(t, (t->waitcause == TTW_DLY) ? E_OK : E_TMOUT);
+		knl_wait_release(t, timeout_result(t->waitcause));
 	}
+}
+
+EXPORT TCB *knl_find_match(Queue *q, UW ptn)
+{
+	TCB *t;
+
+	for (t = q->head; t != 0; t = t->next) {
+		if ((t->rdv_ptn & ptn) != 0) {
+			return t;
+		}
+	}
+	return 0;
 }
 
 /* ------------------------------------------------------------------ */

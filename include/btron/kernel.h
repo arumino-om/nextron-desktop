@@ -120,6 +120,10 @@ typedef void (*TASKENTRY)(INT stacd, VP exinf);
 #define TTW_DLY 0x00000002U /* tk_dly_tsk による待ち */
 #define TTW_SEM 0x00000004U /* セマフォ待ち */
 #define TTW_FLG 0x00000008U /* イベントフラグ待ち */
+/* ランデブ (BTRON3 §1.3)。μT-Kernel が「(予約)」として空けている値を使う。 */
+#define TTW_CAL 0x00000400U /* ランデブ成立待ち（呼出側） */
+#define TTW_ACP 0x00000800U /* ランデブ成立待ち（受付側） */
+#define TTW_RDV 0x00001000U /* ランデブ返答待ち */
 
 /* ------------------------------------------------------------------ */
 /* 実装の制限値 (D9。暫定)                                             */
@@ -132,6 +136,8 @@ typedef void (*TASKENTRY)(INT stacd, VP exinf);
 #define TK_MAX_TSKID 64 /* タスク数 */
 #define TK_MAX_SEMID 64 /* セマフォ数 */
 #define TK_MAX_FLGID 64 /* イベントフラグ数 */
+#define TK_MAX_PORID 32 /* ランデブポート数 */
+#define TK_MAX_RDV 32   /* 同時に成立しているランデブの数 */
 
 #define TK_MIN_STKSZ 4096 /* スタックサイズの下限 */
 
@@ -256,6 +262,60 @@ IMPORT ER tk_get_otm(SYSTIM *pk_tim); /* 起動からの経過時間 */
 
 IMPORT ER tk_dis_dsp(void);
 IMPORT ER tk_ena_dsp(void);
+
+/* ------------------------------------------------------------------ */
+/* ランデブ (BTRON3 §1.3「プロセス/タスク間同期通信管理」)              */
+/*                                                                     */
+/* **ここだけ μT-Kernel ではなく BTRON3 の API である。** μT-Kernel 3.0 の */
+/* 仕様にランデブは無い（実装の拡張であって標準仕様ではない）。一方       */
+/* BTRON3 §1.3 は完全なシグネチャで規定しているので、そちらに従う（D10）。 */
+/*                                                                     */
+/* **したがって返すのは `ER_*`（周辺核の族）であって `E_*` ではない。**    */
+/* 名前も `tk_` を付けない。規律 R20 の「どの API を呼んだかで族が決まる」  */
+/* がそのまま効いている。E1 の IPC はこの上に載る（詳細 E1 ④）。          */
+/* ------------------------------------------------------------------ */
+
+typedef W TMOUT;      /* タイムアウト指定 (ミリ秒)。BTRON3 §1.3.1 */
+#define T_NOWAIT 0    /* 待たない。μT-Kernel の TMO_POL と同値 */
+#define T_FOREVER (-1) /* 永久待ち。μT-Kernel の TMO_FEVR と同値 */
+
+/* ポート属性 opt は DELEXIT（生成プロセス終了時に自動削除）のみ。
+ * DELEXIT は BTRON3 共通の属性なので typedef.h にある。 */
+
+/* ランデブポートの生成。戻り値 >0 がポート ID。
+ * 生成したポートはすべてのプロセスから使用可能（仕様）。 */
+IMPORT WERR cre_por(W maxcmsz, W maxrmsz, UW opt);
+
+/* ランデブポートの削除。
+ * 受付待ち・呼出待ちのタスクは ER_DLT で待ちが解除される。
+ * **既に成立しているランデブは成立したまま残り、正常に返答できる**（仕様）。 */
+IMPORT ERR del_por(ID id);
+
+/* ランデブ呼出。戻り値 >0 が返答メッセージのバイト数。
+ *
+ * msg は呼出メッセージの入力と返答メッセージの出力を兼ねる。
+ * **maxrmsz 以上の領域が必要**（仕様）。cmsz は 1..maxcmsz。
+ * tmo は**成立までの待ち時間**で、成立後は返答まで無限に待つ（仕様）。 */
+IMPORT WERR cal_por(ID id, UW calptn, VP msg, W cmsz, TMOUT tmo);
+
+/* ランデブ受付。戻り値 >0 が呼出メッセージのバイト数。
+ * msg は maxcmsz 以上の領域が必要。*rdv にランデブ番号が入る。 */
+IMPORT WERR acp_por(ID id, UW acpptn, W *rdv, VP msg, TMOUT tmo);
+
+/* ランデブ回送。受け付けたランデブを別のポートへ回す。
+ *
+ * 呼出タスクと自タスクの間のランデブを解除し、**呼出タスクが新たに回送先へ
+ * 呼出を行った状態にする**。呼出タスクの待ちは元の tmo に関係なく無限待ち
+ * になり、自タスクは待たない（仕様）。詳細 E1 ④ が E13 の 3 者間要求に
+ * これをそのまま当てている。
+ *
+ * 制約（仕様）: 回送先の maxrmsz は回送前の maxrmsz より大きくてはならない
+ * (ER_OBJ)。cmsz は回送前の maxrmsz より大きくてはならない (ER_PAR)。
+ * どちらも**呼出タスクの msg バッファを使い回す**ことから来ている。 */
+IMPORT ERR fwd_por(ID id, UW calptn, W rdv, VP msg, W cmsz);
+
+/* ランデブ返答。相手に返答してランデブを終了する。rmsz は 1..maxrmsz。 */
+IMPORT ERR rpl_rdv(W rdv, VP msg, W rmsz);
 
 /* ------------------------------------------------------------------ */
 /* 中心核の起動                                                        */

@@ -97,6 +97,7 @@ EXPORT ER knl_init(void)
 	knl_sched_init();
 	knl_sem_init();
 	knl_flg_init();
+	knl_rdv_init();
 
 	for (i = 0; i <= TK_MAX_TSKID; i++) {
 		knl_tcb[i].used = False;

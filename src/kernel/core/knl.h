@@ -55,6 +55,13 @@ struct TCB {
 	UINT wait_mode;    /* イベントフラグ: TWF_* */
 	UINT *wait_flgptn; /* イベントフラグ: 結果の格納先 */
 
+	/* ランデブ (BTRON3 §1.3)。呼出側と受付側で意味が対応している。 */
+	UW rdv_ptn;   /* calptn / acpptn */
+	VP rdv_msg;   /* メッセージバッファ。呼出側は入出力兼用 */
+	W rdv_size;   /* 呼出メッセージのバイト数 */
+	W *rdv_no;    /* acp_por の rdv 格納先 */
+	W rdv_result; /* 成立・返答で得たバイト数 */
+
 	/* タイムアウトの絶対時刻 (起動からのミリ秒)。0 なら無期限。 */
 	SYSTIM timeout;
 
@@ -132,5 +139,11 @@ IMPORT UD knl_alloc_stack(SZ size);
 
 /* タイマ割込みのハンドラ。*/
 IMPORT void knl_timer_handler(UW intid, VP arg);
+
+/* 待ち行列から、選択条件が噛み合う最初のタスクを探す。
+ * 条件は (t->rdv_ptn & ptn) != 0（BTRON3 §1.3 のランデブ成立条件）。 */
+IMPORT TCB *knl_find_match(Queue *q, UW ptn);
+
+IMPORT void knl_rdv_init(void);
 
 #endif /* __BTRON_KERNEL_KNL_H__ */
