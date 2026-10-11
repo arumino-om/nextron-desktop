@@ -166,6 +166,33 @@ EXPORT void knl_unready(TCB *t)
 	}
 }
 
+EXPORT void knl_set_pri(TCB *t, PRI newpri)
+{
+	if (t->pri == newpri) {
+		return;
+	}
+	if (t->state == TTS_RDY) {
+		/* レディキューを移す。新しい優先度の**末尾**に付く。
+		 * 仕様はミューテックスによる優先度変更時の同一優先度内の順序を
+		 * 実装依存としているので、tk_chg_pri と同じ扱いで統一する。 */
+		knl_unready(t);
+		t->pri = newpri;
+		knl_make_ready(t, False);
+		return;
+	}
+	if ((t->state & TTS_WAI) != 0 && t->queue != 0 &&
+	    (t->queue->order & TA_TPRI) != 0) {
+		/* 優先度順の待ち行列なら並び直す */
+		Queue *q = t->queue;
+
+		knl_queue_remove(t);
+		t->pri = newpri;
+		knl_queue_insert(q, t);
+		return;
+	}
+	t->pri = newpri;
+}
+
 EXPORT TCB *knl_highest(void)
 {
 	UW m = ready_map;

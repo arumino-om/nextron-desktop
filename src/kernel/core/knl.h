@@ -18,9 +18,11 @@
 #include <btron/hal.h>
 #include <btron/intc.h>
 #include <btron/kernel.h>
+#include <btron/taskcomm.h>
 #include <btron/vmem.h>
 
 typedef struct TCB TCB;
+typedef struct MTXCB MTXCB; /* 実体は core/mtx.c */
 
 /* 双方向リスト。レディキューと待ち行列の両方に使う。 */
 typedef struct Queue {
@@ -69,6 +71,11 @@ struct TCB {
 	UD stack; /* スタック領域の下端（仮想アドレス） */
 	SZ stksz;
 
+	/* このタスクがロックしているミューテックスの連鎖。
+	 * 簡略化した優先度制御規則で「ロックしているものが無くなったか」を
+	 * 判定するのに使う。タスク終了時の自動解除にも使う。 */
+	MTXCB *mtxlist;
+
 	UB dsname[8];
 	Bool used; /* この TCB が生成済みか */
 };
@@ -88,6 +95,13 @@ IMPORT SYSTIM knl_systim_offset; /* tk_set_tim で設定された分 */
 /* ------------------------------------------------------------------ */
 /* 待ち行列                                                            */
 /* ------------------------------------------------------------------ */
+
+/* 待ち行列の並び。**生の属性をそのまま渡してはならない。**
+ *
+ * 同じビットの意味がオブジェクトによって違う。例えば 0x02 は
+ * セマフォでは TA_CNT、メールボックスでは TA_MPRI、ミューテックスでは
+ * TA_INHERIT（並びは優先度順）である。生成時にここで正規化して渡す。 */
+#define KNL_ORDER(is_pri) ((is_pri) ? TA_TPRI : TA_TFIFO)
 
 IMPORT void knl_queue_init(Queue *q, ATR order);
 IMPORT void knl_queue_insert(Queue *q, TCB *t);
@@ -109,6 +123,13 @@ IMPORT void knl_sched_init(void);
 IMPORT void knl_make_ready(TCB *t, Bool head);
 IMPORT void knl_unready(TCB *t);
 IMPORT TCB *knl_highest(void);
+
+/* タスクの**現在優先度**を変える。ベース優先度は触らない。
+ *
+ * 実行可能ならレディキューを移し、優先度順の待ち行列にいるなら並び直す。
+ * ディスパッチはしないので、呼び出し側が適切な場所で knl_dispatch() する。
+ * ミューテックスの優先度継承と tk_chg_pri が共用する。 */
+IMPORT void knl_set_pri(TCB *t, PRI newpri);
 
 /* 割込み禁止で呼び、割込み禁止で戻る。必要ならタスクを切り替える。 */
 IMPORT void knl_dispatch(void);
@@ -145,5 +166,21 @@ IMPORT void knl_timer_handler(UW intid, VP arg);
 IMPORT TCB *knl_find_match(Queue *q, UW ptn);
 
 IMPORT void knl_rdv_init(void);
+IMPORT void knl_mtx_init(void);
+IMPORT void knl_mbx_init(void);
+IMPORT void knl_mbf_init(void);
+IMPORT void knl_mp_init(void);
+IMPORT void knl_cyc_init(void);
+
+/* タスクが終了するときに、そのタスクがロックしているミューテックスを
+ * すべて解除する（仕様が要求している）。task.c から呼ぶ。 */
+IMPORT void knl_mtx_release_all(TCB *t);
+
+/* TA_CEILING のミューテックスに関わっているタスクのベース優先度を
+ * newpri に変えてよいか。駄目なら True（tk_chg_pri が E_ILUSE を返す）。 */
+IMPORT Bool knl_mtx_ceiling_violation(CONST TCB *t, PRI newpri);
+
+/* 周期ハンドラ・アラームハンドラの時刻を進める。tick ごとに呼ぶ。 */
+IMPORT void knl_cyc_tick(void);
 
 #endif /* __BTRON_KERNEL_KNL_H__ */

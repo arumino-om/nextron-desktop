@@ -86,7 +86,8 @@ EXPORT ID tk_cre_sem(CONST T_CSEM *pk_csem)
 	semcb[id].sematr = pk_csem->sematr;
 	semcb[id].semcnt = pk_csem->isemcnt;
 	semcb[id].maxsem = pk_csem->maxsem;
-	knl_queue_init(&semcb[id].wait, pk_csem->sematr);
+	/* TA_CNT (0x02) を並びの指定と誤解しないよう正規化する */
+	knl_queue_init(&semcb[id].wait, KNL_ORDER((pk_csem->sematr & TA_TPRI) != 0));
 	for (i = 0; i < 8; i++) {
 		semcb[id].dsname[i] =
 		    ((pk_csem->sematr & TA_DSNAME) != 0) ? pk_csem->dsname[i] : 0;

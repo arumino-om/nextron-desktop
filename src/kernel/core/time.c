@@ -34,6 +34,7 @@ EXPORT void knl_timer_handler(UW intid, VP arg)
 	tick_count++;
 	knl_otm += (SYSTIM)hal_timer_tick_ms();
 	knl_timeout_check();
+	knl_cyc_tick();
 	/* 切替は intc_dispatch() の最後で行う。ここではしない。 */
 }
 
@@ -98,6 +99,11 @@ EXPORT ER knl_init(void)
 	knl_sem_init();
 	knl_flg_init();
 	knl_rdv_init();
+	knl_mtx_init();
+	knl_mbx_init();
+	knl_mbf_init();
+	knl_mp_init();
+	knl_cyc_init();
 
 	for (i = 0; i <= TK_MAX_TSKID; i++) {
 		knl_tcb[i].used = False;

@@ -143,6 +143,7 @@ EXPORT ID tk_cre_tsk(CONST T_CTSK *pk_ctsk)
 	t->wait_mode = 0;
 	t->wait_flgptn = 0;
 	t->timeout = 0;
+	t->mtxlist = 0;
 	t->sp = 0;
 	t->stack = stack_top - (UD)stksz;
 	t->stksz = stksz;
@@ -231,6 +232,10 @@ EXPORT void tk_ext_tsk(void)
 		/* アイドルは終了できない。設計の誤りなので止める。 */
 		hal_exit(3);
 	}
+	/* 仕様: タスクが終了する時にロックしているミューテックスが残っていたら
+	 * すべてロック解除する。これをしないと資源が永久に握られる。
+	 * （なおセマフォ資源などは解放しない。仕様がアプリの責任としている。） */
+	knl_mtx_release_all(me);
 	knl_queue_remove(me);
 	knl_unready(me);
 	me->state = TTS_DMT;
@@ -252,6 +257,7 @@ EXPORT void tk_exd_tsk(void)
 	if (me == &knl_idle) {
 		hal_exit(3);
 	}
+	knl_mtx_release_all(me);
 	knl_queue_remove(me);
 	knl_unready(me);
 	me->state = TTS_DMT;
@@ -280,6 +286,7 @@ EXPORT ER tk_ter_tsk(ID tskid)
 		hal_int_restore(state);
 		return E_OBJ;
 	}
+	knl_mtx_release_all(t);
 	knl_queue_remove(t); /* 待ち行列から外す */
 	knl_unready(t);
 	t->state = TTS_DMT;
@@ -315,27 +322,17 @@ EXPORT ER tk_chg_pri(ID tskid, PRI tskpri)
 		hal_int_restore(state);
 		return E_PAR;
 	}
-	t->bpri = newpri;
-	if (t->pri == newpri) {
+	/* TA_CEILING のミューテックスに関わっているタスクのベース優先度を、
+	 * 上限優先度より高くしようとすると E_ILUSE（仕様）。 */
+	if (knl_mtx_ceiling_violation(t, newpri)) {
 		hal_int_restore(state);
-		return E_OK;
+		return E_ILUSE;
 	}
-
-	if (t->state == TTS_RDY) {
-		/* レディキューを移す。新しい優先度の**末尾**に付く。 */
-		knl_unready(t);
-		t->pri = newpri;
-		knl_make_ready(t, False);
-	} else {
-		t->pri = newpri;
-		if ((t->state & TTS_WAI) != 0 && t->queue != 0 &&
-		    (t->queue->order & TA_TPRI) != 0) {
-			/* 優先度順の待ち行列なら並び直す */
-			Queue *q = t->queue;
-
-			knl_queue_remove(t);
-			knl_queue_insert(q, t);
-		}
+	t->bpri = newpri;
+	/* ミューテックスをロックしていない間は現在優先度 = ベース優先度。
+	 * ロック中なら継承した優先度を保ったまま、ベースだけ変える。 */
+	if (t->mtxlist == 0) {
+		knl_set_pri(t, newpri);
 	}
 	knl_dispatch();
 	hal_int_restore(state);

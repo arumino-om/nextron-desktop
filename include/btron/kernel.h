@@ -89,6 +89,16 @@ typedef void (*TASKENTRY)(INT stacd, VP exinf);
 #define TA_FIRST 0x00000000U /* 待ち行列先頭のタスクを優先 */
 #define TA_CNT 0x00000002U   /* 要求数を獲得できるタスクから順に割り当てる */
 
+/* ミューテックス固有。**下位 2 ビットの列挙であってビットフラグではない。**
+ * TA_INHERIT / TA_CEILING は待ち行列を優先度順にする。 */
+#define TA_INHERIT 0x00000002U /* 優先度継承プロトコル */
+#define TA_CEILING 0x00000003U /* 優先度上限プロトコル */
+#define TA_MTXPROTO 0x00000003U /* プロトコルの選択ビット */
+
+/* メールボックス固有 */
+#define TA_MFIFO 0x00000000U /* メッセージを FIFO で管理 */
+#define TA_MPRI 0x00000002U  /* メッセージを優先度順で管理 */
+
 /* イベントフラグ固有 */
 #define TA_WSGL 0x00000000U /* 複数タスクの待ちを許さない */
 #define TA_WMUL 0x00000008U /* 複数タスクの待ちを許す */
@@ -120,7 +130,13 @@ typedef void (*TASKENTRY)(INT stacd, VP exinf);
 #define TTW_DLY 0x00000002U /* tk_dly_tsk による待ち */
 #define TTW_SEM 0x00000004U /* セマフォ待ち */
 #define TTW_FLG 0x00000008U /* イベントフラグ待ち */
-/* ランデブ (BTRON3 §1.3)。μT-Kernel が「(予約)」として空けている値を使う。 */
+#define TTW_MBX 0x00000040U /* メールボックス待ち */
+#define TTW_MTX 0x00000080U /* ミューテックス待ち */
+#define TTW_SMBF 0x00000100U /* メッセージバッファ送信待ち */
+#define TTW_RMBF 0x00000200U /* メッセージバッファ受信待ち */
+#define TTW_MPF 0x00002000U /* 固定長メモリプール待ち */
+#define TTW_MPL 0x00004000U /* 可変長メモリプール待ち */
+/* ランデブ (周辺核 §1.3)。μT-Kernel が「(予約)」として空けている値を使う。 */
 #define TTW_CAL 0x00000400U /* ランデブ成立待ち（呼出側） */
 #define TTW_ACP 0x00000800U /* ランデブ成立待ち（受付側） */
 #define TTW_RDV 0x00001000U /* ランデブ返答待ち */
@@ -136,8 +152,13 @@ typedef void (*TASKENTRY)(INT stacd, VP exinf);
 #define TK_MAX_TSKID 64 /* タスク数 */
 #define TK_MAX_SEMID 64 /* セマフォ数 */
 #define TK_MAX_FLGID 64 /* イベントフラグ数 */
-#define TK_MAX_PORID 32 /* ランデブポート数 */
-#define TK_MAX_RDV 32   /* 同時に成立しているランデブの数 */
+#define TK_MAX_MTXID 32 /* ミューテックス数 */
+#define TK_MAX_MBXID 32 /* メールボックス数 */
+#define TK_MAX_MBFID 16 /* メッセージバッファ数 */
+#define TK_MAX_MPFID 16 /* 固定長メモリプール数 */
+#define TK_MAX_MPLID 16 /* 可変長メモリプール数 */
+#define TK_MAX_CYCID 16 /* 周期ハンドラ数 */
+#define TK_MAX_ALMID 16 /* アラームハンドラ数 */
 
 #define TK_MIN_STKSZ 4096 /* スタックサイズの下限 */
 
@@ -195,6 +216,136 @@ typedef struct t_rflg {
 	UINT flgptn;
 } T_RFLG;
 
+typedef struct t_cmtx {
+	VP exinf;
+	ATR mtxatr;
+	PRI ceilpri; /* TA_CEILING のときだけ有効。上限優先度 */
+	UB dsname[8];
+} T_CMTX;
+
+typedef struct t_rmtx {
+	VP exinf;
+	ID htsk;  /* ロックしているタスク。無ければ 0 */
+	ID wtsk;  /* ロック待ちの先頭タスク。無ければ 0 */
+} T_RMTX;
+
+/* メールボックスのメッセージヘッダ。
+ *
+ * **メッセージの本体はアプリが用意し、カーネルはこのヘッダで繋ぐだけ。**
+ * 内容の複製はしない（規律 R10 の「大きなデータを IPC で運ばない」と
+ * 同じ考え方が仕様の側に既に入っている）。
+ * TA_MPRI のときは T_MSG_PRI を先頭に置く。 */
+typedef struct t_msg {
+	struct t_msg *msgque; /* カーネルが使う。アプリは触らない */
+} T_MSG;
+
+typedef struct t_msg_pri {
+	T_MSG msgque;
+	PRI msgpri; /* 1 が最高。同一優先度は FIFO */
+} T_MSG_PRI;
+
+typedef struct t_cmbx {
+	VP exinf;
+	ATR mbxatr;
+	UB dsname[8];
+} T_CMBX;
+
+typedef struct t_rmbx {
+	VP exinf;
+	ID wtsk;      /* 受信待ちの先頭タスク */
+	T_MSG *pk_msg; /* 待っているメッセージの先頭 */
+} T_RMBX;
+
+typedef struct t_cmbf {
+	VP exinf;
+	ATR mbfatr;
+	W bufsz;  /* メッセージバッファ領域のバイト数。**0 でもよい**（同期通信） */
+	W maxmsz; /* 送信できるメッセージの最大バイト数 */
+	VP bufptr; /* TA_USERBUF のときのバッファ。未サポート */
+	UB dsname[8];
+} T_CMBF;
+
+typedef struct t_rmbf {
+	VP exinf;
+	ID wtsk;  /* 受信待ちの先頭タスク */
+	ID stsk;  /* 送信待ちの先頭タスク */
+	W msgsz;  /* 次に受信されるメッセージのバイト数。無ければ 0 */
+	W frbufsz; /* 空きバッファのバイト数 */
+	W maxmsz;
+} T_RMBF;
+
+typedef struct t_cmpf {
+	VP exinf;
+	ATR mpfatr;
+	W mpfcnt;  /* 獲得できるメモリブロックの数 */
+	W blfsz;   /* メモリブロックのバイト数 */
+	VP bufptr; /* TA_USERBUF のときのバッファ。未サポート */
+	UB dsname[8];
+} T_CMPF;
+
+typedef struct t_rmpf {
+	VP exinf;
+	ID wtsk;
+	W frbcnt; /* 空きブロック数 */
+} T_RMPF;
+
+typedef struct t_cmpl {
+	VP exinf;
+	ATR mplatr;
+	W mplsz;   /* メモリプールのバイト数 */
+	VP bufptr; /* TA_USERBUF のときのバッファ。未サポート */
+	UB dsname[8];
+} T_CMPL;
+
+typedef struct t_rmpl {
+	VP exinf;
+	ID wtsk;
+	W frsz;    /* 空きの総バイト数 */
+	W maxsz;   /* 連続して獲得できる最大バイト数 */
+} T_RMPL;
+
+/* 周期ハンドラ・アラームハンドラ。
+ * ハンドラはタスク独立部で走る。自タスクを待たせる API は呼べない。 */
+typedef void (*CYCHANDLER)(VP exinf);
+typedef void (*ALMHANDLER)(VP exinf);
+
+typedef struct t_ccyc {
+	VP exinf;
+	ATR cycatr;
+	CYCHANDLER cychdr;
+	RELTIM cyctim; /* 起動周期 (ミリ秒)。>0 */
+	RELTIM cycphs; /* 起動位相 (ミリ秒) */
+	UB dsname[8];
+} T_CCYC;
+
+typedef struct t_rcyc {
+	VP exinf;
+	RELTIM lfttim; /* 次に起動するまでの時間 */
+	UINT cycstat;  /* TCYC_* */
+} T_RCYC;
+
+typedef struct t_calm {
+	VP exinf;
+	ATR almatr;
+	ALMHANDLER almhdr;
+	UB dsname[8];
+} T_CALM;
+
+typedef struct t_ralm {
+	VP exinf;
+	RELTIM lfttim; /* 起動までの残り時間。動作していなければ 0 */
+	UINT almstat;  /* TALM_* */
+} T_RALM;
+
+/* 周期ハンドラ属性・状態 */
+#define TA_STA 0x00000002U /* 生成時から動作させる */
+#define TA_PHS 0x00000004U /* 起動位相を保存する */
+
+#define TCYC_STOP 0x00U /* 停止中 */
+#define TCYC_STA 0x01U  /* 動作中 */
+#define TALM_STOP 0x00U
+#define TALM_STA 0x01U
+
 /* ------------------------------------------------------------------ */
 /* タスク管理機能                                                      */
 /* ------------------------------------------------------------------ */
@@ -239,6 +390,56 @@ IMPORT ER tk_clr_flg(ID flgid, UINT clrptn);
 IMPORT ER tk_wai_flg(ID flgid, UINT waiptn, UINT wfmode, UINT *p_flgptn, TMO tmout);
 IMPORT ER tk_ref_flg(ID flgid, T_RFLG *pk_rflg);
 
+IMPORT ID tk_cre_mtx(CONST T_CMTX *pk_cmtx);
+IMPORT ER tk_del_mtx(ID mtxid);
+IMPORT ER tk_loc_mtx(ID mtxid, TMO tmout);
+IMPORT ER tk_unl_mtx(ID mtxid);
+IMPORT ER tk_ref_mtx(ID mtxid, T_RMTX *pk_rmtx);
+
+IMPORT ID tk_cre_mbx(CONST T_CMBX *pk_cmbx);
+IMPORT ER tk_del_mbx(ID mbxid);
+IMPORT ER tk_snd_mbx(ID mbxid, T_MSG *pk_msg);
+IMPORT ER tk_rcv_mbx(ID mbxid, T_MSG **ppk_msg, TMO tmout);
+IMPORT ER tk_ref_mbx(ID mbxid, T_RMBX *pk_rmbx);
+
+IMPORT ID tk_cre_mbf(CONST T_CMBF *pk_cmbf);
+IMPORT ER tk_del_mbf(ID mbfid);
+IMPORT ER tk_snd_mbf(ID mbfid, CONST VP msg, INT msgsz, TMO tmout);
+IMPORT INT tk_rcv_mbf(ID mbfid, VP msg, TMO tmout);
+IMPORT ER tk_ref_mbf(ID mbfid, T_RMBF *pk_rmbf);
+
+/* ------------------------------------------------------------------ */
+/* メモリプール管理機能                                                */
+/* ------------------------------------------------------------------ */
+
+IMPORT ID tk_cre_mpf(CONST T_CMPF *pk_cmpf);
+IMPORT ER tk_del_mpf(ID mpfid);
+IMPORT ER tk_get_mpf(ID mpfid, VP *p_blf, TMO tmout);
+IMPORT ER tk_rel_mpf(ID mpfid, VP blf);
+IMPORT ER tk_ref_mpf(ID mpfid, T_RMPF *pk_rmpf);
+
+IMPORT ID tk_cre_mpl(CONST T_CMPL *pk_cmpl);
+IMPORT ER tk_del_mpl(ID mplid);
+IMPORT ER tk_get_mpl(ID mplid, W blksz, VP *p_blk, TMO tmout);
+IMPORT ER tk_rel_mpl(ID mplid, VP blk);
+IMPORT ER tk_ref_mpl(ID mplid, T_RMPL *pk_rmpl);
+
+/* ------------------------------------------------------------------ */
+/* 周期ハンドラ・アラームハンドラ                                      */
+/* ------------------------------------------------------------------ */
+
+IMPORT ID tk_cre_cyc(CONST T_CCYC *pk_ccyc);
+IMPORT ER tk_del_cyc(ID cycid);
+IMPORT ER tk_sta_cyc(ID cycid);
+IMPORT ER tk_stp_cyc(ID cycid);
+IMPORT ER tk_ref_cyc(ID cycid, T_RCYC *pk_rcyc);
+
+IMPORT ID tk_cre_alm(CONST T_CALM *pk_calm);
+IMPORT ER tk_del_alm(ID almid);
+IMPORT ER tk_sta_alm(ID almid, RELTIM almtim);
+IMPORT ER tk_stp_alm(ID almid);
+IMPORT ER tk_ref_alm(ID almid, T_RALM *pk_ralm);
+
 /* ------------------------------------------------------------------ */
 /* スケジューリング操作                                                */
 /* ------------------------------------------------------------------ */
@@ -262,60 +463,6 @@ IMPORT ER tk_get_otm(SYSTIM *pk_tim); /* 起動からの経過時間 */
 
 IMPORT ER tk_dis_dsp(void);
 IMPORT ER tk_ena_dsp(void);
-
-/* ------------------------------------------------------------------ */
-/* ランデブ (BTRON3 §1.3「プロセス/タスク間同期通信管理」)              */
-/*                                                                     */
-/* **ここだけ μT-Kernel ではなく BTRON3 の API である。** μT-Kernel 3.0 の */
-/* 仕様にランデブは無い（実装の拡張であって標準仕様ではない）。一方       */
-/* BTRON3 §1.3 は完全なシグネチャで規定しているので、そちらに従う（D10）。 */
-/*                                                                     */
-/* **したがって返すのは `ER_*`（周辺核の族）であって `E_*` ではない。**    */
-/* 名前も `tk_` を付けない。規律 R20 の「どの API を呼んだかで族が決まる」  */
-/* がそのまま効いている。E1 の IPC はこの上に載る（詳細 E1 ④）。          */
-/* ------------------------------------------------------------------ */
-
-typedef W TMOUT;      /* タイムアウト指定 (ミリ秒)。BTRON3 §1.3.1 */
-#define T_NOWAIT 0    /* 待たない。μT-Kernel の TMO_POL と同値 */
-#define T_FOREVER (-1) /* 永久待ち。μT-Kernel の TMO_FEVR と同値 */
-
-/* ポート属性 opt は DELEXIT（生成プロセス終了時に自動削除）のみ。
- * DELEXIT は BTRON3 共通の属性なので typedef.h にある。 */
-
-/* ランデブポートの生成。戻り値 >0 がポート ID。
- * 生成したポートはすべてのプロセスから使用可能（仕様）。 */
-IMPORT WERR cre_por(W maxcmsz, W maxrmsz, UW opt);
-
-/* ランデブポートの削除。
- * 受付待ち・呼出待ちのタスクは ER_DLT で待ちが解除される。
- * **既に成立しているランデブは成立したまま残り、正常に返答できる**（仕様）。 */
-IMPORT ERR del_por(ID id);
-
-/* ランデブ呼出。戻り値 >0 が返答メッセージのバイト数。
- *
- * msg は呼出メッセージの入力と返答メッセージの出力を兼ねる。
- * **maxrmsz 以上の領域が必要**（仕様）。cmsz は 1..maxcmsz。
- * tmo は**成立までの待ち時間**で、成立後は返答まで無限に待つ（仕様）。 */
-IMPORT WERR cal_por(ID id, UW calptn, VP msg, W cmsz, TMOUT tmo);
-
-/* ランデブ受付。戻り値 >0 が呼出メッセージのバイト数。
- * msg は maxcmsz 以上の領域が必要。*rdv にランデブ番号が入る。 */
-IMPORT WERR acp_por(ID id, UW acpptn, W *rdv, VP msg, TMOUT tmo);
-
-/* ランデブ回送。受け付けたランデブを別のポートへ回す。
- *
- * 呼出タスクと自タスクの間のランデブを解除し、**呼出タスクが新たに回送先へ
- * 呼出を行った状態にする**。呼出タスクの待ちは元の tmo に関係なく無限待ち
- * になり、自タスクは待たない（仕様）。詳細 E1 ④ が E13 の 3 者間要求に
- * これをそのまま当てている。
- *
- * 制約（仕様）: 回送先の maxrmsz は回送前の maxrmsz より大きくてはならない
- * (ER_OBJ)。cmsz は回送前の maxrmsz より大きくてはならない (ER_PAR)。
- * どちらも**呼出タスクの msg バッファを使い回す**ことから来ている。 */
-IMPORT ERR fwd_por(ID id, UW calptn, W rdv, VP msg, W cmsz);
-
-/* ランデブ返答。相手に返答してランデブを終了する。rmsz は 1..maxrmsz。 */
-IMPORT ERR rpl_rdv(W rdv, VP msg, W rmsz);
 
 /* ------------------------------------------------------------------ */
 /* 中心核の起動                                                        */

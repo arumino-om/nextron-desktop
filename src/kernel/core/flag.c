@@ -92,7 +92,7 @@ EXPORT ID tk_cre_flg(CONST T_CFLG *pk_cflg)
 	flgcb[id].exinf = pk_cflg->exinf;
 	flgcb[id].flgatr = pk_cflg->flgatr;
 	flgcb[id].flgptn = pk_cflg->iflgptn;
-	knl_queue_init(&flgcb[id].wait, pk_cflg->flgatr);
+	knl_queue_init(&flgcb[id].wait, KNL_ORDER((pk_cflg->flgatr & TA_TPRI) != 0));
 	for (i = 0; i < 8; i++) {
 		flgcb[id].dsname[i] =
 		    ((pk_cflg->flgatr & TA_DSNAME) != 0) ? pk_cflg->dsname[i] : 0;
