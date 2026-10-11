@@ -145,6 +145,50 @@ LOCAL UD attr_to_entry(UW attr)
 	return e;
 }
 
+/* ページテーブル 1 ページを取る。
+ *
+ * 物理ページアロケータ (mm/page.c) が立っていればそちらから取る。
+ * **そちらは解放できる**ので、プロセスのアドレス空間を畳めるようになる
+ * （周辺核 §1.1。arm64 側と同じ理由・同じ構造）。 */
+LOCAL UD alloc_table(void)
+{
+	UD pa = pmem_alloc(1);
+
+	return (pa != 0) ? pa : pmem_early_alloc_page();
+}
+
+/* ツリーを再帰的に解放する。
+ *
+ * **解放するのはページテーブルだけ。** 葉 (PT) が指しているデータページは
+ * それを写像した側の持ち物なので触らない（規律 R18）。
+ *
+ * 【arm64 との構造差】CR3 は 1 本しかないので、PML4 には下位半分と
+ * 上位半分（共有）が同居している。上位 256 エントリは全プロセスで
+ * 共有している 1 組の木を指しているので、**絶対に下ってはならない**。
+ * 呼び出し側が last で 256 を渡して下位半分だけに限る。 */
+LOCAL void free_table(UD pa, UW level, UW last)
+{
+	if (pa == 0) {
+		return;
+	}
+	if (level < 3) {
+		UD *tbl = table_ptr(pa);
+		UW i;
+
+		for (i = 0; i < last; i++) {
+			UD e = tbl[i];
+
+			/* 大ページ (E_PS) は写像なので下らない。 */
+			if ((e & E_P) != 0 && (e & E_PS) == 0) {
+				free_table(e & E_ADDR_MASK, level + 1, PTE_PER_TABLE);
+			}
+		}
+	}
+	/* 起動初期のバンプアロケータから出た表は返せない。
+	 * pmem_free() が管理外と判断して何もしない。 */
+	pmem_free(pa, 1);
+}
+
 LOCAL UD *walk(UD root_pa, UD va, Bool create)
 {
 	UD *tbl = table_ptr(root_pa);
@@ -158,7 +202,7 @@ LOCAL UD *walk(UD root_pa, UD va, Bool create)
 			if (!create) {
 				return 0;
 			}
-			next = pmem_early_alloc_page();
+			next = alloc_table();
 			if (next == 0) {
 				return 0;
 			}
@@ -210,7 +254,7 @@ EXPORT ERR hal_vm_create(AddrSpace *as)
 	CONST UD *src;
 	UW i;
 
-	as->root_pa = pmem_early_alloc_page();
+	as->root_pa = alloc_table();
 	if (as->root_pa == 0) {
 		return -1;
 	}
@@ -235,6 +279,11 @@ EXPORT ERR hal_vm_create(AddrSpace *as)
 
 EXPORT void hal_vm_destroy(AddrSpace *as)
 {
+	if (as->root_pa == 0) {
+		return;
+	}
+	/* 下位半分だけ。上位 256 エントリは共有している木を指している。 */
+	free_table(as->root_pa, 0, PML4_SHARED_FIRST);
 	as->root_pa = 0;
 	as->asid = 0;
 }

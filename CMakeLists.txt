@@ -147,6 +147,7 @@ if(BTRON_ARCH STREQUAL "arm64")
     src/kernel/core/mempool.c
     src/kernel/core/cyclic.c
     src/kernel/periph/taskcomm.c
+    src/kernel/periph/proc.c
     src/kernel/core/time.c
     src/kernel/core/intc.c
     src/kernel/core/selftest.c

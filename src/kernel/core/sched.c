@@ -27,8 +27,12 @@ EXPORT W knl_dsp_disabled;
 LOCAL Queue ready[TK_MAX_TSKPRI + 1];
 
 /* どのキューに在るかのビットマップ。bit (pri-1)。
- * TK_MAX_TSKPRI = 32 なので UW 1 枚に収まる。 */
-LOCAL UW ready_map;
+ *
+ * 優先度が 130 段（周辺核のプロセス優先度を 1 対 1 で受ける。kernel.h）
+ * あるので UW 1 枚では足りない。語に分けて持ち、最高優先度の探索は
+ * 下位の語から順に見る。語の数は 5 なので最悪でも 5 回。 */
+#define READY_WORDS ((TK_MAX_TSKPRI + 31) / 32)
+LOCAL UW ready_map[READY_WORDS];
 
 /* ------------------------------------------------------------------ */
 /* 待ち行列                                                            */
@@ -135,7 +139,9 @@ EXPORT void knl_sched_init(void)
 	for (i = 0; i <= TK_MAX_TSKPRI; i++) {
 		knl_queue_init(&ready[i], TA_TFIFO);
 	}
-	ready_map = 0;
+	for (i = 0; i < READY_WORDS; i++) {
+		ready_map[i] = 0;
+	}
 	knl_dsp_disabled = 0;
 }
 
@@ -150,19 +156,24 @@ EXPORT void knl_make_ready(TCB *t, Bool head)
 	} else {
 		knl_queue_insert_tail(&ready[t->pri], t);
 	}
-	ready_map |= 1U << (UW)(t->pri - 1);
+	ready_map[(t->pri - 1) / 32] |= 1U << (UW)((t->pri - 1) % 32);
 }
 
 EXPORT void knl_unready(TCB *t)
 {
 	PRI pri = t->pri;
 
+	/* アイドルの優先度は TK_MAX_TSKPRI + 1（番兵）で、レディキューの
+	 * 添字の範囲外。&ready[pri] を作る前に外しておく。 */
+	if (t == &knl_idle) {
+		return;
+	}
 	if (t->queue != &ready[pri]) {
 		return;
 	}
 	knl_queue_remove(t);
 	if (knl_queue_empty(&ready[pri])) {
-		ready_map &= ~(1U << (UW)(pri - 1));
+		ready_map[(pri - 1) / 32] &= ~(1U << (UW)((pri - 1) % 32));
 	}
 }
 
@@ -195,13 +206,17 @@ EXPORT void knl_set_pri(TCB *t, PRI newpri)
 
 EXPORT TCB *knl_highest(void)
 {
-	UW m = ready_map;
+	W i;
 
-	if (m == 0) {
-		return 0;
+	for (i = 0; i < READY_WORDS; i++) {
+		UW m = ready_map[i];
+
+		if (m != 0) {
+			/* 立っている最下位ビット = 最も小さい優先度番号 = 最高優先度 */
+			return ready[i * 32 + __builtin_ctz(m) + 1].head;
+		}
 	}
-	/* 立っている最下位ビット = 最も小さい優先度番号 = 最高優先度 */
-	return ready[__builtin_ctz(m) + 1].head;
+	return 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -218,6 +233,10 @@ EXPORT void knl_dispatch(void)
 	if (!knl_on || knl_dsp_disabled > 0) {
 		return;
 	}
+	/* 終了して ID を預けたタスクの TCB とスタックを返す。
+	 * ここで呼ぶのは、**いま走っているのが死んだタスクではない**ことが
+	 * 保証される唯一の場所だから（死んだタスクはもう選ばれない）。 */
+	knl_reclaim();
 	next = knl_highest();
 	if (next == 0) {
 		next = &knl_idle;
@@ -252,6 +271,13 @@ EXPORT void knl_dispatch(void)
 	knl_unready(next);
 	next->state = TTS_RUN;
 	knl_cur = next;
+	/* 周辺核にアドレス空間を切り替えさせる。
+	 *
+	 * BTRON3 §1.1.1「1 つのプロセスは 1 つの独立したアドレス空間を持つ」。
+	 * 中心核はプロセスという概念を持たないので、タスク ID だけ渡して
+	 * 判断は周辺核に任せる。カーネルは上位半分で走っているので、
+	 * 下位半分 (TTBR0 / CR3) を差し替えても実行中のコードは壊れない。 */
+	prc_task_switch(next->tskid);
 	hal_ctx_switch(&prev->sp, next->sp);
 	/* 戻ってきた = このタスクが再び選ばれた。割込みは禁止のまま。 */
 }
@@ -389,6 +415,29 @@ EXPORT ER tk_rot_rdq(PRI tskpri)
 	}
 	hal_int_restore(state);
 	return E_OK;
+}
+
+/* タイムスライスを使い切ったので譲る。タイマ割込みの中から呼ぶ。
+ *
+ * **ここでは切り替えない。** 自タスクを同一優先度の待ち行列の**末尾**に
+ * 戻すだけで、実際の切替は割込み処理の最後の knl_dispatch_from_irq() が
+ * 行う。割込みハンドラの途中でコンテキストを切り替えると、ハンドラの
+ * 残りが別のタスクのスタックで走ってしまう。
+ *
+ * 末尾なのはプリエンプトではないから。自分で時間を使い切って譲るので、
+ * 同一優先度の中では最後に回る（§1.1.3 の「同一優先度の場合は
+ * ラウンドロビン方式で平等にスケジューリング」がこれで成立する）。 */
+EXPORT void knl_yield_slice(void)
+{
+	TCB *me = knl_cur;
+
+	if (me == &knl_idle || me->state != TTS_RUN || knl_dsp_disabled > 0) {
+		return;
+	}
+	if (knl_queue_empty(&ready[me->pri])) {
+		return; /* 同一優先度に誰もいない。譲る相手がいないので何もしない */
+	}
+	knl_make_ready(me, False);
 }
 
 EXPORT ER tk_dis_dsp(void)

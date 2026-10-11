@@ -155,6 +155,56 @@ LOCAL UD attr_to_desc(UW attr)
 	return d;
 }
 
+/* ページテーブル 1 ページを取る。
+ *
+ * 物理ページアロケータ (mm/page.c) が立っていればそちらから取る。
+ * **そちらは解放できる**ので、プロセスのアドレス空間を畳めるようになる
+ * （周辺核 §1.1。プロセスは生成と終了を繰り返すので、ここが解放できないと
+ * 1 プロセスごとに 1 ページ以上を失う）。
+ *
+ * hal_vm_init() が上位半分の表を作る時点では pmem_init() がまだ走って
+ * いないので、起動初期のバンプアロケータに落ちる。上位半分の表は規律 R4 に
+ * より起動時に確保して以後不変なので、返せなくてよい。 */
+LOCAL UD alloc_table(void)
+{
+	UD pa = pmem_alloc(1);
+
+	return (pa != 0) ? pa : pmem_early_alloc_page();
+}
+
+/* 下位半分のツリーを再帰的に解放する。
+ *
+ * **解放するのはページテーブルだけ。** 葉 (L3) が指しているデータページは
+ * それを写像した側の持ち物なので触らない。ここで一緒に解放すると、
+ * 共有メモリやフレームバッファの別名まで壊す（規律 R18）。
+ *
+ * 【前提】このアドレス空間が TTBR0 に入っていないこと。有効なまま表を
+ * 解放すると、MMU が解放済みのページを辿り続ける。 */
+LOCAL void free_table(UD pa, UW level)
+{
+	if (pa == 0) {
+		return;
+	}
+	if (level < 3) {
+		UD *tbl = table_ptr(pa);
+		UW n = (level == 0) ? L0_ENTRIES : PTE_PER_TABLE;
+		UW i;
+
+		for (i = 0; i < n; i++) {
+			UD e = tbl[i];
+
+			/* L0-L2 でテーブル記述子 (bit1 = 1) のものだけ下る。
+			 * ブロック記述子 (bit1 = 0) は写像なので触らない。 */
+			if ((e & D_VALID) != 0 && (e & D_TABLE) != 0) {
+				free_table(e & D_ADDR_MASK, level + 1);
+			}
+		}
+	}
+	/* 起動初期のバンプアロケータから出た表は返せない。
+	 * pmem_free() が管理外と判断して何もしない。 */
+	pmem_free(pa, 1);
+}
+
 /* va に対応する L3 エントリへのポインタを得る。途中のテーブルは必要なら作る。 */
 LOCAL UD *walk(UD root_pa, UD va, Bool create)
 {
@@ -169,7 +219,7 @@ LOCAL UD *walk(UD root_pa, UD va, Bool create)
 			if (!create) {
 				return 0;
 			}
-			next = pmem_early_alloc_page();
+			next = alloc_table();
 			if (next == 0) {
 				return 0;
 			}
@@ -220,7 +270,7 @@ EXPORT ERR hal_vm_create(AddrSpace *as)
 	/* 下位半分 (TTBR0) のツリーを確保するだけでよい。
 	 * 上位半分は TTBR1 が別に指しているので複製も同期も要らない。
 	 * x86_64 ではここで上位 256 PML4 エントリ 2KB の複製が要る (§3.2-4)。 */
-	as->root_pa = pmem_early_alloc_page();
+	as->root_pa = alloc_table();
 	if (as->root_pa == 0) {
 		return -1;
 	}
@@ -249,8 +299,10 @@ EXPORT void hal_vm_drop_identity(void)
 
 EXPORT void hal_vm_destroy(AddrSpace *as)
 {
-	/* 起動初期のバンプアロケータは解放できない。
-	 * 正式な物理メモリ管理ができてから実装する。 */
+	if (as->root_pa == 0) {
+		return;
+	}
+	free_table(as->root_pa, 0);
 	as->root_pa = 0;
 	as->asid = 0;
 }

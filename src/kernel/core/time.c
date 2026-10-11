@@ -35,6 +35,10 @@ EXPORT void knl_timer_handler(UW intid, VP arg)
 	knl_otm += (SYSTIM)hal_timer_tick_ms();
 	knl_timeout_check();
 	knl_cyc_tick();
+	/* 周辺核のプロセス管理に時間を知らせる。CPU 時間の課金と、
+	 * BTRON3 §1.1.3 のラウンドロビン（中心核は時分割をしないので
+	 * 周辺核がここで足す）。 */
+	prc_tick();
 	/* 切替は intc_dispatch() の最後で行う。ここではしない。 */
 }
 
@@ -104,6 +108,7 @@ EXPORT ER knl_init(void)
 	knl_mbf_init();
 	knl_mp_init();
 	knl_cyc_init();
+	(void)prc_init(); /* 周辺核 §1.1。ランデブ (knl_rdv_init) と同じ扱い */
 
 	for (i = 0; i <= TK_MAX_TSKID; i++) {
 		knl_tcb[i].used = False;

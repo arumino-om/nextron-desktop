@@ -18,6 +18,7 @@
 #include <btron/hal.h>
 #include <btron/intc.h>
 #include <btron/kernel.h>
+#include <btron/proc.h>
 #include <btron/taskcomm.h>
 #include <btron/vmem.h>
 
@@ -133,6 +134,23 @@ IMPORT void knl_set_pri(TCB *t, PRI newpri);
 
 /* 割込み禁止で呼び、割込み禁止で戻る。必要ならタスクを切り替える。 */
 IMPORT void knl_dispatch(void);
+
+/* タイムスライスを使い切ったので同一優先度の末尾へ回る。
+ * **切替はしない。** 周辺核の prc_tick() から呼ぶ（詳細は sched.c）。 */
+IMPORT void knl_yield_slice(void);
+
+/* ------------------------------------------------------------------ */
+/* 自タスクの後片付け                                                  */
+/*                                                                     */
+/* **自分のスタックの上で自分のスタックは返せない。** tk_exd_tsk 相当の     */
+/* 「終了して TCB ごと消える」を安全に行うため、ID をいったん預けて       */
+/* 休止状態になり、次に別のタスクへ切り替わった後で削除する。            */
+/* ------------------------------------------------------------------ */
+
+IMPORT void knl_defer_del(ID tskid);
+
+/* 預かったタスクを削除する。knl_dispatch() の入口から呼ばれる。 */
+IMPORT void knl_reclaim(void);
 
 /* ------------------------------------------------------------------ */
 /* 待ちと解除                                                          */
