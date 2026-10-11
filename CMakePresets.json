@@ -1,0 +1,29 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 25, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+    },
+    {
+      "name": "arm64",
+      "inherits": "base",
+      "displayName": "arm64 (AArch64) ベアメタル — Phase 1 の先行ターゲット",
+      "toolchainFile": "${sourceDir}/cmake/toolchain-arm64.cmake"
+    },
+    {
+      "name": "x86_64",
+      "inherits": "base",
+      "displayName": "x86_64 ベアメタル",
+      "toolchainFile": "${sourceDir}/cmake/toolchain-x86_64.cmake"
+    }
+  ],
+  "buildPresets": [
+    { "name": "arm64",  "configurePreset": "arm64" },
+    { "name": "x86_64", "configurePreset": "x86_64" }
+  ]
+}
