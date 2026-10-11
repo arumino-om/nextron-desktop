@@ -155,7 +155,15 @@ IMPORT void knl_timeout_check(void);
 /* tskid の検査。TSK_SELF なら自タスク。不正なら 0 を返し *er に理由を入れる。 */
 IMPORT TCB *knl_get_tcb(ID tskid, ER *er);
 
-/* スタックを確保する。戻り値はスタックの上端（仮想アドレス）。失敗で 0。 */
+/* ページを確保して直接マップ上の仮想アドレスを返す。失敗で 0。
+ *
+ * 物理ページアロケータが立っていればそちらから取り、**解放できる**。
+ * 立っていない（メモリマップが無い直接起動）ときだけ、起動初期の
+ * バンプアロケータから取る。その場合 knl_free_pages() は何もしない。 */
+IMPORT UD knl_alloc_pages(SZ size);
+IMPORT void knl_free_pages(UD va, SZ size);
+
+/* スタックを確保する。戻り値はスタックの**上端**（仮想アドレス）。失敗で 0。 */
 IMPORT UD knl_alloc_stack(SZ size);
 
 /* タイマ割込みのハンドラ。*/

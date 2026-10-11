@@ -160,7 +160,9 @@ if(BTRON_ARCH STREQUAL "arm64")
     src/kernel/screen/console.c
     src/kernel/screen/panic.c
     "${BTRON_FONT_DATA}"
-    src/kernel/mm/pmem.c)
+    src/kernel/mm/pmem.c
+    src/kernel/mm/page.c
+    src/kernel/mm/kheap.c)
 
   target_link_libraries(btron-kernel PRIVATE btron_flags btron_headers btron_test)
   set_target_properties(btron-kernel PROPERTIES OUTPUT_NAME "btron-arm64" SUFFIX ".elf")

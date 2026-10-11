@@ -183,11 +183,10 @@ EXPORT ID tk_cre_mbf(CONST T_CMBF *pk_cmbf)
 		UD ps = (UD)hal_page_size();
 		UD total = ((UD)pk_cmbf->bufsz + ps - 1) & ~(ps - 1);
 
-		base = knl_alloc_stack((SZ)total);
+		base = knl_alloc_pages((SZ)total);
 		if (base == 0) {
 			return E_NOMEM;
 		}
-		base -= total;
 	}
 
 	state = hal_int_disable();
@@ -243,6 +242,10 @@ EXPORT ER tk_del_mbf(ID mbfid)
 	m->used = False;
 	knl_dispatch();
 	hal_int_restore(state);
+	if (m->base != 0) {
+		knl_free_pages(m->base, (SZ)m->bufsz);
+		m->base = 0;
+	}
 	return E_OK;
 }
 

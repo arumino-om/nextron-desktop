@@ -16,6 +16,7 @@
  * T0SZ=17 なので L0 の有効エントリ数は 512 ではなく 256 になる。
  */
 
+#include <btron/bootinfo.h>
 #include <btron/hal.h>
 #include <btron/vmem.h>
 
@@ -369,12 +370,35 @@ EXPORT ERR hal_vm_init(void)
 	 *
 	 * カーネルとプールは連続しているとは限らない（UEFI 経由だとローダが
 	 * 別々の場所に確保しうる）。1 本に丸めると間の MMIO まで巻き込むので、
-	 * 2 範囲として別々に張る。 */
+	 * 範囲ごとに別々に張る。 */
 	if (map_direct(kstart, kend) != 0) {
 		return -1;
 	}
 	if (map_direct(pmem_early_base(), pmem_early_limit()) != 0) {
 		return -1;
+	}
+	/* **RAM は全部張る。**
+	 *
+	 * 物理ページアロケータ (mm/page.c) が配ったページをゼロクリアしたり
+	 * 中身を読み書きしたりするのに、直接マップ経由で触る必要がある。
+	 * 使えない領域 (MMIO 等) は張らない。張ると投機実行でデバイスを
+	 * 突っつくことになる。
+	 *
+	 * 512MB を 4KB 粒度で張ると表が 1MB ほど増える。2MB ブロックを
+	 * 使えば 1/512 で済むが、まずは素直に。 */
+	{
+		UW i;
+
+		for (i = 0; i < bootinfo_mem_count(); i++) {
+			CONST BootMemRegion *r = bootinfo_mem(i);
+
+			if (r->type == BMEM_UNUSABLE) {
+				continue;
+			}
+			if (map_direct(r->base, r->base + r->size) != 0) {
+				return -1;
+			}
+		}
 	}
 	/* カーネル本体を上位半分 (BTRON_KERNEL_BASE) に写像する。
 	 * ここへ移ることで TTBR0 を丸ごとプロセスに明け渡せるようになる。 */

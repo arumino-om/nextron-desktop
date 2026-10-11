@@ -8,11 +8,12 @@
  *   可変長  任意の大きさを配る。最初に合う穴を使う (first fit) 単純な
  *           実装にしてある。断片化はする
  *
- * 【プールの領域をどこから取るか】いまは起動初期のバンプアロケータ
- * (`pmem_early_alloc_page`) から取る。**解放できない**ので、プールを削除
- * しても領域は戻らない。周辺核のメモリ管理 (Phase 2 / A14) ができたら
- * そちらへ差し替える。A14 でメモリブロックサイズを 4KB = ページサイズと
- * 決めてあるので、そのときプールの単位とページの単位が揃う。
+ * 【プールの領域をどこから取るか】物理ページアロケータ (mm/page.c) から
+ * `knl_alloc_pages()` 経由で取り、削除で返す。A14 でメモリブロックサイズを
+ * 4KB = ページサイズと決めてあるので、プールの単位とページの単位が揃う。
+ *
+ * メモリマップが無い構成（QEMU の -kernel 直接起動）ではアロケータが
+ * 立たないので、起動初期のバンプアロケータに落ちる。その場合は返せない。
  *
  * 【規律 R2】ページサイズを直書きしない。`hal_page_size()` を使う。
  */
@@ -98,12 +99,10 @@ EXPORT ID tk_cre_mpf(CONST T_CMPF *pk_cmpf)
 	}
 	total = (UD)blfsz * (UD)pk_cmpf->mpfcnt;
 
-	base = knl_alloc_stack((SZ)total); /* ページ単位で確保して上端を返す */
+	base = knl_alloc_pages((SZ)total);
 	if (base == 0) {
 		return E_NOMEM;
 	}
-	base -= ((total + (UD)hal_page_size() - 1) / (UD)hal_page_size()) *
-	        (UD)hal_page_size();
 
 	state = hal_int_disable();
 	for (i = 1; i <= TK_MAX_MPFID; i++) {
@@ -152,9 +151,11 @@ EXPORT ER tk_del_mpf(ID mpfid)
 		knl_wait_release(m->wait.head, E_DLT);
 	}
 	m->used = False;
-	/* 領域は返せない（起動初期のバンプアロケータ）。Phase 2 で直す。 */
 	knl_dispatch();
 	hal_int_restore(state);
+	/* 領域を返す。割込みを許してから（used = False なのでもう掴まれない）。 */
+	knl_free_pages(m->base, (SZ)((UD)m->blfsz * (UD)m->mpfcnt));
+	m->base = 0;
 	return E_OK;
 }
 
@@ -392,11 +393,10 @@ EXPORT ID tk_cre_mpl(CONST T_CMPL *pk_cmpl)
 	}
 	ps = (UD)hal_page_size();
 	total = ((UD)pk_cmpl->mplsz + ps - 1) & ~(ps - 1);
-	base = knl_alloc_stack((SZ)total);
+	base = knl_alloc_pages((SZ)total);
 	if (base == 0) {
 		return E_NOMEM;
 	}
-	base -= total;
 
 	state = hal_int_disable();
 	for (i = 1; i <= TK_MAX_MPLID; i++) {
@@ -447,6 +447,8 @@ EXPORT ER tk_del_mpl(ID mplid)
 	m->used = False;
 	knl_dispatch();
 	hal_int_restore(state);
+	knl_free_pages((UD)(VP)m->head, (SZ)m->mplsz);
+	m->head = 0;
 	return E_OK;
 }
 

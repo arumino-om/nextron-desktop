@@ -329,6 +329,17 @@ EXPORT void boot_main(UD arg)
 	put_dec(pmem_early_used() / 1024);
 	hal_console_puts(" KB\n");
 
+	/* 物理ページアロケータ。直接マップが張られた後でないと立てられない
+	 * （確保したページをゼロクリアするのに直接マップ経由で触る）。
+	 * メモリマップが無い直接起動では立たない。黙って先へ進む。 */
+	if (pmem_init() == E_OK) {
+		hal_console_puts("  物理メモリ  : ");
+		put_dec(pmem_total_pages() * hal_page_size() / 1024 / 1024);
+		hal_console_puts("MB (");
+		put_dec(pmem_total_pages());
+		hal_console_puts(" ページ) 管理下\n");
+	}
+
 	show_bootinfo();
 	show_machdesc();
 
@@ -562,6 +573,107 @@ EXPORT void boot_main(UD arg)
 		BTRON_CHECK("確保済みがある", pmem_early_used() > 0);
 		BTRON_CHECK("上限内", pmem_early_base() + pmem_early_used()
 		                          <= pmem_early_limit());
+	});
+
+	BTRON_TEST("物理ページアロケータ (A13 / A14 / §1.5 の土台)", {
+		UD ps = (UD)hal_page_size();
+
+		if (bootinfo_mem_count() == 0) {
+			/* メモリマップが無い構成。アロケータは立たない。 */
+			BTRON_CHECK("立っていない", pmem_total_pages() == 0);
+			BTRON_CHECK("確保できない", pmem_alloc(1) == 0);
+		} else {
+			UD a;
+			UD b;
+			UD c;
+			UD free0 = pmem_free_pages();
+
+			BTRON_CHECK("管理下にある", pmem_total_pages() > 1000);
+			BTRON_CHECK("空きがある", free0 > 1000);
+
+			a = pmem_alloc(1);
+			BTRON_CHECK("1 ページ確保", a != 0);
+			BTRON_CHECK("ページ境界", (a & (ps - 1)) == 0);
+			BTRON_CHECK("減った", pmem_free_pages() == free0 - 1);
+			/* ゼロクリアされていること。前の中身が漏れると情報漏洩になる。 */
+			BTRON_CHECK("ゼロクリア", *(volatile UD *)(VP)BTRON_PA_TO_VA(a) == 0);
+			/* 直接マップ経由で書いて読めること */
+			*(volatile UD *)(VP)BTRON_PA_TO_VA(a) = 0xB7120001ULL;
+			BTRON_CHECK("書いて読める",
+			            *(volatile UD *)(VP)BTRON_PA_TO_VA(a) == 0xB7120001ULL);
+
+			b = pmem_alloc(1);
+			BTRON_CHECK("2 つめ", b != 0 && b != a);
+
+			/* **連続確保。** §1.5 の get_mbk が「nblk 個の連続した
+			 * メモリブロック」を求めているので、ここが要件。 */
+			c = pmem_alloc(4);
+			BTRON_CHECK("4 ページ確保", c != 0);
+			BTRON_CHECK("連続している",
+			            *(volatile UD *)(VP)BTRON_PA_TO_VA(c + 3 * ps) == 0);
+			BTRON_CHECK("減った", pmem_free_pages() == free0 - 6);
+
+			pmem_free(c, 4);
+			pmem_free(b, 1);
+			pmem_free(a, 1);
+			BTRON_CHECK("全部戻った", pmem_free_pages() == free0);
+			/* 戻したページは再び配られる */
+			{
+				UD d = pmem_alloc(1);
+
+				BTRON_CHECK("再確保", d != 0);
+				pmem_free(d, 1);
+			}
+
+			/* カーネル本体と早期プールは絶対に配らない。
+			 * 配ると自分のコードやページテーブルを上書きする。 */
+			BTRON_CHECK("カーネルは管理外扱い",
+			            pmem_owns(hal_kernel_pa_base()) == False
+			                || pmem_free_pages() < pmem_total_pages() + 1);
+			/* 変な引数で壊れない */
+			BTRON_CHECK("0 ページ", pmem_alloc(0) == 0);
+			pmem_free(0, 1);
+			pmem_free(1, 1); /* ページ境界でない */
+			BTRON_CHECK("壊れていない", pmem_free_pages() == free0);
+		}
+	});
+
+	BTRON_TEST("カーネルヒープ", {
+		VP a;
+		VP b;
+		VP c;
+
+		if (bootinfo_mem_count() == 0) {
+			BTRON_CHECK("ページが無いので取れない", kmalloc(16) == 0);
+		} else {
+			UD used0 = kheap_used();
+
+			a = kmalloc(16);
+			b = kmalloc(1000);
+			BTRON_CHECK("確保", a != 0 && b != 0);
+			BTRON_CHECK("重ならない", a != b);
+			BTRON_CHECK("8 バイト整列", ((UD)a & 7U) == 0 && ((UD)b & 7U) == 0);
+			BTRON_CHECK("使用量が増えた", kheap_used() > used0);
+			*(volatile UD *)a = 0xAAAAAAAAULL;
+			*(volatile UD *)b = 0xBBBBBBBBULL;
+			BTRON_CHECK("独立している",
+			            *(volatile UD *)a == 0xAAAAAAAAULL
+			                && *(volatile UD *)b == 0xBBBBBBBBULL);
+
+			kfree(a);
+			kfree(b);
+			BTRON_CHECK("戻った", kheap_used() == used0);
+			kfree(0);     /* NULL は無視 */
+			BTRON_CHECK("0 バイト", kmalloc(0) == 0);
+
+			/* ページより大きい要求も通る */
+			c = kmalloc(100000);
+			BTRON_CHECK("大きい確保", c != 0);
+			*(volatile UD *)c = 1;
+			kfree(c);
+			BTRON_CHECK("戻った", kheap_used() == used0);
+			BTRON_CHECK("ヒープは成長した", kheap_total() > 0);
+		}
 	});
 
 	BTRON_TEST("直接マップが引ける", {

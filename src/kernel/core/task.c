@@ -45,13 +45,24 @@ EXPORT TCB *knl_get_tcb(ID tskid, ER *er)
 	return t;
 }
 
-EXPORT UD knl_alloc_stack(SZ size)
+EXPORT UD knl_alloc_pages(SZ size)
 {
 	UD ps = (UD)hal_page_size();
 	UD pages = ((UD)size + ps - 1) / ps;
-	UD base = 0;
+	UD base;
 	UD i;
 
+	if (pages == 0) {
+		return 0;
+	}
+	/* 本物のアロケータがあればそちらから。解放できる。 */
+	base = pmem_alloc((UW)pages);
+	if (base != 0) {
+		return BTRON_PA_TO_VA(base);
+	}
+	/* 立っていない（メモリマップが無い直接起動）。起動初期のバンプ
+	 * アロケータから取る。連続を返す前提なので、崩れたら諦める。 */
+	base = 0;
 	for (i = 0; i < pages; i++) {
 		UD pa = pmem_early_alloc_page();
 
@@ -61,16 +72,36 @@ EXPORT UD knl_alloc_stack(SZ size)
 		if (i == 0) {
 			base = pa;
 		} else if (pa != base + i * ps) {
-			/* 起動初期のバンプアロケータは連続を返すはず。
-			 * 崩れたら黙って続けず落とす。 */
 			return 0;
 		}
 	}
+	return (base != 0) ? BTRON_PA_TO_VA(base) : 0;
+}
+
+EXPORT void knl_free_pages(UD va, SZ size)
+{
+	UD ps = (UD)hal_page_size();
+	UD pages = ((UD)size + ps - 1) / ps;
+
+	if (va == 0 || pages == 0 || va < BTRON_DIRECTMAP_BASE) {
+		return;
+	}
+	/* 起動初期のバンプアロケータから出たものは返せない。
+	 * pmem_owns() が管理外と答えるので、そのまま捨てる。 */
+	pmem_free(va - BTRON_DIRECTMAP_BASE, (UW)pages);
+}
+
+EXPORT UD knl_alloc_stack(SZ size)
+{
+	UD ps = (UD)hal_page_size();
+	UD pages = ((UD)size + ps - 1) / ps;
+	UD base = knl_alloc_pages(size);
+
 	if (base == 0) {
 		return 0;
 	}
-	/* 直接マップ上の仮想アドレスで返す。上端（スタックは下向きに伸びる）。 */
-	return BTRON_PA_TO_VA(base) + pages * ps;
+	/* 上端を返す。スタックは下向きに伸びる。 */
+	return base + pages * ps;
 }
 
 /* ------------------------------------------------------------------ */
@@ -177,9 +208,13 @@ EXPORT ER tk_del_tsk(ID tskid)
 	}
 	t->used = False;
 	t->state = 0;
-	/* スタックは返さない。起動初期のバンプアロケータに解放が無い。
-	 * 周辺核のメモリ管理 (Phase 2) ができたら返すようにする。 */
 	hal_int_restore(state);
+
+	/* スタックを返す。割込みを許してから返す（解放は長い）。
+	 * この TCB はもう used = False なので他から掴まれない。 */
+	knl_free_pages(t->stack, t->stksz);
+	t->stack = 0;
+	t->stksz = 0;
 	return E_OK;
 }
 
