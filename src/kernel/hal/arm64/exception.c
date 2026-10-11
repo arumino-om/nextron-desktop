@@ -61,9 +61,35 @@ EXPORT void hal_exception_init(void)
 		: "memory");
 }
 
+/* 例外報告の入れ子の深さ。
+ *
+ * **報告の途中でもう 1 度例外が起きると無限に回る。** 実際に起きた:
+ * `hal_exit()` は ARM セミホスティングの `hlt #0xF000` で QEMU を
+ * 終わらせるが、`-semihosting` が無い環境（実機や、付け忘れた QEMU）では
+ * この命令自体が「分類なし」の例外になる。すると
+ *
+ *   例外 → 報告 → hal_exit → hlt が例外 → 報告 → hal_exit → …
+ *
+ * と回り続け、**最初の本物の例外の情報が画面から流れて消える**。
+ * 緊急画面 (E24) は「落ちた理由を人に見せる」ためにあるので、
+ * これでは目的を果たせない。
+ *
+ * 2 度目からは何も出さずに止める。最初の報告が画面に残る。 */
+LOCAL W report_depth;
+
 EXPORT void hal_exception_report(UD esr, UD far, UD elr)
 {
 	UD ec = (esr >> 26) & 0x3F;
+
+	report_depth++;
+	if (report_depth > 1) {
+		/* 報告の途中で落ちた。**画面はそのままにして止まる。**
+		 * ここで hal_exit() を呼んではならない — それがこの状況を
+		 * 作った張本人かもしれない。 */
+		for (;;) {
+			__asm__ volatile("wfe");
+		}
+	}
 
 	/* 画面があれば占有して緊急画面に切り替える（E24 / T4-02）。
 	 * 以後の hal_console_puts() がそのままそこへ流れるので、
