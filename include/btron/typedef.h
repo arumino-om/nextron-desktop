@@ -20,14 +20,19 @@
 /* 基本データ型 : ITRON 共通                                           */
 /* ------------------------------------------------------------------ */
 
-typedef signed char B;   /* 符号付き  8ビット整数 */
+/* 仕様書は `typedef char B;` と plain char で定義している。
+ * plain char の符号は処理系依存で、arm64 の既定は unsigned。
+ * 仕様の意図（符号付き）を満たすため -fsigned-char でビルドする。
+ * signed char にしてしまうと文字列リテラル (char[]) との間で
+ * -Wpointer-sign が出て、全箇所にキャストが必要になる。 */
+typedef char B;          /* 符号付き  8ビット整数 */
 typedef signed short H;  /* 符号付き 16ビット整数 */
 typedef signed int W;    /* 符号付き 32ビット整数 */
 typedef unsigned char UB;    /* 符号無し  8ビット整数 */
 typedef unsigned short UH;   /* 符号無し 16ビット整数 */
 typedef unsigned int UW;     /* 符号無し 32ビット整数 */
 
-typedef signed char VB;  /* 不定型  8ビットデータ */
+typedef char VB;         /* 不定型  8ビットデータ */
 typedef signed short VH; /* 不定型 16ビットデータ */
 typedef signed int VW;   /* 不定型 32ビットデータ */
 
@@ -212,6 +217,9 @@ typedef W WID; /* ウィンドウ ID */
 /* ------------------------------------------------------------------ */
 
 _Static_assert(sizeof(B) == 1 && sizeof(H) == 2 && sizeof(W) == 4, "B/H/W");
+/* -fsigned-char が外れたら気付けるようにする。
+ * arm64 の plain char は既定で unsigned なので、この検査は実際に効く。 */
+_Static_assert((B)-1 < 0, "B は符号付きでなければならない (-fsigned-char)");
 _Static_assert(sizeof(UB) == 1 && sizeof(UH) == 2 && sizeof(UW) == 4, "UB/UH/UW");
 _Static_assert(sizeof(D) == 8 && sizeof(UD) == 8, "D/UD");
 _Static_assert(sizeof(TC) == 2 && sizeof(WTC) == 4, "TC/WTC");

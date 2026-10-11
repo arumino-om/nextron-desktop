@@ -1,0 +1,128 @@
+#!/usr/bin/env python3
+"""カーネルイメージを QEMU で起動し、シリアル出力を判定する。
+
+Phase 1 以降のテスト基盤 (docs/design-issues.md H8)。
+CTest から呼ばれるほか、手で動かして様子を見るのにも使う。
+
+  python3 tools/run_qemu.py --arch arm64 build/arm64/btron-arm64.elf
+  python3 tools/run_qemu.py --arch arm64 --interactive build/arm64/btron-arm64.elf
+
+判定:
+  - 終了コードが 0 でなければ失敗
+  - --expect が指定されていれば、その文字列が出力に無ければ失敗
+  - --deny が指定されていれば、その文字列が出力にあれば失敗
+  - --timeout 秒を超えたら失敗 (QEMU を落とす)
+
+テストハーネス (include/btron/test.h) は最後に "[ DONE ] 合格/総数" を出し、
+失敗があれば終了コード 1 で ARM セミホスティング経由で終了する。
+"""
+
+from __future__ import annotations
+
+import argparse
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parents[1]
+
+
+def qemu_argv(arch: str, image: Path, interactive: bool) -> list[str]:
+    if arch == "arm64":
+        argv = [
+            "qemu-system-aarch64",
+            "-machine", "virt",
+            "-cpu", "cortex-a72",
+            "-m", "512M",
+            "-kernel", str(image),
+            "-semihosting",          # hal_exit() が QEMU を終了させるのに使う
+            "-nographic",
+            "-no-reboot",
+        ]
+    elif arch == "x86_64":
+        argv = [
+            "qemu-system-x86_64",
+            "-machine", "q35",
+            "-m", "512M",
+            "-kernel", str(image),
+            "-nographic",
+            "-no-reboot",
+            "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
+        ]
+    else:
+        sys.exit(f"未知のアーキテクチャ: {arch}")
+
+    if not interactive:
+        argv += ["-monitor", "none", "-serial", "stdio"]
+    return argv
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("image", type=Path)
+    ap.add_argument("--arch", required=True, choices=("arm64", "x86_64"))
+    ap.add_argument("--timeout", type=float, default=30.0)
+    ap.add_argument("--expect", action="append", default=[],
+                    help="出力に含まれていなければ失敗とする文字列（複数可）")
+    ap.add_argument("--deny", action="append", default=[],
+                    help="出力に含まれていれば失敗とする文字列（複数可）")
+    ap.add_argument("--interactive", action="store_true",
+                    help="判定せず、端末をそのまま QEMU につなぐ")
+    args = ap.parse_args()
+
+    if not args.image.exists():
+        sys.exit(f"イメージがありません: {args.image}")
+
+    argv = qemu_argv(args.arch, args.image, args.interactive)
+
+    if args.interactive:
+        print(f"$ {' '.join(argv)}\n", file=sys.stderr)
+        return subprocess.call(argv)
+
+    try:
+        p = subprocess.run(argv, capture_output=True, text=True, timeout=args.timeout)
+        out, rc, timed_out = p.stdout + p.stderr, p.returncode, False
+    except subprocess.TimeoutExpired as e:
+        out = (e.stdout or "") + (e.stderr or "")
+        if isinstance(out, bytes):
+            out = out.decode("utf-8", "replace")
+        rc, timed_out = -1, True
+    except FileNotFoundError:
+        sys.exit(f"{argv[0]} が見つかりません。nix develop の中で実行してください。")
+
+    sys.stdout.write(out)
+    if not out.endswith("\n"):
+        sys.stdout.write("\n")
+
+    problems: list[str] = []
+    if timed_out:
+        problems.append(f"{args.timeout} 秒でタイムアウトした")
+    # x86_64 の isa-debug-exit は (code << 1) | 1 を返すので 1 は正常終了。
+    ok_rc = (0,) if args.arch == "arm64" else (0, 1)
+    if not timed_out and rc not in ok_rc:
+        problems.append(f"終了コード {rc}")
+    for s in args.expect:
+        if s not in out:
+            problems.append(f"期待した出力が無い: {s!r}")
+    for s in args.deny:
+        if s in out:
+            problems.append(f"出てはいけない出力があった: {s!r}")
+
+    # テストハーネスの集計行があれば、それも確かめる
+    m = re.search(r"\[ DONE \] (\d+)/(\d+)", out)
+    if m and m.group(1) != m.group(2):
+        problems.append(f"テスト失敗 {m.group(1)}/{m.group(2)}")
+
+    if problems:
+        print("\n--- 失敗 ---", file=sys.stderr)
+        for s in problems:
+            print(f"  {s}", file=sys.stderr)
+        return 1
+
+    print("--- OK ---")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

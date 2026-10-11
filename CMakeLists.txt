@@ -42,6 +42,8 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+
 # --------------------------------------------------------------------------
 # 共通のコンパイルオプション
 # --------------------------------------------------------------------------
@@ -52,6 +54,11 @@ target_compile_options(btron_flags INTERFACE
   -ffreestanding
   -fno-stack-protector
   -fno-common
+
+  # 仕様書は B / VB を plain char で定義し、符号付きと注記している。
+  # plain char の符号は処理系依存で arm64 の既定は unsigned なので強制する。
+  # include/btron/typedef.h の _Static_assert が外れを検出する。
+  -fsigned-char
 
   # 規律 R5: W(32bit) と D(64bit) の暗黙変換を許さない。
   # 縮小変換は明示キャストのみ。切り捨てが静かに起きるのを防ぐ。
@@ -78,6 +85,44 @@ target_include_directories(btron_headers INTERFACE
   "${CMAKE_CURRENT_SOURCE_DIR}/include")
 # ホストのヘッダを拾わない。clang 組込みの stdint.h 等だけを使う。
 target_compile_options(btron_headers INTERFACE -nostdinc)
+
+# --------------------------------------------------------------------------
+# テスト基盤 (H8)
+# --------------------------------------------------------------------------
+include(CTest)
+
+add_library(btron_test STATIC src/lib/std/test.c)
+target_link_libraries(btron_test PUBLIC btron_flags btron_headers)
+
+# --------------------------------------------------------------------------
+# カーネル (Phase 1)
+#
+# いまのところ arm64 のみ。起動してシリアルに出し、実行時に設計上の
+# 不変条件を検査して終了する。
+# --------------------------------------------------------------------------
+if(BTRON_ARCH STREQUAL "arm64")
+  add_executable(btron-kernel
+    src/boot/arm64/start.S
+    src/boot/arm64/boot.c
+    src/kernel/hal/arm64/uart.c
+    src/kernel/hal/arm64/page.c
+    src/kernel/hal/arm64/exit.c)
+
+  target_link_libraries(btron-kernel PRIVATE btron_flags btron_headers btron_test)
+  set_target_properties(btron-kernel PROPERTIES OUTPUT_NAME "btron-arm64" SUFFIX ".elf")
+
+  set(_ld "${CMAKE_CURRENT_SOURCE_DIR}/src/boot/arm64/kernel.ld")
+  target_link_options(btron-kernel PRIVATE
+    -Wl,-T,${_ld} -Wl,--build-id=none -static -nostartfiles)
+  set_target_properties(btron-kernel PROPERTIES LINK_DEPENDS "${_ld}")
+
+  add_test(NAME boot-arm64
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/run_qemu.py"
+            --arch arm64 --timeout 30
+            --expect "BTRON3 準拠 OS"
+            --deny   "[ FAIL ]"
+            "$<TARGET_FILE:btron-kernel>")
+endif()
 
 # --------------------------------------------------------------------------
 # ヘッダの自己検査
