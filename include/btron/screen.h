@@ -94,9 +94,13 @@ IMPORT void screen_text_at(W col, W row, CONST B *utf8, UW fg, UW bg);
 /* いようと、例外の中からでも描ける。                                   */
 /* ------------------------------------------------------------------ */
 
-/* 画面を占有して赤い面に切り替え、以後の `hal_console_puts()` の出力を
+/* 画面を占有して黒い面に切り替え、以後の `hal_console_puts()` の出力を
  * そこへ流す。画面が無ければ False を返し、何もしない。
- * カーソル状態を使わないので、画面コンソールの途中で呼ばれても壊れない。 */
+ * カーソル状態を使わないので、画面コンソールの途中で呼ばれても壊れない。
+ *
+ * **赤一色にはしない。** 画面全体が赤いと、復旧できる不具合でも
+ * 「壊れた」という印象を与えて必要以上に不安にさせる。落ち着いた黒地に
+ * して、見出しだけ琥珀色の細い罫で示す。 */
 IMPORT Bool screen_panic_begin(CONST B *title);
 
 /* 緊急画面を畳む。**本物のパニックでは戻らないので呼ばれない。**
@@ -104,5 +108,9 @@ IMPORT Bool screen_panic_begin(CONST B *title);
 IMPORT void screen_panic_end(void);
 
 IMPORT Bool screen_panic_active(void);
+
+/* 緊急画面の配色。検査が色を決め打ちしないで済むように公開する。 */
+IMPORT UW screen_panic_bg(void);
+IMPORT UW screen_panic_fg(void);
 
 #endif /* __BTRON_SCREEN_H__ */

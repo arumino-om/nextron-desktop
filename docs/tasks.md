@@ -276,7 +276,7 @@ ctest --preset arm64          # 7 構成。全部通ること
 
 - 参照: **詳細 E24** / **規律 R18** / Phase 1 ㉘㉙
 - `src/kernel/screen/panic.c`。`hal_exception_report()` の先頭で
-  `screen_panic_begin()` を呼ぶと、以後の出力が赤い面に流れる
+  `screen_panic_begin()` を呼ぶと、以後の出力が緊急画面に流れる
 - **わざと例外を起こす検査** `panic-screen-arm64` で実機の経路を通している。
   ESP に `\BTRON\PANICTEST` を置くと、カーネルもローダも**同じバイナリの
   まま**その経路に入る（フォントを含むカーネルの再ビルドを避けるため）

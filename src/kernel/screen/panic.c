@@ -39,6 +39,21 @@ LOCAL Bool active = False;
 LOCAL UW fg;
 LOCAL UW bg;
 
+/* 配色。
+ *
+ * **赤一色にしない。** 画面全体が赤いと、復旧できる不具合でも
+ * 「壊れた」という印象を与えて必要以上に不安にさせる。
+ * 落ち着いた黒地にして、見出しだけ琥珀色の細い罫で示す。
+ * 注意は引くが、警告色で画面を埋めない。
+ *
+ * 普通の画面コンソール（濃紺地）とは地の色が違うので、
+ * 緊急画面であることは一目で分かる。 */
+#define PANIC_BG 0x0A, 0x0A, 0x0E   /* ほぼ黒。わずかに青み */
+#define PANIC_FG 0xD8, 0xDC, 0xE4   /* 本文。明るい灰 */
+#define PANIC_TITLE 0xF2, 0xC0, 0x60 /* 見出し。琥珀 */
+#define PANIC_SUB 0x98, 0xA0, 0xAC   /* 補足。くすんだ灰 */
+#define PANIC_RULE 0xC8, 0x90, 0x30  /* 見出しの下の細い罫 */
+
 /* いまの行を描く。advance なら次の行へ送る。
  *
  * 途中までの行も毎回描き直す。例外の報告は「ラベルを出して値を出して
@@ -76,10 +91,19 @@ LOCAL void panic_write(CONST B *s)
 	flush(False);
 }
 
+EXPORT UW screen_panic_bg(void)
+{
+	return screen_rgb(PANIC_BG);
+}
+
+EXPORT UW screen_panic_fg(void)
+{
+	return screen_rgb(PANIC_FG);
+}
+
 EXPORT Bool screen_panic_begin(CONST B *title)
 {
 	CONST Screen *s = screen();
-	CONST UW band = screen_rgb(0xB0, 0x10, 0x20);
 
 	if (s == 0 || active) {
 		return False;
@@ -87,15 +111,16 @@ EXPORT Bool screen_panic_begin(CONST B *title)
 	active = True;
 	len = 0;
 	row = TOP_ROW;
-	bg = screen_rgb(0x30, 0x00, 0x08);
-	fg = screen_rgb(0xFF, 0xE0, 0xE0);
+	bg = screen_rgb(PANIC_BG);
+	fg = screen_rgb(PANIC_FG);
 
 	/* 画面を占有する。貸出先が何を描いていようと上書きする。 */
 	screen_clear(bg);
-	screen_fill(0, 0, (W)s->width, 2 * 16 + 4, band);
-	screen_text_at(LEFT_COL, 0, title, screen_rgb(0xFF, 0xFF, 0xFF), band);
+	screen_text_at(LEFT_COL, 0, title, screen_rgb(PANIC_TITLE), bg);
 	screen_text_at(LEFT_COL, 1, "システムを停止しました。詳細はシリアルにも出ています。",
-	               screen_rgb(0xFF, 0xD0, 0xD0), band);
+	               screen_rgb(PANIC_SUB), bg);
+	/* 見出しと本文の区切り。細い罫 1 本だけにする。 */
+	screen_fill(0, 2 * 16 + 6, (W)s->width, 2, screen_rgb(PANIC_RULE));
 
 	/* 以後 hal_console_puts() の出力がここに来る。 */
 	hal_console_tee(panic_write);

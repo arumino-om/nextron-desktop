@@ -1698,9 +1698,12 @@ LOCAL void run_tests(void)
 			 * スクリーンショット比較が要らない（Phase 1 ㉗）。 */
 			after = screen_get(10, 300);
 			BTRON_CHECK("面が変わった", after != before || before == 0);
-			BTRON_CHECK("赤い面", after == screen_rgb(0x30, 0x00, 0x08));
-			/* 表題帯が描かれていること */
-			BTRON_CHECK("帯がある", screen_get(400, 4) == screen_rgb(0xB0, 0x10, 0x20));
+			BTRON_CHECK("緊急画面の地", after == screen_panic_bg());
+			/* 普通のコンソールと地の色が違うこと。一目で区別できる必要がある。 */
+			BTRON_CHECK("普段と違う地", screen_panic_bg() != screen_rgb(0x10, 0x14, 0x20));
+			/* 見出しの下の罫が引かれていること */
+			BTRON_CHECK("罫がある",
+			            screen_get(400, 2 * 16 + 6) != screen_panic_bg());
 
 			/* 以後の hal_console_puts() が緊急画面へ流れる。
 			 * 文字が描かれたかは、行の中に前景色の画素があるかで見る。 */
@@ -1713,7 +1716,7 @@ LOCAL void run_tests(void)
 					W y;
 
 					for (y = 3 * 16 + 4; y < 4 * 16 + 4; y++) {
-						if (screen_get(x, y) == screen_rgb(0xFF, 0xE0, 0xE0)) {
+						if (screen_get(x, y) == screen_panic_fg()) {
 							drew = True;
 						}
 					}

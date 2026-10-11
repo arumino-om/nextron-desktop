@@ -65,7 +65,7 @@ EXPORT void hal_exception_report(UD esr, UD far, UD elr)
 {
 	UD ec = (esr >> 26) & 0x3F;
 
-	/* 画面があれば占有して赤い面に切り替える（E24 / T4-02）。
+	/* 画面があれば占有して緊急画面に切り替える（E24 / T4-02）。
 	 * 以後の hal_console_puts() がそのままそこへ流れるので、
 	 * 報告の本体は 1 行も変えなくてよい。画面が無ければ何も起きない。 */
 	(void)screen_panic_begin("*** 例外 ***");
