@@ -30,4 +30,9 @@ IMPORT UW hal_page_shift(void);
 
 IMPORT void hal_exit(W code) __attribute__((noreturn));
 
+/* --- 例外 ----------------------------------------------------------
+ * ベクタが無いとフォルトが無言のハングになる。起動直後に入れる。 */
+
+IMPORT void hal_exception_init(void);
+
 #endif /* __BTRON_HAL_H__ */

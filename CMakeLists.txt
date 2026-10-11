@@ -106,7 +106,11 @@ if(BTRON_ARCH STREQUAL "arm64")
     src/boot/arm64/boot.c
     src/kernel/hal/arm64/uart.c
     src/kernel/hal/arm64/page.c
-    src/kernel/hal/arm64/exit.c)
+    src/kernel/hal/arm64/exit.c
+    src/kernel/hal/arm64/mmu.c
+    src/kernel/hal/arm64/vectors.S
+    src/kernel/hal/arm64/exception.c
+    src/kernel/mm/pmem.c)
 
   target_link_libraries(btron-kernel PRIVATE btron_flags btron_headers btron_test)
   set_target_properties(btron-kernel PROPERTIES OUTPUT_NAME "btron-arm64" SUFFIX ".elf")
@@ -122,6 +126,23 @@ if(BTRON_ARCH STREQUAL "arm64")
             --expect "BTRON3 準拠 OS"
             --deny   "[ FAIL ]"
             "$<TARGET_FILE:btron-kernel>")
+endif()
+
+# --------------------------------------------------------------------------
+# x86_64 の HAL
+#
+# ブート経路（UEFI / multiboot）がまだ無いのでカーネルイメージは作らないが、
+# arm64 と同一のインタフェースで実装してあり、同じ厳格フラグで型検査にかける。
+# ブート経路ができたら add_executable に差し替える。
+# --------------------------------------------------------------------------
+if(BTRON_ARCH STREQUAL "x86_64")
+  add_library(btron_hal_x86_64 STATIC
+    src/kernel/hal/x86_64/uart.c
+    src/kernel/hal/x86_64/page.c
+    src/kernel/hal/x86_64/exit.c
+    src/kernel/hal/x86_64/mmu.c
+    src/kernel/mm/pmem.c)
+  target_link_libraries(btron_hal_x86_64 PRIVATE btron_flags btron_headers)
 endif()
 
 # --------------------------------------------------------------------------

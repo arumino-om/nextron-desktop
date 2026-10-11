@@ -84,9 +84,13 @@ def main() -> int:
         p = subprocess.run(argv, capture_output=True, text=True, timeout=args.timeout)
         out, rc, timed_out = p.stdout + p.stderr, p.returncode, False
     except subprocess.TimeoutExpired as e:
-        out = (e.stdout or "") + (e.stderr or "")
-        if isinstance(out, bytes):
-            out = out.decode("utf-8", "replace")
+        # text=True でも TimeoutExpired が持つのは bytes のことがある
+        def _s(v):
+            if v is None:
+                return ""
+            return v.decode("utf-8", "replace") if isinstance(v, bytes) else v
+
+        out = _s(e.stdout) + _s(e.stderr)
         rc, timed_out = -1, True
     except FileNotFoundError:
         sys.exit(f"{argv[0]} が見つかりません。nix develop の中で実行してください。")
