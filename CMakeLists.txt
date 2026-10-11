@@ -147,8 +147,13 @@ if(BTRON_ARCH STREQUAL "arm64")
     src/kernel/core/mempool.c
     src/kernel/core/cyclic.c
     src/kernel/periph/taskcomm.c
+    src/kernel/periph/taskobj.c
     src/kernel/periph/proc.c
     src/kernel/periph/memory.c
+    src/kernel/periph/message.c
+    src/kernel/periph/gname.c
+    src/kernel/periph/clock.c
+    src/kernel/periph/system.c
     src/kernel/core/time.c
     src/kernel/core/intc.c
     src/kernel/core/selftest.c
@@ -164,7 +169,9 @@ if(BTRON_ARCH STREQUAL "arm64")
     "${BTRON_FONT_DATA}"
     src/kernel/mm/pmem.c
     src/kernel/mm/page.c
-    src/kernel/mm/kheap.c)
+    src/kernel/mm/kheap.c
+    src/subsystems/mgr/manager.c
+    src/subsystems/font/fontman.c)
 
   target_link_libraries(btron-kernel PRIVATE btron_flags btron_headers btron_test)
   set_target_properties(btron-kernel PROPERTIES OUTPUT_NAME "btron-arm64" SUFFIX ".elf")

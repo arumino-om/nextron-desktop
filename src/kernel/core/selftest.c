@@ -16,7 +16,10 @@
  */
 
 #include <btron/bootinfo.h>
+#include <btron/fontman.h>
 #include <btron/machdesc.h>
+#include <btron/manager.h>
+#include <btron/system.h>
 #include <btron/screen.h>
 #include <btron/test.h>
 
@@ -599,6 +602,115 @@ LOCAL W p_sysmem(MESSAGE *msg)
 		(void)rel_mbk(adr);
 	}
 	return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* 周辺核 §1.2 / §1.4 / §1.3 の検査用のプロセスとハンドラ               */
+/* ------------------------------------------------------------------ */
+
+/* グリフに 1 画素でも立っているか。
+ * 行ごとに見る — 'A' の上端 2 行は空白なので、特定の行を見てはいけない。 */
+LOCAL Bool glyph_inked(CONST UB *g, W n)
+{
+	W i;
+
+	if (g == 0) {
+		return False;
+	}
+	for (i = 0; i < n; i++) {
+		if (g[i] != 0) {
+			return True;
+		}
+	}
+	return False;
+}
+
+/* 検査で使う TC の名前。
+ *
+ * **BTRON_TEST の中に書けない。** マクロの引数は括弧しか見ないので、
+ * 配列初期化子の `,` でマクロの引数が割れてしまう（波括弧は効かない）。 */
+LOCAL CONST TC nm_test[] = {(TC)'T', (TC)'E', (TC)'S', (TC)'T', TNULL};
+LOCAL CONST TC nm_other[] = {(TC)'O', (TC)'T', (TC)'H', (TC)'E', (TC)'R',
+                             TNULL};
+LOCAL CONST TC nm_empty[] = {TNULL};
+LOCAL CONST TC nm_child[] = {(TC)'C', (TC)'H', (TC)'I', (TC)'L', (TC)'D',
+                             TNULL};
+LOCAL CONST TC nm_cpunum[] = {(TC)'C', (TC)'P', (TC)'U', (TC)'N', (TC)'U',
+                              (TC)'M', TNULL};
+LOCAL CONST TC nm_osname[] = {(TC)'O', (TC)'S', (TC)'N', (TC)'A', (TC)'M',
+                              (TC)'E', TNULL};
+LOCAL CONST TC nm_nope[] = {(TC)'N', (TC)'O', (TC)'P', (TC)'E', TNULL};
+
+LOCAL W msg_h_called;      /* 利用者定義ハンドラが呼ばれた回数 */
+LOCAL W msg_h_from;        /* ハンドラが受け取った送信元 PID */
+LOCAL W msg_h_type;        /* ハンドラが受け取ったメッセージタイプ */
+LOCAL W msg_h_code;        /* ハンドラが受け取った本体の 1 語目 */
+LOCAL ERR msg_slp_result;  /* ハンドラで中断された待ちの戻り値 */
+LOCAL W msg_child_ready;   /* 子が待ちに入ったことの印 */
+
+/* 利用者定義のメッセージハンドラ (§1.2.3)。
+ * **メインタスクの処理に割り込む形で走る** — 子プロセスが slp_tsk で
+ * 待っている最中に、そのタスクのスタックの上で実行される。 */
+LOCAL void h_msg(W pid, MESSAGE *r_msg)
+{
+	msg_h_called++;
+	msg_h_from = pid;
+	if (r_msg != 0) {
+		msg_h_type = r_msg->msg_type;
+		msg_h_code = r_msg->msg_body.ANYMSG.msg_str[0];
+	}
+	(void)ret_msg(0); /* 仕様: ハンドラの最後には必ずこれを呼ぶ */
+}
+
+/* ハンドラを定義して待つ子プロセス。
+ * ハンドラが走ると slp_tsk が ER_MINTR で中断される（仕様）。 */
+LOCAL W p_msghdr(MESSAGE *msg)
+{
+	VP raw = (VP)h_msg;
+
+	(void)msg;
+	(void)def_msg(MM_TYPE0, (FUNCP)raw);
+	msg_child_ready = 1;
+	msg_slp_result = slp_tsk(T_FOREVER);
+	msg_child_ready = 2;
+	(void)slp_tsk(T_FOREVER); /* 2 度目。親が片付ける */
+	return 0;
+}
+
+/* MH_TERM を定義して待つ子プロセス。メッセージが来ると異常終了する。 */
+LOCAL W p_mhterm(MESSAGE *msg)
+{
+	(void)msg;
+	(void)def_msg(MM_TYPE1, MH_TERM);
+	msg_child_ready = 1;
+	(void)slp_tsk(T_FOREVER);
+	return 0;
+}
+
+/* 自分の終了コードを返して終わる子プロセス。MS_EXIT の検査用。 */
+LOCAL W p_exit42(MESSAGE *msg)
+{
+	(void)msg;
+	return 42;
+}
+
+/* グローバル名を DELEXIT 付きで登録して終わる子プロセス。 */
+LOCAL W p_gname(MESSAGE *msg)
+{
+	(void)msg;
+	(void)cre_nam(nm_child, 0x1234, N_CREATE | DELEXIT);
+	return 0;
+}
+
+/* セマフォを待つサブタスク。優先度継承と ER_DLT の検査用。 */
+LOCAL ID tobj_sem;
+LOCAL ERR tobj_wait_er;
+
+LOCAL void p_semwait(W arg)
+{
+	(void)arg;
+	tobj_wait_er = wai_sem(tobj_sem, T_FOREVER);
+	ext_tsk();
 }
 
 /* 預かっている後片付けを流してから空きページ数を数える。
@@ -2669,6 +2781,711 @@ LOCAL void run_proc_tests(void)
 			BTRON_CHECK("片付け", rel_mbk(adr[i]) == ER_OK);
 		}
 		BTRON_CHECK("記録が戻った", mbk_count() == n0);
+	});
+
+	/* -------------------------------------------------------------- */
+	/* §1.2 メッセージ管理                                            */
+	/* -------------------------------------------------------------- */
+
+	BTRON_TEST("メッセージの送受信は FIFO (§1.2.1)", {
+		MESSAGE s;
+		MESSAGE r;
+		W i;
+		Bool order = True;
+
+		/* **ここまでの検査が残した終了メッセージを捨てる。**
+		 *
+		 * §1.1 と §1.5 の検査は子プロセスを 130 個以上作って終了させて
+		 * いる。その MS_EXIT / MS_TERM / MS_ABORT は全部この親の
+		 * キューに入るので、放っておくと容量いっぱいまで溜まり、
+		 * 通常メッセージが ER_NOSPC で入らなくなる。
+		 *
+		 * これは実装の都合ではなく**プロセスを作る側の責任**である。
+		 * 仕様が「子プロセスが終了した場合の終了メッセージもこの
+		 * メッセージキューに入る」と規定しているので、子を作る親は
+		 * 終了メッセージを受け取るか捨てるかしなければならない。 */
+		BTRON_CHECK("前の検査の残りを捨てる",
+		            clr_msg(MM_ALL, MM_NULL) == ER_OK);
+		BTRON_CHECK("空になった", msg_count(me) == 0);
+
+		s.msg_size = (W)sizeof(W);
+		for (i = 0; i < 3; i++) {
+			s.msg_type = MS_TYPE0;
+			s.msg_body.ANYMSG.msg_str[0] = (UB)('a' + i);
+			BTRON_CHECK("送信", snd_msg(P_SELF, &s, NOWAIT) == ER_OK);
+		}
+		BTRON_CHECK("3 通たまった", msg_count(me) == 3);
+		for (i = 0; i < 3; i++) {
+			/* 送信元が自プロセスなので戻り値は 0（仕様） */
+			if (rcv_msg(MM_TYPE0, &r, (W)sizeof(r), WAIT) != 0 ||
+			    r.msg_body.ANYMSG.msg_str[0] != (UB)('a' + i)) {
+				order = False;
+			}
+		}
+		BTRON_CHECK("送信順に出てくる", order);
+		BTRON_CHECK("空になった", msg_count(me) == 0);
+		BTRON_CHECK("無いときは ER_NONE",
+		            rcv_msg(MM_ALL, &r, (W)sizeof(r), NOWAIT) == ER_NONE);
+	});
+
+	BTRON_TEST("メッセージのエラーコード (§1.2.5)", {
+		MESSAGE s;
+		MESSAGE r;
+
+		s.msg_type = MS_TYPE0;
+		s.msg_size = (W)sizeof(W);
+
+		BTRON_CHECK("アドレス不正", snd_msg(P_SELF, 0, NOWAIT) == ER_ADR);
+		BTRON_CHECK("属性不正", snd_msg(P_SELF, &s, 7) == ER_PAR);
+		BTRON_CHECK("親が無い", snd_msg(P_PARENT, &s, NOWAIT) == ER_NOPRC);
+		BTRON_CHECK("存在しない",
+		            snd_msg(PRC_MAX_PRCID, &s, NOWAIT) == ER_NOPRC);
+		/* 仕様「自プロセスを指定した (CONFM 指定時)」 */
+		BTRON_CHECK("自プロセスへの CONFM",
+		            snd_msg(P_SELF, &s, CONFM) == ER_SELF);
+
+		s.msg_type = 0;
+		BTRON_CHECK("タイプ 0", snd_msg(P_SELF, &s, NOWAIT) == ER_PAR);
+		s.msg_type = MS_MAX + 1;
+		BTRON_CHECK("タイプ 32", snd_msg(P_SELF, &s, NOWAIT) == ER_PAR);
+		s.msg_type = MS_TYPE0;
+		s.msg_size = 0;
+		BTRON_CHECK("本体 0 バイト", snd_msg(P_SELF, &s, NOWAIT) == ER_SZOVR);
+		s.msg_size = MSG_MAX_BODY + 1;
+		BTRON_CHECK("本体が大きすぎる",
+		            snd_msg(P_SELF, &s, NOWAIT) == ER_SZOVR);
+
+		BTRON_CHECK("格納先が不正",
+		            rcv_msg(MM_ALL, 0, (W)sizeof(r), NOWAIT) == ER_ADR);
+		/* 仕様「msgsz ≧ 8 でなくてはいけない」 */
+		BTRON_CHECK("領域が小さすぎる",
+		            rcv_msg(MM_ALL, &r, 7, NOWAIT) == ER_PAR);
+		BTRON_CHECK("マスクが 0",
+		            rcv_msg(0, &r, (W)sizeof(r), NOWAIT) == ER_PAR);
+		BTRON_CHECK("クリアのマスクが 0", clr_msg(0, MM_NULL) == ER_PAR);
+	});
+
+	BTRON_TEST("入り切らない受信はキューに残る (§1.2.5)", {
+		MESSAGE s;
+		UB buf[MSG_HEADER_SIZE + 8];
+		MESSAGE *r = (MESSAGE *)(VP)buf;
+
+		s.msg_type = MS_TYPE0;
+		s.msg_size = 32;
+		s.msg_body.ANYMSG.msg_str[0] = 0xAB;
+		BTRON_CHECK("送信", snd_msg(P_SELF, &s, NOWAIT) == ER_OK);
+
+		/* 8 バイトしか入らない領域で 32 バイトの本体を受けようとする。
+		 * 仕様「msgsz の範囲内のみ格納されてエラー終了する。この時は、
+		 * CLR 指定があってもメッセージはバッファに残る」 */
+		BTRON_CHECK("入り切らない",
+		            rcv_msg(MM_TYPE0, r, (W)sizeof(buf), WAIT) == ER_PAR);
+		BTRON_CHECK("必要な大きさが分かる", r->msg_size == 32);
+		BTRON_CHECK("キューに残っている", msg_count(me) == 1);
+
+		/* 十分な領域で取り直せる。 */
+		{
+			MESSAGE full;
+
+			BTRON_CHECK("取り直せる",
+			            rcv_msg(MM_TYPE0, &full, (W)sizeof(full), WAIT) == 0);
+			BTRON_CHECK("中身が合っている",
+			            full.msg_body.ANYMSG.msg_str[0] == 0xAB);
+		}
+		BTRON_CHECK("空になった", msg_count(me) == 0);
+	});
+
+	BTRON_TEST("NOCLR と CHECK (§1.2.5)", {
+		MESSAGE s;
+		MESSAGE r;
+
+		s.msg_type = MS_TYPE1;
+		s.msg_size = (W)sizeof(W);
+		s.msg_body.ANYMSG.msg_str[0] = 0x5A;
+		BTRON_CHECK("送信", snd_msg(P_SELF, &s, NOWAIT) == ER_OK);
+
+		BTRON_CHECK("NOCLR で受信",
+		            rcv_msg(MM_TYPE1, &r, (W)sizeof(r), WAIT | NOCLR) == 0);
+		BTRON_CHECK("残っている", msg_count(me) == 1);
+		BTRON_CHECK("CLR で受信",
+		            rcv_msg(MM_TYPE1, &r, (W)sizeof(r), WAIT) == 0);
+		BTRON_CHECK("消えた", msg_count(me) == 0);
+
+		/* CHECK: 指定タイプが無く別のタイプがある場合は**ヘッダだけ**。 */
+		BTRON_CHECK("送信", snd_msg(P_SELF, &s, NOWAIT) == ER_OK);
+		r.msg_body.ANYMSG.msg_str[0] = 0;
+		BTRON_CHECK("別タイプを指定して CHECK",
+		            rcv_msg(MM_TYPE2, &r, (W)sizeof(r), NOWAIT | CHECK) == 0);
+		BTRON_CHECK("タイプは分かる", r.msg_type == MS_TYPE1);
+		BTRON_CHECK("本体は入っていない",
+		            r.msg_body.ANYMSG.msg_str[0] == 0);
+		BTRON_CHECK("キューに残る", msg_count(me) == 1);
+		BTRON_CHECK("片付け", clr_msg(MM_ALL, MM_NULL) == ER_OK);
+		BTRON_CHECK("空になった", msg_count(me) == 0);
+	});
+
+	BTRON_TEST("clr_msg の last_mask (§1.2.5)", {
+		MESSAGE s;
+		W i;
+
+		s.msg_size = (W)sizeof(W);
+		/* TYPE0, TYPE1, TYPE0 の順に積む */
+		for (i = 0; i < 3; i++) {
+			s.msg_type = (i == 1) ? MS_TYPE1 : MS_TYPE0;
+			BTRON_CHECK("送信", snd_msg(P_SELF, &s, NOWAIT) == ER_OK);
+		}
+		/* 仕様: last_mask で指定したタイプの**直前まで**クリアする。
+		 * TYPE1 の手前の TYPE0 が 1 通だけ消える。 */
+		BTRON_CHECK("直前まで", clr_msg(MM_TYPE0, MM_TYPE1) == ER_OK);
+		BTRON_CHECK("1 通消えた", msg_count(me) == 2);
+
+		/* 仕様の特例: last_mask = MM_ALL は「1 つだけクリア」。
+		 * ここを特例にしないと、MM_ALL が全タイプを含むので先頭で
+		 * 止まって何も消えない。 */
+		BTRON_CHECK("1 つだけ", clr_msg(MM_ALL, MM_ALL) == ER_OK);
+		BTRON_CHECK("もう 1 通消えた", msg_count(me) == 1);
+		BTRON_CHECK("全部", clr_msg(MM_ALL, MM_NULL) == ER_OK);
+		BTRON_CHECK("空になった", msg_count(me) == 0);
+	});
+
+	BTRON_TEST("システムメッセージは捨てられない (§1.2.2)", {
+		MESSAGE s;
+		W i;
+		Bool filled = True;
+
+		s.msg_type = MS_TYPE0;
+		s.msg_size = (W)sizeof(W);
+		for (i = 0; i < MSG_QUEUE_MAX; i++) {
+			if (snd_msg(P_SELF, &s, NOWAIT) != ER_OK) {
+				filled = False;
+			}
+		}
+		BTRON_CHECK("通常の容量まで入る", filled);
+		/* 仕様「送信先のメッセージキューに空きがない時はエラー終了する」 */
+		BTRON_CHECK("満杯で NOWAIT は ER_NOSPC",
+		            snd_msg(P_SELF, &s, NOWAIT) == ER_NOSPC);
+
+		/* 仕様「これらは、基本的にメッセージキューのオーバーフローの
+		 * 影響を受けず、捨てられることはないようになっている」 */
+		s.msg_type = MS_SYSEVT;
+		BTRON_CHECK("システムメッセージは入る",
+		            snd_msg(P_SELF, &s, NOWAIT) == ER_OK);
+		BTRON_CHECK("容量を超えている", msg_count(me) == MSG_QUEUE_MAX + 1);
+		BTRON_CHECK("片付け", clr_msg(MM_ALL, MM_NULL) == ER_OK);
+		BTRON_CHECK("空になった", msg_count(me) == 0);
+	});
+
+	BTRON_TEST("子プロセスの終了メッセージ (§1.2.2 / §1.1.9)", {
+		MESSAGE r;
+		W child;
+
+		BTRON_CHECK("空から始める", msg_count(me) == 0);
+
+		/* ext_prc（MAIN からの return）→ MS_EXIT */
+		child = prc_create(p_exit42, 1, 0, 0);
+		BTRON_CHECK("子が走って終わった", child >= 1 && prc_count() == 1);
+		BTRON_CHECK("終了メッセージが来た",
+		            rcv_msg(MM_EXIT, &r, (W)sizeof(r), NOWAIT) == child);
+		BTRON_CHECK("MS_EXIT", r.msg_type == MS_EXIT);
+		BTRON_CHECK("本体は 8 バイト", r.msg_size == 8);
+		BTRON_CHECK("終了した子の PID", r.msg_body.EXIT.pid == child);
+		/* **ここが §1.1 と §1.2 の継ぎ目。** MAIN() の戻り値が
+		 * 終了コードとして親に届く。 */
+		BTRON_CHECK("終了コード 42", r.msg_body.EXIT.code == 42);
+
+		/* ter_prc → MS_TERM */
+		child = prc_create(p_sleeper, 1, 0, 0);
+		BTRON_CHECK("強制終了", ter_prc(child, 7, TERM_NRM) == ER_OK);
+		BTRON_CHECK("強制終了メッセージ",
+		            rcv_msg(MM_TERM, &r, (W)sizeof(r), NOWAIT) == child);
+		BTRON_CHECK("MS_TERM と コード",
+		            r.msg_type == MS_TERM && r.msg_body.TERM.code == 7);
+
+		/* prc_abort → MS_ABORT */
+		child = prc_create(p_sleeper, 1, 0, 0);
+		BTRON_CHECK("異常終了", prc_abort(child, 9) == ER_OK);
+		BTRON_CHECK("異常終了メッセージ",
+		            rcv_msg(MM_ABORT, &r, (W)sizeof(r), NOWAIT) == child);
+		BTRON_CHECK("MS_ABORT と コード",
+		            r.msg_type == MS_ABORT && r.msg_body.ABORT.code == 9);
+		BTRON_CHECK("空になった", msg_count(me) == 0);
+	});
+
+	BTRON_TEST("タイムアウトメッセージ (§1.2.5 req_tmg)", {
+		MESSAGE r;
+
+		BTRON_CHECK("負の時間", req_tmg(0, 0) == ER_PAR);
+		BTRON_CHECK("要求", req_tmg(10, 0x55) == ER_OK);
+		BTRON_CHECK("まだ来ていない",
+		            rcv_msg(MM_TMOUT, &r, (W)sizeof(r), NOWAIT) == ER_NONE);
+		/* 自プロセス宛なので戻り値は 0（仕様） */
+		BTRON_CHECK("待てば来る",
+		            rcv_msg(MM_TMOUT, &r, (W)sizeof(r), WAIT) == 0);
+		BTRON_CHECK("MS_TMOUT とコード",
+		            r.msg_type == MS_TMOUT && r.msg_body.TMOUT.code == 0x55);
+
+		/* 仕様「自プロセスのタイムアウトメッセージ要求をすべて取り消す」 */
+		BTRON_CHECK("要求", req_tmg(10, 0x66) == ER_OK);
+		BTRON_CHECK("取り消し", can_tmg() == ER_OK);
+		(void)dly_tsk(30);
+		BTRON_CHECK("来ない", msg_count(me) == 0);
+	});
+
+	BTRON_TEST("システム定義のメッセージハンドラ (§1.2.3)", {
+		MESSAGE s;
+		MESSAGE r;
+
+		s.msg_type = MS_TYPE2;
+		s.msg_size = (W)sizeof(W);
+
+		/* MH_NONE: 仕様「何もせずにメッセージは無視される」 */
+		BTRON_CHECK("定義", def_msg(MM_TYPE2, MH_NONE) == ER_OK);
+		BTRON_CHECK("送信は成功する", snd_msg(P_SELF, &s, NOWAIT) == ER_OK);
+		BTRON_CHECK("キューには入らない", msg_count(me) == 0);
+
+		/* MH_BREAK も同じく捨てるが、待ちを中断する。
+		 * 中断の方は子プロセスで確かめる（下の検査）。 */
+		BTRON_CHECK("定義", def_msg(MM_TYPE2, MH_BREAK) == ER_OK);
+		BTRON_CHECK("送信は成功する", snd_msg(P_SELF, &s, NOWAIT) == ER_OK);
+		BTRON_CHECK("キューには入らない", msg_count(me) == 0);
+
+		BTRON_CHECK("定義解除", def_msg(MM_TYPE2, 0) == ER_OK);
+		BTRON_CHECK("入るようになった",
+		            snd_msg(P_SELF, &s, NOWAIT) == ER_OK &&
+		                msg_count(me) == 1);
+		BTRON_CHECK("受信", rcv_msg(MM_TYPE2, &r, (W)sizeof(r), WAIT) == 0);
+		BTRON_CHECK("マスクが 0", def_msg(0, MH_NONE) == ER_PAR);
+	});
+
+	BTRON_TEST("メッセージハンドラが待ちに割り込む (§1.2.3)", {
+		MESSAGE s;
+		W child;
+
+		msg_h_called = 0;
+		msg_h_from = -1;
+		msg_h_type = 0;
+		msg_h_code = 0;
+		msg_slp_result = ER_OK;
+		msg_child_ready = 0;
+
+		/* 子は優先度 1（自分より高い）なので、生成した瞬間に走って
+		 * ハンドラを定義し、slp_tsk で待ちに入る。 */
+		child = prc_create(p_msghdr, 1, 0, 0);
+		BTRON_CHECK("子が待ちに入った", child >= 1 && msg_child_ready == 1);
+
+		s.msg_type = MS_TYPE0;
+		s.msg_size = (W)sizeof(W);
+		s.msg_body.ANYMSG.msg_str[0] = 0x3C;
+		BTRON_CHECK("送信", snd_msg(child, &s, NOWAIT) == ER_OK);
+
+		/* **ここが §1.2.3 の核心。** 子のメインタスクのスタックに
+		 * ハンドラ呼び出しが差し込まれ、待ちは ER_MINTR で中断され、
+		 * ハンドラが走ってから割り込んだ位置へ帰る。 */
+		BTRON_CHECK("ハンドラが呼ばれた", msg_h_called == 1);
+		BTRON_CHECK("送信元が渡った", msg_h_from == me);
+		BTRON_CHECK("メッセージが渡った",
+		            msg_h_type == MS_TYPE0 && msg_h_code == 0x3C);
+		/* 仕様「中断されたシステムコールは ER_MINTR のエラーとして戻る」 */
+		BTRON_CHECK("待ちは中断された", msg_slp_result == ER_MINTR);
+		BTRON_CHECK("割り込んだ位置から再開した", msg_child_ready == 2);
+		BTRON_CHECK("キューには残らない", msg_count(child) == 0);
+
+		BTRON_CHECK("片付け", ter_prc(child, 0, TERM_NRM) == ER_OK);
+		BTRON_CHECK("終了メッセージを捨てる",
+		            clr_msg(MM_ALL, MM_NULL) == ER_OK);
+	});
+
+	BTRON_TEST("MH_TERM はプロセスを異常終了させる (§1.2.3)", {
+		MESSAGE s;
+		MESSAGE r;
+		W child;
+
+		msg_child_ready = 0;
+		child = prc_create(p_mhterm, 1, 0, 0);
+		BTRON_CHECK("子が待ちに入った", child >= 1 && msg_child_ready == 1);
+
+		s.msg_type = MS_TYPE1;
+		s.msg_size = (W)sizeof(W);
+		BTRON_CHECK("送信", snd_msg(child, &s, NOWAIT) == ER_OK);
+		/* 仕様「自プロセスを異常終了し、MS_ABORT メッセージ
+		 * （エラーコードは 0）を親プロセスに送信する」 */
+		BTRON_CHECK("子は消えた", prc_sts(child, 0, 0) == ER_NOPRC);
+		BTRON_CHECK("MS_ABORT が来た",
+		            rcv_msg(MM_ABORT, &r, (W)sizeof(r), NOWAIT) == child);
+		BTRON_CHECK("エラーコードは 0", r.msg_body.ABORT.code == 0);
+		BTRON_CHECK("空になった", msg_count(me) == 0);
+	});
+
+	BTRON_TEST("brk_msg と WAIEVT (§1.2.5)", {
+		MESSAGE r;
+
+		/* 仕様「brk_msg() を呼び出したとき WAIEVT 指定で待ちに入っている
+		 * タスクが無ければ、待ち解除の要求を記録する」 */
+		BTRON_CHECK("先に通知", brk_msg() == ER_OK);
+		/* 記録された要求で即座に解ける。仕様「この場合、エラー
+		 * (ER_NONE) 終了する」 */
+		BTRON_CHECK("記録で解ける",
+		            rcv_msg(0, &r, (W)sizeof(r), WAIT | WAIEVT) == ER_NONE);
+		/* 要求回数は記録されない（仕様）。2 度目は待ちに入るので
+		 * ここでは NOWAIT で確かめる。 */
+		BTRON_CHECK("2 度は解けない",
+		            rcv_msg(0, &r, (W)sizeof(r), NOWAIT | WAIEVT) == ER_NONE);
+		/* WAIEVT のときだけ t_mask = 0 が許される（仕様） */
+		BTRON_CHECK("WAIEVT 以外で 0 は不正",
+		            rcv_msg(0, &r, (W)sizeof(r), NOWAIT) == ER_PAR);
+	});
+
+	/* -------------------------------------------------------------- */
+	/* §1.4 グローバル名管理                                          */
+	/* -------------------------------------------------------------- */
+
+	BTRON_TEST("グローバル名データ (§1.4)", {
+		CONST TC *n1 = nm_test;
+		CONST TC *n2 = nm_other;
+		W n0 = gnm_count();
+		W data = 0;
+
+		BTRON_CHECK("生成", cre_nam(n1, 0xABCD, N_CREATE) == ER_OK);
+		BTRON_CHECK("数が増えた", gnm_count() == n0 + 1);
+		BTRON_CHECK("取得", get_nam(n1, &data) == ER_OK && data == 0xABCD);
+		/* 仕様「すでに存在している場合はエラー」 */
+		BTRON_CHECK("二重生成", cre_nam(n1, 1, N_CREATE) == ER_EXS);
+		BTRON_CHECK("変更", cre_nam(n1, 0x1111, N_MODIFY) == ER_OK);
+		BTRON_CHECK("変わった",
+		            get_nam(n1, &data) == ER_OK && data == 0x1111);
+		/* 仕様「存在していない場合はエラー」 */
+		BTRON_CHECK("無いものの変更", cre_nam(n2, 1, N_MODIFY) == ER_NOEXS);
+		/* 仕様「無ければ新規に生成し、すでに存在している場合は変更」 */
+		BTRON_CHECK("強制生成", cre_nam(n2, 0x2222, N_FORCE) == ER_OK);
+		BTRON_CHECK("強制変更", cre_nam(n2, 0x3333, N_FORCE) == ER_OK);
+		BTRON_CHECK("変わった",
+		            get_nam(n2, &data) == ER_OK && data == 0x3333);
+
+		BTRON_CHECK("アドレス不正", cre_nam(0, 0, N_CREATE) == ER_ADR);
+		BTRON_CHECK("空の名前", cre_nam(nm_empty, 0, N_CREATE) == ER_PAR);
+		BTRON_CHECK("属性不正", cre_nam(n1, 0, 3) == ER_PAR);
+		BTRON_CHECK("削除", del_nam(n1) == ER_OK && del_nam(n2) == ER_OK);
+		BTRON_CHECK("無い", get_nam(n1, &data) == ER_NOEXS);
+		BTRON_CHECK("無いものの削除", del_nam(n1) == ER_NOEXS);
+		BTRON_CHECK("数が戻った", gnm_count() == n0);
+	});
+
+	BTRON_TEST("DELEXIT のグローバル名はプロセス終了で消える (§1.4.1)", {
+		CONST TC *n = nm_child;
+		W n0 = gnm_count();
+		W data = 0;
+		W child;
+
+		child = prc_create(p_gname, 1, 0, 0);
+		BTRON_CHECK("子が走って終わった", child >= 1 && prc_count() == 1);
+		/* 子は DELEXIT 付きで登録して終了した。 */
+		BTRON_CHECK("消えている", get_nam(n, &data) == ER_NOEXS);
+		BTRON_CHECK("数が戻った", gnm_count() == n0);
+		BTRON_CHECK("終了メッセージを捨てる",
+		            clr_msg(MM_ALL, MM_NULL) == ER_OK);
+	});
+
+	/* -------------------------------------------------------------- */
+	/* §1.3 の残り（セマフォ・イベントフラグ・メッセージバッファ）    */
+	/* -------------------------------------------------------------- */
+
+	BTRON_TEST("同期用セマフォ (§1.3.2 SEM_SYNC)", {
+		W n0 = tobj_count();
+		ID id;
+
+		BTRON_CHECK("負の初期値", cre_sem(-1, SEM_SYNC) == ER_PAR);
+		BTRON_CHECK("属性不正", cre_sem(0, 0x100) == ER_PAR);
+		id = cre_sem(1, SEM_SYNC);
+		BTRON_CHECK("生成", id >= 1);
+		BTRON_CHECK("数が増えた", tobj_count() == n0 + 1);
+		BTRON_CHECK("獲得", wai_sem(id, T_NOWAIT) == ER_OK);
+		/* **中心核の E_TMOUT ではなく ER_NONE**（規律 R20） */
+		BTRON_CHECK("もう無い", wai_sem(id, T_NOWAIT) == ER_NONE);
+		BTRON_CHECK("時間切れも ER_NONE", wai_sem(id, 5) == ER_NONE);
+		/* 同期用は順序の制限が無いので、獲得していなくても返せる。 */
+		BTRON_CHECK("返却", sig_sem(id) == ER_OK);
+		BTRON_CHECK("もう 1 つ返却", sig_sem(id) == ER_OK);
+		BTRON_CHECK("2 つ獲得できる",
+		            wai_sem(id, T_NOWAIT) == ER_OK &&
+		                wai_sem(id, T_NOWAIT) == ER_OK);
+		BTRON_CHECK("不正 ID", wai_sem(0, T_NOWAIT) == ER_ID);
+		BTRON_CHECK("存在しない",
+		            wai_sem(TK_MAX_TOBJ, T_NOWAIT) == ER_NOEXS);
+		BTRON_CHECK("削除", del_sem(id) == ER_OK);
+		BTRON_CHECK("数が戻った", tobj_count() == n0);
+	});
+
+	BTRON_TEST("排他制御用セマフォはミューテックス (§1.3.2 SEM_EXCL)", {
+		ID id;
+
+		/* 仕様「排他制御用セマフォの場合には cnt = 1 でなければならない」 */
+		BTRON_CHECK("初期値 0 は不正", cre_sem(0, SEM_EXCL) == ER_PAR);
+		BTRON_CHECK("初期値 2 も不正", cre_sem(2, SEM_EXCL) == ER_PAR);
+		id = cre_sem(1, SEM_EXCL);
+		BTRON_CHECK("生成", id >= 1);
+		BTRON_CHECK("獲得", wai_sem(id, T_NOWAIT) == ER_OK);
+		/* 仕様「すでに獲得している状態で、再度獲得しようとした場合には
+		 * ER_OBJ」。中心核のミューテックスの E_ILUSE がこれに写る。 */
+		BTRON_CHECK("二重獲得は ER_OBJ", wai_sem(id, T_NOWAIT) == ER_OBJ);
+		BTRON_CHECK("返却", sig_sem(id) == ER_OK);
+		/* 仕様「獲得していない状態で返却しようとした場合は ER_OBJ」 */
+		BTRON_CHECK("二重返却は ER_OBJ", sig_sem(id) == ER_OBJ);
+		BTRON_CHECK("削除", del_sem(id) == ER_OK);
+	});
+
+	BTRON_TEST("セマフォ待ちの削除は ER_DLT (§1.3.2)", {
+		W sub;
+
+		tobj_sem = cre_sem(0, SEM_SYNC);
+		tobj_wait_er = ER_OK;
+		BTRON_CHECK("生成", tobj_sem >= 1);
+		/* 自分より低い優先度のサブタスクに待たせる。 */
+		sub = cre_tsk(p_semwait, 3, 0);
+		BTRON_CHECK("サブタスク", sub >= 1);
+		(void)dly_tsk(5); /* サブタスクを待ちに入れる */
+		BTRON_CHECK("削除", del_sem(tobj_sem) == ER_OK);
+		(void)dly_tsk(5);
+		/* 仕様「待ち状態にあったタスクは待ちが解除され、そのタスクへ
+		 * ER_DLT が返される」 */
+		BTRON_CHECK("待ちは ER_DLT で解けた", tobj_wait_er == ER_DLT);
+	});
+
+	BTRON_TEST("イベントフラグ (§1.3.2)", {
+		ID id;
+		WERR got;
+
+		BTRON_CHECK("負の初期値", cre_flg(-1, 0) == ER_PAR);
+		id = cre_flg(0, 0);
+		BTRON_CHECK("生成", id >= 1);
+		BTRON_CHECK("待ちパターン 0 は不正",
+		            wai_flg(id, 0, WF_OR, T_NOWAIT) == ER_PAR);
+		BTRON_CHECK("まだ立っていない",
+		            wai_flg(id, 0x3, WF_OR, T_NOWAIT) == ER_NONE);
+
+		BTRON_CHECK("セット", set_flg(id, 0x1) == ER_OK);
+		/* NOCLR 付きなら値は変わらない（仕様） */
+		got = wai_flg(id, 0x1, WF_OR | NOCLR, T_NOWAIT);
+		BTRON_CHECK("OR 待ちが解けて値が返る", got == 0x1);
+		BTRON_CHECK("NOCLR なので残る",
+		            wai_flg(id, 0x1, WF_OR | NOCLR, T_NOWAIT) == 0x1);
+
+		/* AND 待ちは全ビットが揃うまで。 */
+		BTRON_CHECK("AND はまだ",
+		            wai_flg(id, 0x3, WF_AND, T_NOWAIT) == ER_NONE);
+		BTRON_CHECK("もう 1 ビット", set_flg(id, 0x2) == ER_OK);
+		/* NOCLR 無しなので**全ビット**が 0 クリアされる（仕様） */
+		BTRON_CHECK("AND が解けた",
+		            wai_flg(id, 0x3, WF_AND, T_NOWAIT) == 0x3);
+		BTRON_CHECK("全クリアされた",
+		            wai_flg(id, 0x3, WF_OR, T_NOWAIT) == ER_NONE);
+
+		/* 仕様「現在の値に ptn が AND される」。残すパターンである。 */
+		BTRON_CHECK("セット", set_flg(id, 0xF) == ER_OK);
+		BTRON_CHECK("AND でクリア", clr_flg(id, 0x5) == ER_OK);
+		BTRON_CHECK("0x5 が残った",
+		            wai_flg(id, 0xF, WF_OR | NOCLR, T_NOWAIT) == 0x5);
+		BTRON_CHECK("全クリア", clr_flg(id, 0) == ER_OK);
+		BTRON_CHECK("空になった",
+		            wai_flg(id, 0xF, WF_OR, T_NOWAIT) == ER_NONE);
+		BTRON_CHECK("削除", del_flg(id) == ER_OK);
+	});
+
+	BTRON_TEST("メッセージバッファ (§1.3.2)", {
+		ID id;
+		B buf[16];
+		W i;
+
+		BTRON_CHECK("最大サイズ 0 は不正", cre_mbf(64, 0, 0) == ER_PAR);
+		id = cre_mbf(64, 16, 0);
+		BTRON_CHECK("生成", id >= 1);
+		BTRON_CHECK("空なら ER_NONE", rcv_mbf(id, buf, T_NOWAIT) == ER_NONE);
+
+		for (i = 0; i < 16; i++) {
+			buf[i] = (B)('A' + i);
+		}
+		BTRON_CHECK("送信", snd_mbf(id, buf, 16, T_NOWAIT) == ER_OK);
+		for (i = 0; i < 16; i++) {
+			buf[i] = 0;
+		}
+		BTRON_CHECK("受信", rcv_mbf(id, buf, T_NOWAIT) == 16);
+		BTRON_CHECK("中身が合っている", buf[0] == 'A' && buf[15] == 'P');
+		BTRON_CHECK("アドレス不正", snd_mbf(id, 0, 1, T_NOWAIT) == ER_ADR);
+		BTRON_CHECK("削除", del_mbf(id) == ER_OK);
+	});
+
+	BTRON_TEST("DELEXIT の同期オブジェクトはプロセス終了で消える (§1.3)", {
+		W n0 = tobj_count();
+		ID id;
+
+		/* 自プロセスで DELEXIT 付きに作り、数が増えることを見る。
+		 * 自プロセスの終了は検査の終わりなので、ここでは明示的に消す。 */
+		id = cre_sem(1, SEM_SYNC | DELEXIT);
+		BTRON_CHECK("生成", id >= 1 && tobj_count() == n0 + 1);
+		BTRON_CHECK("削除", del_sem(id) == ER_OK);
+		BTRON_CHECK("数が戻った", tobj_count() == n0);
+	});
+
+	/* -------------------------------------------------------------- */
+	/* §1.9 時計管理 / §1.10 システム管理                             */
+	/* -------------------------------------------------------------- */
+
+	BTRON_TEST("システム時間とカレンダーの変換 (§1.9)", {
+		STIME t = 0;
+		TIMEZONE tz;
+		DATE_TIM dt;
+		STIME back = 0;
+
+		BTRON_CHECK("取得", get_tim(&t, &tz) == ER_OK);
+		BTRON_CHECK("時差の初期値", tz.adjust == 0 && tz.dst_flg == 0);
+
+		/* 原点。1985-01-01 は火曜日。 */
+		BTRON_CHECK("原点の変換", get_tod(&dt, 1, 0) == ER_OK);
+		BTRON_CHECK("1985 年",
+		            dt.d_year == STIME_EPOCH_YEAR - 1900 &&
+		                dt.d_month == 1 && dt.d_day == 1);
+		BTRON_CHECK("火曜日", dt.d_wday == 2);
+		BTRON_CHECK("年内 1 日目", dt.d_days == 1);
+
+		/* 閏年の 2 月 29 日が通ること。2024-02-29 は木曜日。 */
+		dt.d_year = 2024 - 1900;
+		dt.d_month = 2;
+		dt.d_day = 29;
+		dt.d_hour = 12;
+		dt.d_min = 34;
+		dt.d_sec = 56;
+		BTRON_CHECK("閏日 → システム時間", set_tod(&dt, &t, 0) == ER_OK);
+		BTRON_CHECK("往復", get_tod(&dt, t, 0) == ER_OK);
+		BTRON_CHECK("日付が戻った",
+		            dt.d_year == 2024 - 1900 && dt.d_month == 2 &&
+		                dt.d_day == 29);
+		BTRON_CHECK("時刻が戻った",
+		            dt.d_hour == 12 && dt.d_min == 34 && dt.d_sec == 56);
+		BTRON_CHECK("木曜日", dt.d_wday == 4);
+		BTRON_CHECK("年内 60 日目", dt.d_days == 31 + 29);
+
+		/* 仕様「d_days の値は d_month = 0 のときのみ有効」 */
+		dt.d_month = 0;
+		dt.d_days = 60;
+		dt.d_hour = 0;
+		dt.d_min = 0;
+		dt.d_sec = 0;
+		BTRON_CHECK("通算日で指定", set_tod(&dt, &back, 0) == ER_OK);
+		BTRON_CHECK("同じ日になる",
+		            get_tod(&dt, back, 0) == ER_OK && dt.d_month == 2 &&
+		                dt.d_day == 29);
+
+		/* 時差。ローカル = システム - adjust */
+		tz.adjust = -9 * 3600; /* 日本標準時。グリニッチから東 9 時間 */
+		tz.dst_flg = 0;
+		tz.dst_adj = 0;
+		BTRON_CHECK("時差の設定", set_tim(0, &tz) == ER_OK);
+		BTRON_CHECK("GMT", get_tod(&dt, 1, 0) == ER_OK && dt.d_hour == 0);
+		BTRON_CHECK("ローカルは +9 時間",
+		            get_tod(&dt, 1, 1) == ER_OK && dt.d_hour == 9);
+
+		tz.adjust = TZ_ADJUST_MAX + 1;
+		BTRON_CHECK("時差が範囲外", set_tim(0, &tz) == ER_PAR);
+		tz.adjust = 0;
+		BTRON_CHECK("戻す", set_tim(0, &tz) == ER_OK);
+		BTRON_CHECK("アドレス不正", get_tod(0, 1, 0) == ER_ADR);
+
+		dt.d_month = 13;
+		BTRON_CHECK("月が範囲外", set_tod(&dt, &back, 0) == ER_PAR);
+	});
+
+	BTRON_TEST("OS バージョンと構成情報 (§1.10)", {
+		T_VER v;
+		W num = 0;
+		TC str[16];
+
+		BTRON_CHECK("アドレス不正", get_ver(0) == ER_ADR);
+		BTRON_CHECK("取得", get_ver(&v) == ER_OK);
+		BTRON_CHECK("仕様書バージョンは BTRON3", v.spver == OS_SPVER);
+		BTRON_CHECK("CPU が入っている", v.cpu != 0);
+
+		/* 仕様「関数値 = 0 は W の数値情報」 */
+		BTRON_CHECK("数値項目",
+		            get_cnf(nm_cpunum, &num, (W)sizeof(num)) == 0);
+		BTRON_CHECK("CPU 数が取れた", num >= 1);
+		/* 仕様「関数値 > 0 は TC 文字列情報で、関数値は文字数」 */
+		BTRON_CHECK("文字列項目",
+		            get_cnf(nm_osname, str, (W)sizeof(str)) == 6);
+		BTRON_CHECK("中身", str[0] == (TC)'B' && str[6] == TNULL);
+		BTRON_CHECK("無い項目",
+		            get_cnf(nm_nope, &num, (W)sizeof(num)) == ER_NOEXS);
+		BTRON_CHECK("アドレス不正",
+		            get_cnf(0, &num, (W)sizeof(num)) == ER_ADR);
+	});
+
+	/* -------------------------------------------------------------- */
+	/* 外殻マネージャ（フォントマネージャ）                            */
+	/* -------------------------------------------------------------- */
+
+	BTRON_TEST("マネージャがサーバとして立つ (詳細 E1 / E22)", {
+		W pid;
+		WERR por;
+		CONST FontShared *fs;
+		MgrMsg m;
+		UW width = 0;
+		CONST UB *g;
+		CONST UB *g2;
+
+		/* 優先度 1 は自分 (2) より高いので、生成した瞬間に走って
+		 * 共有メモリを用意し、名前を登録し、受付待ちに入る。 */
+		pid = fontman_start(1);
+		BTRON_CHECK("マネージャが立った", pid >= 1);
+
+		/* §1.4: グローバル名で見つかる。これが BTRON3 の
+		 * サービス探索である。 */
+		por = mgr_lookup(MGR_FONT);
+		BTRON_CHECK("名前で見つかる", por >= 1);
+
+		/* §1.3: ランデブで問い合わせる。1 回だけ。 */
+		fs = fontman_shared();
+		BTRON_CHECK("共有グリフデータの置き場が分かる", fs != 0);
+		if (fs != 0) {
+			/* §1.5: 共有メモリ = 負のアドレス */
+			BTRON_CHECK("共有メモリにある", (D)(UD)(CONST VP)fs < 0);
+			BTRON_CHECK("印", fs->magic == FONTSHARED_MAGIC);
+			BTRON_CHECK("諸元", fs->height == 16 &&
+			                        fs->narrow_count > 0 &&
+			                        fs->wide_count > 0);
+
+			/* **ここが詳細 E1 の設計の要点。** 以後の字形引きは
+			 * 共有メモリを直接読むだけで、IPC は起きない。 */
+			g = fontman_glyph(fs, (UW)'A', &width);
+			BTRON_CHECK("半角が引ける", g != 0 && width == 8);
+			g2 = fontman_glyph(fs, 0x3042U, &width); /* 'あ' */
+			BTRON_CHECK("全角が引ける", g2 != 0 && width == 16);
+			BTRON_CHECK("字形が空でない",
+			            glyph_inked(g, 16) && glyph_inked(g2, 32));
+			BTRON_CHECK("無い文字", fontman_glyph(fs, 0x3FFFU, &width) == 0);
+
+			/* IPC 経由でも同じ答えが返る。 */
+			m.func = FONT_GET_IMG;
+			m.arg[0] = (D)(UW)'A';
+			BTRON_CHECK("要求が通る",
+			            mgr_call((ID)por, &m, T_FOREVER) == ER_OK &&
+			                m.result == ER_OK);
+			BTRON_CHECK("共有メモリと同じアドレス",
+			            (CONST UB *)(CONST VP)(UD)m.arg[0] == g);
+			BTRON_CHECK("幅も同じ", m.arg[1] == 8);
+
+			m.func = 999;
+			BTRON_CHECK("知らない機能",
+			            mgr_call((ID)por, &m, T_FOREVER) == ER_OK &&
+			                m.result == ER_PAR);
+		}
+
+		/* 止める。ポートと名前は DELEXIT 付きなので一緒に消える。 */
+		m.func = FONT_SHUTDOWN;
+		BTRON_CHECK("停止要求",
+		            mgr_call((ID)por, &m, T_FOREVER) == ER_OK);
+		(void)dly_tsk(10);
+		BTRON_CHECK("プロセスが終わった", prc_sts(pid, 0, 0) == ER_NOPRC);
+		BTRON_CHECK("名前も消えた", mgr_lookup(MGR_FONT) == ER_NOEXS);
+		BTRON_CHECK("終了メッセージを捨てる",
+		            clr_msg(MM_ALL, MM_NULL) == ER_OK);
 	});
 
 	BTRON_TEST("cre_prc はファイルシステムを要求する (§1.1.6)", {

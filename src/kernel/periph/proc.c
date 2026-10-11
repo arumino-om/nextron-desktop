@@ -238,6 +238,14 @@ EXPORT W prc_count(void)
 	return n;
 }
 
+EXPORT Bool prc_exists(W pid)
+{
+	if (pid < 1 || pid > PRC_MAX_PRCID) {
+		return False;
+	}
+	return pcb[pid].used;
+}
+
 EXPORT ID prc_main_task(W pid)
 {
 	if (pid < 1 || pid > PRC_MAX_PRCID || !pcb[pid].used) {
@@ -403,8 +411,17 @@ LOCAL MESSAGE *dup_message(CONST MESSAGE *msg)
 	}
 	d->msg_type = (msg != 0) ? msg->msg_type : 0;
 	d->msg_size = size;
-	for (i = 0; i < size; i++) {
-		d->msg_body[i] = msg->msg_body[i];
+	if (size > 0) {
+		/* 本体は共用体として宣言されているが可変長としても使う（仕様の
+		 * MSGSIZE / rcv_msg の msgsz がそれを前提にしている）。
+		 * 共用体の中の配列の添字では 32 バイトを超えられないので、
+		 * 先頭アドレスをバイト列として扱う。 */
+		UB *dst = (UB *)(VP)&d->msg_body;
+		CONST UB *src = (CONST UB *)(CONST VP)&msg->msg_body;
+
+		for (i = 0; i < size; i++) {
+			dst[i] = src[i];
+		}
 	}
 	return d;
 }
@@ -654,13 +671,19 @@ EXPORT WERR cre_tsk(SUBTASK entry, W pri, W arg)
  * self = True なら、呼び出している自タスクがこのプロセスに属している。
  * **その場合は戻らない。** 自タスクだけは最後に残し、休止状態にして
  * ID を中心核に預ける（自分のスタックの上で自分のスタックは返せない）。 */
-LOCAL void teardown(W pid, W code, Bool self)
+LOCAL void teardown(W pid, W code, W msgtype, Bool self)
 {
 	PCB *p = &pcb[pid];
 	ID me = (self != False) ? knl_cur->tskid : 0;
+	W parent = p->parpid;
 	W i;
 
 	p->exitcode = code;
+
+	/* §1.2.2: 終了メッセージを親へ送る。**子プロセスの終了コードは
+	 * メッセージ管理を通って親に届く**（仕様が §1.2 でそう定めている）。
+	 * 親の付け替えより先に送る — 自分の親が誰かはここでしか分からない。 */
+	msg_notify_exit(parent, pid, code, msgtype);
 
 	/* §1.1.1: 「プロセスが終了した場合、そのプロセスの子プロセスの親
 	 * プロセスは、終了したプロセスの親プロセスとなる。ただし、初期
@@ -693,6 +716,18 @@ LOCAL void teardown(W pid, W code, Bool self)
 		kfree(p->msg);
 		p->msg = 0;
 	}
+
+	/* メッセージキュー・タイムアウト要求・ハンドラを捨てる (§1.2)。
+	 * このプロセス宛に空き待ち・確認待ちをしている送信側は ER_NOPRC で
+	 * 解ける（仕様「待っている間に送信先のプロセスが終了した場合は
+	 * エラー終了する」）。 */
+	msg_release_process(pid);
+
+	/* DELEXIT 指定のグローバル名データを捨てる (§1.4.1)。 */
+	gnm_release_process(pid);
+
+	/* DELEXIT 指定の同期通信オブジェクトを捨てる (§1.3)。 */
+	tobj_release_process(pid);
 
 	/* §1.5 のメモリブロックを返す。**アドレス空間を壊す前に呼ぶ。**
 	 * ローカルメモリの物理ページはプロセスのページテーブルを辿らないと
@@ -730,10 +765,27 @@ EXPORT void ext_prc(W code)
 	W pid = prc_self();
 
 	if (pid >= 1) {
-		teardown(pid, code, True); /* 戻らない */
+		/* 仕様 §1.2.2: ext_prc による終了は MS_EXIT で親へ通知される。 */
+		teardown(pid, code, MS_EXIT, True); /* 戻らない */
 	}
 	/* プロセスに属さないタスクが呼んだ。中心核のタスクとしてだけ畳む。 */
 	tk_ext_tsk();
+}
+
+EXPORT ERR prc_abort(W pid, W code)
+{
+	W me = prc_self();
+
+	if (pid < 1 || pid > PRC_MAX_PRCID || !pcb[pid].used) {
+		return ER_NOPRC;
+	}
+	/* §1.2.2 の MS_ABORT。「プロセスがシステムエラーにより異常終了させられた
+	 * 場合」と、メッセージハンドラ MH_TERM による終了がこれに当たる。 */
+	if (pid == me) {
+		teardown(pid, code, MS_ABORT, True); /* 戻らない */
+	}
+	teardown(pid, code, MS_ABORT, False);
+	return ER_OK;
 }
 
 /* pid が anc の子孫か。anc 自身は含まない。 */
@@ -781,7 +833,8 @@ EXPORT ERR ter_prc(W pid, W code, W opt)
 	}
 
 	if (opt == TERM_NRM) {
-		teardown(target, code, False);
+		/* 仕様 §1.2.2: ter_prc による強制終了は MS_TERM で親へ通知される。 */
+		teardown(target, code, MS_TERM, False);
 		return ER_OK;
 	}
 
@@ -800,11 +853,11 @@ EXPORT ERR ter_prc(W pid, W code, W opt)
 			kill_self = True;
 			continue;
 		}
-		teardown(i, code, False);
+		teardown(i, code, MS_TERM, False);
 	}
-	teardown(target, code, False);
+	teardown(target, code, MS_TERM, False);
 	if (kill_self) {
-		teardown(me, code, True); /* 戻らない */
+		teardown(me, code, MS_TERM, True); /* 戻らない */
 	}
 	return ER_OK;
 }
@@ -819,7 +872,7 @@ EXPORT void ext_tsk(void)
 
 		/* 仕様: 「メインタスクが終了した場合はプロセスも終了する」 */
 		if (p->task[0] == me) {
-			teardown(pid, p->exitcode, True); /* 戻らない */
+			teardown(pid, p->exitcode, MS_EXIT, True); /* 戻らない */
 		}
 		detach_task(p, me);
 		knl_defer_del(me);

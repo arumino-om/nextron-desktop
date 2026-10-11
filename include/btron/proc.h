@@ -28,6 +28,7 @@
 
 #include <btron/errcode.h>
 #include <btron/kernel.h>
+#include <btron/message.h>
 #include <btron/typedef.h>
 
 /* アドレス空間の実体は `btron/vmem.h`（カーネル側の HAL 定義）にある。
@@ -142,11 +143,9 @@ typedef struct {
 /* msg_body は可変長で、実際の長さは msg_size バイト。                  */
 /* ------------------------------------------------------------------ */
 
-typedef struct {
-	W msg_type;    /* メッセージタイプ */
-	W msg_size;    /* メッセージサイズ (バイト数) */
-	UB msg_body[1]; /* メッセージ本体 (msg_size バイト) */
-} MESSAGE;
+/* `MESSAGE` の定義は `btron/message.h` にある。**§1.2 のプロセス間
+ * メッセージと同じ型である** — 仕様が「これはプロセス間メッセージと
+ * 同一の構造を持つ」と明記している。ここで別に定義してはならない。 */
 
 /* メインタスクの形式。
  *
@@ -280,12 +279,27 @@ IMPORT W prc_self(void);
 /* 生成済みプロセス数。 */
 IMPORT W prc_count(void);
 
+/* プロセスが存在するか。
+ *
+ * **タスク独立部（割込みハンドラ）から使えるのはこちら。** `prc_sts()` は
+ * pid = 0 / -1 の相対指定を解くために「自プロセス」を必要とするので、
+ * 割込みの中から呼ぶと `knl_cur` がアイドルタスクで ER_CTX になる。
+ * 存在だけ知りたい場所でこれを取り違えると、判定が常に偽になる。 */
+IMPORT Bool prc_exists(W pid);
+
 /* プロセスのメインタスクのタスク ID。無ければ 0。
  * §1.1.2「プロセスの状態はメインタスクの状態」の検証に使う。 */
 IMPORT ID prc_main_task(W pid);
 
 /* タスク ID から所属プロセスの PID を引く。属していなければ 0。 */
 IMPORT W prc_task_owner(ID tskid);
+
+/* プロセスを**異常終了**させる (§1.2.2 の MS_ABORT)。
+ *
+ * 親へ `MS_ABORT` を送る点だけが `ter_prc` と違う。システムエラーによる
+ * 強制終了と、メッセージハンドラ `MH_TERM` による終了がこれを使う。
+ * pid が自プロセスなら戻らない。 */
+IMPORT ERR prc_abort(W pid, W code);
 
 /* プロセスのアドレス空間。**検証用。** 無ければ 0。
  *

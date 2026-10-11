@@ -16,9 +16,12 @@
 #define __BTRON_KERNEL_KNL_H__
 
 #include <btron/hal.h>
+#include <btron/clock.h>
+#include <btron/gname.h>
 #include <btron/intc.h>
 #include <btron/kernel.h>
 #include <btron/memory.h>
+#include <btron/message.h>
 #include <btron/proc.h>
 #include <btron/taskcomm.h>
 #include <btron/vmem.h>

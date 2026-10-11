@@ -12,20 +12,26 @@
  *
  * §1.3 の全システムコール:
  *
- *   セマフォ          cre_sem / del_sem / sig_sem / wai_sem        未実装
- *   イベントフラグ    cre_flg / del_flg / set_flg / clr_flg / wai_flg  未実装
- *   メッセージバッファ cre_mbf / del_mbf / snd_mbf / rcv_mbf       未実装
+ *   セマフォ          cre_sem / del_sem / sig_sem / wai_sem        実装済み
+ *   イベントフラグ    cre_flg / del_flg / set_flg / clr_flg / wai_flg  実装済み
+ *   メッセージバッファ cre_mbf / del_mbf / snd_mbf / rcv_mbf       実装済み
  *   ランデブ          cre_por / del_por / cal_por / acp_por /
- *                     fwd_por / rpl_rdv                           **実装済み**
+ *                     fwd_por / rpl_rdv                           実装済み
  *
  * ランデブだけ先に実装したのは、詳細 E1 で外殻サーバの IPC の土台に
- * 選んだからである。残りは Phase 2 で中心核の上に載せる。
+ * 選んだからである。残りは中心核のオブジェクトの上に載せた（taskobj.c）。
+ *
+ * 【仕様の注記】「メッセージによる通信と一番大きく異なる点は、メッセージが
+ * プロセス間の通信であるのに対し、タスク間の通信であることである」。
+ * §1.2 がプロセス間、ここがタスク間。ただし「生成したオブジェクトは
+ * すべてのプロセスから使用可能」なのでプロセス間にも使える。
  */
 
 #ifndef __BTRON_TASKCOMM_H__
 #define __BTRON_TASKCOMM_H__
 
 #include <btron/errcode.h>
+#include <btron/kernel.h>
 #include <btron/typedef.h>
 
 typedef W TMOUT;       /* タイムアウト指定 (ミリ秒)。§1.3.1 */
@@ -35,6 +41,63 @@ typedef W TMOUT;       /* タイムアウト指定 (ミリ秒)。§1.3.1 */
 /* 実装の制限値 (D9。暫定) */
 #define TK_MAX_PORID 32 /* ランデブポート数 */
 #define TK_MAX_RDV 32   /* 同時に成立しているランデブの数 */
+#define TK_MAX_TOBJ 64  /* セマフォ + イベントフラグ + メッセージバッファ */
+
+/* ------------------------------------------------------------------ */
+/* セマフォ (§1.3.1 / §1.3.2)                                          */
+/*                                                                     */
+/* **SEM_EXCL は中心核のミューテックスに写る。** 仕様が課している規則    */
+/* （獲得〜開放の順、再帰禁止、所有者のみ解放、タスク終了時の自動解放、  */
+/* 初期値 1）が μT-Kernel のミューテックスと完全に一致する。            */
+/* SEM_SYNC の方が本来の計数セマフォ。詳細は periph/taskobj.c。          */
+/* ------------------------------------------------------------------ */
+
+#define SEM_SYNC 0x0000U /* 同期用セマフォ（計数セマフォ） */
+#define SEM_EXCL 0x4000U /* 排他制御用セマフォ（＝ミューテックス） */
+
+IMPORT WERR cre_sem(W cnt, UW opt);
+IMPORT ERR del_sem(ID id);
+IMPORT ERR sig_sem(ID id);
+IMPORT ERR wai_sem(ID id, TMOUT tmo);
+
+/* ------------------------------------------------------------------ */
+/* イベントフラグ (§1.3.1 / §1.3.2)                                    */
+/* ------------------------------------------------------------------ */
+
+#define WF_AND 0x0000U /* ptn で 1 のビットがすべてセットされるまで待つ */
+#define WF_OR 0x0002U  /* ptn で 1 のビットのいずれかがセットされるまで待つ */
+/* NOCLR (0x0008) は typedef.h にある */
+
+IMPORT WERR cre_flg(W ptn, UW opt);
+IMPORT ERR del_flg(ID id);
+IMPORT ERR set_flg(ID id, W ptn);
+
+/* **消去パターンではなく「残すパターン」。** 仕様は「現在の値に ptn が
+ * AND される」と規定している。`clr_flg(id, 0)` で全クリア。 */
+IMPORT ERR clr_flg(ID id, W ptn);
+
+/* 戻り値 >0 が待ち解除時のイベントフラグの値。
+ * mode = (WF_AND ‖ WF_OR) | [NOCLR]。NOCLR が無ければ**全ビット**が
+ * 0 クリアされる（条件ビットだけではない）。 */
+IMPORT WERR wai_flg(ID id, W ptn, UW mode, TMOUT tmo);
+
+/* ------------------------------------------------------------------ */
+/* メッセージバッファ (§1.3.2)                                         */
+/* ------------------------------------------------------------------ */
+
+/* bufsz = 0 で同期通信（送信側と受信側が同時に揃う）。 */
+IMPORT WERR cre_mbf(W bufsz, W max, UW opt);
+IMPORT ERR del_mbf(ID id);
+IMPORT ERR snd_mbf(ID id, VP msg, W sz, TMOUT tmo);
+IMPORT WERR rcv_mbf(ID id, VP msg, TMOUT tmo);
+
+/* ------------------------------------------------------------------ */
+/* 内部の口（BTRON3 の API ではない）                                   */
+/* ------------------------------------------------------------------ */
+
+IMPORT ERR tobj_init(void);
+IMPORT void tobj_release_process(W pid); /* DELEXIT の自動削除 */
+IMPORT W tobj_count(void);               /* 検証用 */
 
 /* ------------------------------------------------------------------ */
 /* ランデブ                                                            */

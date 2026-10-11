@@ -39,6 +39,7 @@ EXPORT void knl_timer_handler(UW intid, VP arg)
 	 * BTRON3 §1.1.3 のラウンドロビン（中心核は時分割をしないので
 	 * 周辺核がここで足す）。 */
 	prc_tick();
+	msg_tick(); /* 周辺核 §1.2。タイムアウトメッセージとハンドラの持ち越し */
 	/* 切替は intc_dispatch() の最後で行う。ここではしない。 */
 }
 
@@ -110,6 +111,10 @@ EXPORT ER knl_init(void)
 	knl_cyc_init();
 	(void)prc_init(); /* 周辺核 §1.1。ランデブ (knl_rdv_init) と同じ扱い */
 	(void)mbk_init(); /* 周辺核 §1.5 */
+	(void)msg_init(); /* 周辺核 §1.2 */
+	(void)gnm_init(); /* 周辺核 §1.4 */
+	(void)clk_init(); /* 周辺核 §1.9 */
+	(void)tobj_init(); /* 周辺核 §1.3（ランデブ以外） */
 
 	for (i = 0; i <= TK_MAX_TSKID; i++) {
 		knl_tcb[i].used = False;

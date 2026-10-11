@@ -77,6 +77,20 @@ IMPORT void hal_exception_init(void);
  * 最初の hal_ctx_switch() で entry(stacd, exinf) が呼ばれるように仕込む。 */
 IMPORT UD hal_ctx_init(UD stack_top, void (*entry)(W stacd, VP exinf), W stacd, VP exinf);
 
+/* 止まっているタスクのスタックにハンドラ呼び出しを差し込む。
+ *
+ * `sp` はそのタスクの退避した SP。戻り値が新しい SP で、呼び出し側が
+ * TCB に入れ直す。ディスパッチャがそのタスクを選ぶと、まず `handler`
+ * が走り、戻ると**割り込んだ位置から再開する**。
+ *
+ * 周辺核 §1.2.3 のメッセージハンドラがこれを使う。タスク例外 (T1-14) も
+ * 同じ仕掛けになる。失敗時 0。
+ *
+ * 【前提】`sp` が有効な退避フレームを指していること。実行状態のタスク
+ * （自分自身）には使えない — SP が退避されていないので、その場合は
+ * 呼び出し側がハンドラを直接呼ぶ。 */
+IMPORT UD hal_ctx_inject(UD sp, void (*handler)(W a0, VP a1), W a0, VP a1);
+
 /* *save_sp に現在の SP を保存し、new_sp へ切り替える。 */
 IMPORT void hal_ctx_switch(UD *save_sp, UD new_sp);
 
