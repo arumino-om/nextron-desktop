@@ -243,6 +243,16 @@ LOCAL void show_machdesc(void)
 	}
 	hal_console_puts("\n    CPU 起動  : ");
 	hal_console_puts(md_boot_name(md->boot_method));
+	/* virtio-mmio の枠。入力装置を探す先なので、0 なら触れない画面になる。 */
+	hal_console_puts("\n    virtio    : ");
+	put_dec(md->virtio_count);
+	hal_console_puts(" 枠");
+	if (md->virtio_count > 0) {
+		hal_console_puts(" @ ");
+		put_hex(md->virtio[0].pa);
+		hal_console_puts(" INTID ");
+		put_dec(md->virtio[0].intid);
+	}
 	hal_console_puts("\n");
 }
 

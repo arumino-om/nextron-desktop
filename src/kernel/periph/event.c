@@ -53,6 +53,7 @@
 #include <btron/event.h>
 #include <btron/message.h>
 #include <btron/proc.h>
+#include <btron/screen.h>
 
 #include "../core/knl.h"
 
@@ -289,6 +290,55 @@ LOCAL void notify_req(CONST EVENT *ev, W from)
 /* システムコール                                                      */
 /* ------------------------------------------------------------------ */
 
+/* キューの末尾に 1 つ積む。割込み禁止の中で呼ぶこと。
+ *
+ * 空きが無ければ 0 を返す。**捨てられるのは新しい方**（仕様 §1.7.2
+ * 「新規に発生したイベント、即ち、一番新しいイベントはキューに
+ * 入れられず、捨てられる」）。だから既存の要素を追い出すことはしない。
+ *
+ * キー状態・最後のキー押し・ボタン状態の面倒もここで見る。put_evt と
+ * ドライバ経路の両方が通るので、自動リピートの条件が片方だけ整う
+ * という食い違いが起きない。 */
+LOCAL EvEnt *enqueue(CONST EVENT *ev, W from)
+{
+	EvEnt *slot = 0;
+	W i;
+
+	for (i = 0; i < EV_QUEUE_MAX; i++) {
+		if (!queue[i].used) {
+			slot = &queue[i];
+			break;
+		}
+	}
+	if (slot == 0) {
+		return 0;
+	}
+	/* 仕様「常にイベントキューの最後に入れられる」 */
+	slot->ev = *ev;
+	slot->seq = next_seq++;
+	slot->from = from;
+	slot->used = True;
+	last_time[ev->type] = etimer();
+
+	if (ev->type == EV_KEYDWN) {
+		key_set(key_state, ev->data.key.keytop, True);
+		last_keytop = ev->data.key.keytop;
+		last_keycode = ev->data.key.code;
+		last_keydwn_time = ev->time;
+		last_autkey_time = 0;
+	} else if (ev->type == EV_KEYUP) {
+		key_set(key_state, ev->data.key.keytop, False);
+		if (ev->data.key.keytop == last_keytop) {
+			last_keydwn_time = 0;
+		}
+	} else if (ev->type == EV_BUTDWN) {
+		cur_stat |= ES_BUT;
+	} else if (ev->type == EV_BUTUP) {
+		cur_stat &= ~(UW)ES_BUT;
+	}
+	return slot;
+}
+
 EXPORT WERR get_evt(W t_mask, EVENT *evt, W opt)
 {
 	UD state;
@@ -341,7 +391,6 @@ EXPORT ERR put_evt(CONST EVENT *evt, W opt)
 	EvEnt *slot = 0;
 	EVENT ev;
 	W me = prc_self();
-	W i;
 
 	if (evt == 0) {
 		return ER_ADR;
@@ -372,46 +421,13 @@ EXPORT ERR put_evt(CONST EVENT *evt, W opt)
 		hal_int_restore(state);
 		return ER_OK;
 	}
-	for (i = 0; i < EV_QUEUE_MAX; i++) {
-		if (!queue[i].used) {
-			slot = &queue[i];
-			break;
-		}
-	}
+	slot = enqueue(&ev, me);
 	if (slot == 0) {
 		/* 仕様「イベントキューに空きがない場合…エラーとなる」。
 		 * （ドライバ由来のイベントは「一番新しいイベントが捨てられる」が、
 		 * put_evt はエラーを返す形で区別されている。） */
 		hal_int_restore(state);
 		return ER_NOSPC;
-	}
-	/* 仕様「常にイベントキューの最後に入れられる」 */
-	slot->ev = ev;
-	slot->seq = next_seq++;
-	slot->from = me;
-	slot->used = True;
-	last_time[ev.type] = etimer();
-
-	/* キー状態と最後のキー押しを更新する。
-	 *
-	 * **本来はキーボードドライバの仕事。** ドライバが入るまでは
-	 * put_evt が唯一の入口なので、ここで面倒を見る。こうしておくと
-	 * 自動リピートの検査が本物の経路で通る。 */
-	if (ev.type == EV_KEYDWN) {
-		key_set(key_state, ev.data.key.keytop, True);
-		last_keytop = ev.data.key.keytop;
-		last_keycode = ev.data.key.code;
-		last_keydwn_time = ev.time;
-		last_autkey_time = 0;
-	} else if (ev.type == EV_KEYUP) {
-		key_set(key_state, ev.data.key.keytop, False);
-		if (ev.data.key.keytop == last_keytop) {
-			last_keydwn_time = 0;
-		}
-	} else if (ev.type == EV_BUTDWN) {
-		cur_stat |= ES_BUT;
-	} else if (ev.type == EV_BUTUP) {
-		cur_stat &= ~(UW)ES_BUT;
 	}
 	hal_int_restore(state);
 
@@ -769,6 +785,221 @@ EXPORT W evt_count(void)
 		}
 	}
 	return n;
+}
+
+/* ------------------------------------------------------------------ */
+/* ドライバからの口。BTRON3 の API ではない                            */
+/*                                                                     */
+/* 【役割の分け方】キーボードの**配列**を知っているのはドライバだけで、  */
+/* 「どのキートップがシフトか」はドライバが決める。一方、文字コードへの  */
+/* エンコード・キュー・自動リピート・ボタン状態は仕様が定めた周辺核の    */
+/* 仕事なので、ここに置く。だからドライバは                             */
+/*                                                                     */
+/*   evt_meta()  … メタキーの状態が変わった（文字にはならない）         */
+/*   evt_key()   … 文字になるキーが上下した（キートップコードで渡す）    */
+/*                                                                     */
+/* の 2 つを呼ぶだけでよい。                                           */
+/* ------------------------------------------------------------------ */
+
+/* 画面の範囲に収める。
+ *
+ * **負の側は画面の有無に関係なく 0 で止める。** スクリーン左上を (0,0)
+ * とした絶対座標（仕様 §1.7.3）に負の位置は無いので、画面が無い構成でも
+ * 同じでなければならない。上限だけが画面の大きさに依る。 */
+LOCAL PNT clamp_to_screen(PNT p)
+{
+	CONST Screen *sc = screen();
+
+	if (p.x < 0) {
+		p.x = 0;
+	}
+	if (p.y < 0) {
+		p.y = 0;
+	}
+	if (sc == 0 || sc->width == 0 || sc->height == 0) {
+		return p;
+	}
+	if (p.x > (H)(sc->width - 1U)) {
+		p.x = (H)(sc->width - 1U);
+	}
+	if (p.y > (H)(sc->height - 1U)) {
+		p.y = (H)(sc->height - 1U);
+	}
+	return p;
+}
+
+EXPORT void evt_set_kbd(CONST KBD_ID *id, CONST KeyTab *tab)
+{
+	UD state = hal_int_disable();
+
+	if (id != 0) {
+		kbd_id = *id;
+	}
+	if (tab != 0 && tab->keymax >= 1 && tab->keymax <= KEYMAX &&
+	    tab->kctmax >= 1 && tab->kctmax <= KCTSEL &&
+	    tab->keymax * tab->kctmax <= KCTMAX) {
+		keytab = *tab;
+		keytab_set = True;
+	}
+	hal_int_restore(state);
+}
+
+EXPORT void evt_set_pda(W atr)
+{
+	pd_attr = atr;
+}
+
+EXPORT void evt_meta(UW bits, UW mask)
+{
+	UD state = hal_int_disable();
+
+	/* 仕様「メタキーは押されてもイベントを発生しない。状態だけが載る」。
+	 * だからキューには触らない。 */
+	cur_stat = (cur_stat & ~mask) | (bits & mask);
+	hal_int_restore(state);
+}
+
+/* メタキー状態 (CERLKA) を kctsel の添字に組み立てる。
+ * **ビットの順番を取り違えると全く別の文字が出る**（event.h の注意）。 */
+LOCAL UW meta_index(void)
+{
+	UW v = 0;
+
+	if ((cur_stat & ES_ALPH) != 0) {
+		v |= KM_A;
+	}
+	if ((cur_stat & ES_KANA) != 0) {
+		v |= KM_K;
+	}
+	if ((cur_stat & (ES_LSHFT | ES_LLSHFT | ES_TLSHFT)) != 0) {
+		v |= KM_L;
+	}
+	if ((cur_stat & (ES_RSHFT | ES_LRSHFT | ES_TRSHFT)) != 0) {
+		v |= KM_R;
+	}
+	if ((cur_stat & (ES_EXT | ES_LEXT | ES_TEXT)) != 0) {
+		v |= KM_E;
+	}
+	if ((cur_stat & (ES_CMD | ES_LCMD | ES_TCMD)) != 0) {
+		v |= KM_C;
+	}
+	return v;
+}
+
+/* キートップコードを現在のメタキー状態で文字コードに直す。 */
+LOCAL TC encode(UH keytop)
+{
+	UW sel;
+	W tbl;
+
+	if (!keytab_set || (W)keytop >= keytab.keymax) {
+		return TNULL;
+	}
+	sel = meta_index();
+	tbl = keytab.kctsel[sel];
+	if (tbl < 0 || tbl >= keytab.kctmax) {
+		return TNULL;
+	}
+	return keytab.kct[tbl * keytab.keymax + (W)keytop];
+}
+
+EXPORT void evt_key(UH keytop, Bool down)
+{
+	UD state;
+	EVENT ev;
+
+	if (keytop >= KEYMAX) {
+		return;
+	}
+	state = hal_int_disable();
+	ev.type = down ? EV_KEYDWN : EV_KEYUP;
+	ev.time = etimer();
+	ev.pos = pd_pos;
+	ev.data.key.keytop = keytop;
+	ev.data.key.code = encode(keytop);
+	ev.stat = cur_stat;
+	/* 仕様「システムイベントマスクの "0" のビットに対応するタイプの
+	 * イベントはシステム全体として無視されて捨てられる」。
+	 * **ただしキー状態配列は更新しなければならない。**押されている
+	 * ことは get_kmp で見えるべきで、マスクはイベントの話である。 */
+	key_set(key_state, keytop, down);
+	if ((sys_mask & EVMASK(ev.type)) == 0) {
+		hal_int_restore(state);
+		return;
+	}
+	(void)enqueue(&ev, 0); /* 満杯なら黙って捨てる（仕様）*/
+	hal_int_restore(state);
+	notify_req(&ev, 0);
+}
+
+EXPORT void evt_pd_moved(PNT pos)
+{
+	UD state = hal_int_disable();
+
+	/* 仕様 §1.7.3「スクリーンの解像度に対応したレンジの絶対座標値を持つ」。
+	 * 位置が変わっただけではイベントは起きない（イベントタイプが無い）。 */
+	pd_pos = clamp_to_screen(pos);
+	hal_int_restore(state);
+}
+
+EXPORT void evt_pd_delta(W dx, W dy)
+{
+	PNT p;
+	UD state = hal_int_disable();
+
+	p = pd_pos;
+	/* PNT は 16bit なので、足してから丸めるのではなく W で計算して
+	 * 画面の範囲に収めてから詰める。溢れた向きを取り違えないため。 */
+	p.x = (H)((W)p.x + dx > 32767 ? 32767
+	                             : ((W)p.x + dx < -32768 ? -32768 : (W)p.x + dx));
+	p.y = (H)((W)p.y + dy > 32767 ? 32767
+	                             : ((W)p.y + dy < -32768 ? -32768 : (W)p.y + dy));
+	pd_pos = clamp_to_screen(p);
+	hal_int_restore(state);
+}
+
+EXPORT void evt_pd_button(Bool sub, Bool down)
+{
+	UD state;
+	EVENT ev;
+
+	state = hal_int_disable();
+	if (sub) {
+		/* 仕様「PD のサブボタン（メニューボタン）も同様に
+		 * イベントを発生しない」。状態だけを載せる。 */
+		if (down) {
+			cur_stat |= ES_BUT2;
+		} else {
+			cur_stat &= ~(UW)ES_BUT2;
+		}
+		hal_int_restore(state);
+		return;
+	}
+	ev.type = down ? EV_BUTDWN : EV_BUTUP;
+	ev.time = etimer();
+	ev.pos = pd_pos;
+	ev.data.info = 0;
+	/* stat は「イベント発生時点の状態」。ES_BUT 自身はこのイベントが
+	 * 起こした変化なので、enqueue が更新する前の値を載せる。 */
+	ev.stat = cur_stat;
+	if ((sys_mask & EVMASK(ev.type)) == 0) {
+		/* マスクされていてもボタン状態は追う（キーと同じ理由）。 */
+		if (down) {
+			cur_stat |= ES_BUT;
+		} else {
+			cur_stat &= ~(UW)ES_BUT;
+		}
+		hal_int_restore(state);
+		return;
+	}
+	(void)enqueue(&ev, 0);
+	hal_int_restore(state);
+	notify_req(&ev, 0);
+}
+
+EXPORT PNT evt_pd_pos(void)
+{
+	return pd_pos;
 }
 
 EXPORT ERR evt_init(void)

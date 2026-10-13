@@ -67,3 +67,14 @@ EXPORT void hal_timer_wait_us(UD usec)
 		__asm__ volatile("pause" ::: "memory");
 	}
 }
+
+/* DMA の順序づけ (hal.h)。
+ *
+ * x86_64 は TSO なので「書き込み同士」の順序は保たれ、本来 `mfence` は
+ * 不要である。それでも置くのは、virtqueue のあとにレジスタへ通知する
+ * 経路で WC 書き込みが混じった場合に備えるため。コストは arm64 側に
+ * 比べて無視できる。 */
+EXPORT void hal_dma_barrier(void)
+{
+	__asm__ volatile("mfence" ::: "memory");
+}

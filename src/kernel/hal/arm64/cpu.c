@@ -30,3 +30,13 @@ EXPORT void hal_cpu_init(void)
 	    : "r"(CPACR_FPEN_NOTRAP)
 	    : "memory");
 }
+
+/* DMA の順序づけ (hal.h)。
+ *
+ * `dsb sy` にしているのは、virtqueue は普通メモリ（内部共有）に置くが
+ * レジスタへの通知は Device メモリで、両者の間の順序も保証したいため。
+ * `ish` だと Device アクセスとの順序は保証されない。 */
+EXPORT void hal_dma_barrier(void)
+{
+	__asm__ volatile("dsb sy" ::: "memory");
+}

@@ -310,6 +310,38 @@ IMPORT WERR las_evt(W t_mask);
 
 IMPORT ERR evt_init(void);
 
+/* --- ドライバからの口 ---
+ *
+ * キーボードの**配列**（どのキートップがシフトか、どの文字になるか）を
+ * 知っているのはドライバだけなので、配列依存はドライバが持ち、
+ * エンコード・キュー・自動リピート・ボタン状態は周辺核が持つ。 */
+
+/* キーボード ID と既定の文字コード変換表を登録する。 */
+IMPORT void evt_set_kbd(CONST KBD_ID *id, CONST KeyTab *tab);
+
+/* PD の属性 (PD_ABS / PD_REL など) を登録する。chg_pda の内部版で、
+ * **絶対動作タイプかどうかは装置の性質**なのでドライバが決める。 */
+IMPORT void evt_set_pda(W atr);
+
+/* メタキー状態の更新。mask のビットを bits の値にする。
+ * 仕様によりイベントは発生しない。 */
+IMPORT void evt_meta(UW bits, UW mask);
+
+/* キーの上下。文字コードへのエンコードは周辺核が変換表で行う。 */
+IMPORT void evt_key(UH keytop, Bool down);
+
+/* PD の移動。絶対動作タイプは evt_pd_moved、相対動作タイプは
+ * evt_pd_delta を使う。どちらも画面の範囲に収められる。 */
+IMPORT void evt_pd_moved(PNT pos);
+IMPORT void evt_pd_delta(W dx, W dy);
+
+/* PD のボタン。sub が真ならサブボタン（メニューボタン）。
+ * サブボタンは仕様によりイベントを発生せず、状態だけが変わる。 */
+IMPORT void evt_pd_button(Bool sub, Bool down);
+
+/* 現在の PD 位置。ポインタ描画のために割込み文脈からも読む。 */
+IMPORT PNT evt_pd_pos(void);
+
 /* プロセス終了時にイベントメッセージ要求を外す（仕様）。 */
 IMPORT void evt_release_process(W pid);
 

@@ -57,6 +57,17 @@
 /* D9（各種上限値）が決まるまでの暫定値。溢れたら切り捨てて数だけ数える。 */
 #define MD_MAX_CPUS 64
 
+/* virtio-mmio の枠。QEMU の virt 機種は 32 枠を常に用意し、
+ * 何も挿していない枠は DeviceID 0 を返す（枠の存在と中身は別）。 */
+#define MD_MAX_VIRTIO 32
+
+/* MMIO 1 枠の記述。アドレスと割込みの対。 */
+typedef struct MdSlot {
+	UD pa;
+	UD size;
+	UW intid; /* GIC の INTID。0 なら割込みが分からなかった */
+} MdSlot;
+
 typedef struct MachDesc {
 	UW source; /* MD_SRC_*。NONE なら何も読めなかった */
 
@@ -80,6 +91,14 @@ typedef struct MachDesc {
 	UW boot_method; /* MD_BOOT_* */
 	UW cpu_count;   /* 記述に現れた CPU の総数。MD_MAX_CPUS を超えても数える */
 	UD cpu_id[MD_MAX_CPUS]; /* arm64: MPIDR / x86_64: APIC ID */
+
+	/* --- virtio-mmio の枠 (規律 R19: アドレスも割込みも記述から取る) ---
+	 *
+	 * ここに入るのは**枠**であって装置ではない。どの枠に何が挿さって
+	 * いるかはレジスタの DeviceID を読むまで分からないので、
+	 * 中身の判定はドライバ側 (virtio_mmio_probe) の仕事。 */
+	UW virtio_count;
+	MdSlot virtio[MD_MAX_VIRTIO];
 } MachDesc;
 
 /* ------------------------------------------------------------------ */

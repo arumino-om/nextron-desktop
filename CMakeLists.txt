@@ -156,6 +156,8 @@ if(BTRON_ARCH STREQUAL "arm64")
     src/kernel/periph/device.c
     src/drivers/serial/serdev.c
     src/drivers/ramdisk/ramdisk.c
+    src/drivers/virtio/mmio.c
+    src/drivers/virtio/input.c
     src/kernel/periph/clock.c
     src/kernel/periph/system.c
     src/kernel/core/time.c
@@ -304,6 +306,28 @@ if(TARGET btron-kernel)
               --expect "EL1 物理 = 30"
               --expect "PSCI (HVC)"
               --deny   "DTB       : なし"
+              --deny   "[ FAIL ]"
+              --deny   "ローダ異常終了"
+              "${BTRON_DISK_IMAGE}")
+
+    # 入力装置 (virtio-input)。**これが無いと入力の経路は検査されない。**
+    #
+    # 既定の構成（ACPI）では virtio-mmio の枠が DSDT の AML の中にあって
+    # 読めないので、枠が 0 個になり「装置が無い」で通ってしまう。
+    # 規律 R27 の穴そのものなので、専用の構成を立てて、
+    # **本物の装置が見つかって動いたこと**を要求する。
+    add_test(NAME input-arm64
+      COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/run_qemu.py"
+              --arch arm64 --uefi --timeout 120 --input
+              --extra=-device --extra=ramfb
+              --expect "ハード記述: Device Tree"
+              --expect "virtio    : 32 枠"
+              # 見つけた台数と動かせた台数が一致していること。
+              # 旧式インタフェースで断ると「2 台」と「0 台」に割れる。
+              --expect "入力枠    : 2 台"
+              --expect "入力装置  : 2 台"
+              --expect "キーボード"
+              --expect "PD(絶対)"
               --deny   "[ FAIL ]"
               --deny   "ローダ異常終了"
               "${BTRON_DISK_IMAGE}")

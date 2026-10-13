@@ -269,6 +269,42 @@ LOCAL void take_cpu(CONST Fdt *f, CONST Node *n, UW pac, UW psc, MachDesc *md)
 	md->cpu_count++;
 }
 
+/* virtio-mmio の枠。QEMU の virt は 32 枠を常に並べるので、
+ * 空いているかどうかはここでは分からない（DeviceID を読むまで）。
+ * 枠の数が多いので、溢れたら切り捨てる。 */
+LOCAL void take_virtio(CONST Fdt *f, CONST Node *n, UW pac, UW psc, MachDesc *md)
+{
+	UD addr = 0;
+	UD size = 0;
+	UW len = 0;
+	UD at;
+	MdSlot *s;
+
+	if (!compat_has(f, n, "virtio,mmio")) {
+		return;
+	}
+	if (!reg_entry(f, n, pac, psc, 0, &addr, &size)) {
+		return;
+	}
+	if (md->virtio_count >= MD_MAX_VIRTIO) {
+		md->virtio_count++; /* 数だけ数える */
+		return;
+	}
+	s = &md->virtio[md->virtio_count];
+	s->pa = addr;
+	s->size = size;
+	s->intid = 0;
+	/* 割込みは 3 セル <種別 番号 フラグ>。virtio-mmio は SPI。 */
+	at = prop_find(f, n, "interrupts", &len);
+	if (at != 0 && len >= 12) {
+		UW kind = rd_be32(f->base, at);
+		UW num = rd_be32(f->base, at + 4);
+
+		s->intid = (kind == GIC_PPI) ? num + 16U : num + 32U;
+	}
+	md->virtio_count++;
+}
+
 LOCAL void take_psci(CONST Fdt *f, CONST Node *n, MachDesc *md)
 {
 	UW len = 0;
@@ -296,6 +332,7 @@ LOCAL void visit(CONST Fdt *f, CONST Node *n, UW pac, UW psc, MachDesc *md)
 	take_timer(f, n, md);
 	take_cpu(f, n, pac, psc, md);
 	take_psci(f, n, md);
+	take_virtio(f, n, pac, psc, md);
 }
 
 /* ------------------------------------------------------------------ */

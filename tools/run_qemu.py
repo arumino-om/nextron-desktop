@@ -75,6 +75,26 @@ def firmware(arch: str) -> str:
 DEFAULT_MACHINE = {"arm64": "virt", "x86_64": "q35"}
 
 
+def input_args(arch: str) -> list[str]:
+    """キーボードと PD を付ける QEMU 引数。
+
+    ポインタはタブレット（絶対座標）にする。マウス（相対座標）だと
+    QEMU がホストのポインタを掴む必要があり、窓から出られなくなる。
+    絶対座標なら窓の中の位置がそのまま画面の位置になる。
+
+    force-legacy=false が要る。QEMU の virt 機種は virtio-mmio を
+    既定で旧式インタフェース (Version 1) にしてしまい、本OS はそれを
+    扱わない（include/btron/virtio.h に理由を書いた）。
+    """
+    if arch != "arm64":
+        return []
+    return [
+        "-global", "virtio-mmio.force-legacy=false",
+        "-device", "virtio-keyboard-device",
+        "-device", "virtio-tablet-device",
+    ]
+
+
 def qemu_argv(arch: str, image: Path, interactive: bool, uefi: bool,
               machine: str, extra: list[str], gui: bool = False,
               monitor: str = "") -> list[str]:
@@ -261,6 +281,11 @@ def main() -> int:
                          "わざと落として挙動を見る検査（緊急画面など）で使う")
     ap.add_argument("--gui", action="store_true",
                     help="本物の窓を開いて画面を見る。フレームバッファも付く")
+    ap.add_argument("--input", action="store_true",
+                    help="キーボードと PD (virtio-input) を付ける。"
+                         "枠の記述は Device Tree にしか無いので acpi=off にする")
+    ap.add_argument("--no-input", action="store_true",
+                    help="--gui でも入力装置を付けない")
     ap.add_argument("--screenshot", type=Path, metavar="DIR",
                     help="画面を PNG に落とす。窓は開かないので CI でも使える")
     ap.add_argument("--shot-interval", type=float, default=0.3, metavar="SEC",
@@ -269,6 +294,14 @@ def main() -> int:
 
     if not args.image.exists():
         sys.exit(f"イメージがありません: {args.image}")
+
+    # 入力装置。--gui のときは既定で付ける（触れない窓は見るだけになる）。
+    if (args.input or args.gui) and not args.no_input:
+        args.extra = input_args(args.arch) + args.extra
+        if args.machine is None:
+            # virtio-mmio の枠を記述しているのは Device Tree だけ。
+            # ACPI では DSDT の AML の中にあり、まだ読めない (T1-15)。
+            args.machine = DEFAULT_MACHINE[args.arch] + ",acpi=off"
 
     if args.screenshot is not None:
         return screenshot_run(args)

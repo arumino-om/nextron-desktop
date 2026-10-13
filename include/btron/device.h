@@ -179,4 +179,19 @@ IMPORT W dev_open_count(void); /* 検証用 */
 IMPORT ERR serdev_register(void);  /* "com" シリアル（文字型） */
 IMPORT ERR ramdisk_register(void); /* "rda" RAM ディスク（ブロック型） */
 
+/* virtio-input。"kbd" と "pd" を登録し、イベント管理に実体を与える。
+ * 入力装置が 1 台も無ければ ER_NOEXS を返す（異常ではない）。 */
+IMPORT ERR vinput_register(void);
+
+/* 見つかった入力装置の数と種類。検証とログ用。 */
+#define VIN_KIND_NONE 0
+#define VIN_KIND_KBD 1 /* キーボード */
+#define VIN_KIND_ABS 2 /* 絶対座標の PD（タブレット） */
+#define VIN_KIND_REL 3 /* 相対座標の PD（マウス） */
+
+IMPORT W vinput_count(void);
+IMPORT W vinput_kind(W i);
+
+#define VIN_PROBE_MAX 4 /* 同時に扱う入力装置の上限 */
+
 #endif /* __BTRON_DEVICE_H__ */

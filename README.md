@@ -132,10 +132,17 @@ python3 tools/run_qemu.py --arch arm64 --uefi --timeout 30 \
 `--gui` は終了しないので、閉じるのは窓を閉じるか `Ctrl-C` です。
 `--screenshot` は**変化したフレームだけ**を残します。
 
+どちらも**キーボードとポインタ (virtio-input) が付きます**。付けたくない
+ときは `--no-input`、画面なしで入力だけ試すときは `--input` を使います。
+
+入力装置を付けると `-machine virt,acpi=off` になります。virtio-mmio の枠を
+記述しているのは Device Tree だけで、ACPI では DSDT の AML の中にあり、
+まだ読めないためです（docs/tasks.md の T1-15）。
+
 ### 実行
 
 ```sh
-ctest --preset arm64   # 直接起動 / UEFI(ACPI) / DT / GICv3+SMP / GOP / 緊急画面 の 8 通り
+ctest --preset arm64   # 直接起動 / UEFI(ACPI) / DT / 入力 / GICv3+SMP / GOP / 緊急画面 の 9 通り
 
 python3 tools/run_qemu.py --arch arm64 --uefi --interactive build/arm64/btron-arm64.img
 python3 tools/run_qemu.py --arch arm64 --interactive        build/arm64/btron-arm64.elf
