@@ -23,7 +23,10 @@
 #include <btron/file.h>
 #include <btron/memory.h>
 #include <btron/message.h>
+#include <btron/gname.h>
 #include <btron/proc.h>
+#include <btron/screen.h>
+#include <btron/taskcomm.h>
 #include <btron/system.h>
 
 #if defined(__aarch64__)
@@ -246,6 +249,62 @@ EXPORT WERR del_rec(W fd)
 EXPORT WERR fil_sts(CONST LINK *lnk, TC *name, F_STATE *stat, F_LOCATE *locat)
 {
 	return (WERR)S4(SYS_fil_sts, lnk, name, stat, locat);
+}
+
+/* --- §1.3 同期通信（ランデブ） --- */
+
+EXPORT WERR cre_por(W maxcmsz, W maxrmsz, UW opt)
+{
+	return (WERR)S3(SYS_cre_por, (UW)maxcmsz, (UW)maxrmsz, opt);
+}
+
+EXPORT ERR del_por(ID id)
+{
+	return (ERR)S1(SYS_del_por, (UW)id);
+}
+
+EXPORT WERR cal_por(ID id, UW calptn, VP msg, W cmsz, TMOUT tmo)
+{
+	return (WERR)S5(SYS_cal_por, (UW)id, calptn, msg, (UW)cmsz, (UW)tmo);
+}
+
+EXPORT WERR acp_por(ID id, UW acpptn, W *rdv, VP msg, TMOUT tmo)
+{
+	return (WERR)S5(SYS_acp_por, (UW)id, acpptn, rdv, msg, (UW)tmo);
+}
+
+EXPORT ERR fwd_por(ID id, UW calptn, W rdv, VP msg, W cmsz)
+{
+	return (ERR)S5(SYS_fwd_por, (UW)id, calptn, (UW)rdv, msg, (UW)cmsz);
+}
+
+EXPORT ERR rpl_rdv(W rdv, VP msg, W rmsz)
+{
+	return (ERR)S3(SYS_rpl_rdv, (UW)rdv, msg, (UW)rmsz);
+}
+
+/* --- §1.4 グローバル名 --- */
+
+EXPORT WERR cre_nam(CONST TC *name, W data, W opt)
+{
+	return (WERR)S3(SYS_cre_nam, name, (UW)data, (UW)opt);
+}
+
+EXPORT ERR del_nam(CONST TC *name)
+{
+	return (ERR)S1(SYS_del_nam, name);
+}
+
+EXPORT ERR get_nam(CONST TC *name, W *data)
+{
+	return (ERR)S2(SYS_get_nam, name, data);
+}
+
+/* --- 本OS 固有: 画面の貸し出し --- */
+
+EXPORT D btron_sys_lend_screen(Screen *out)
+{
+	return S1(SYS_lend_screen, out);
 }
 
 /* --- §1.7 イベント管理 --- */

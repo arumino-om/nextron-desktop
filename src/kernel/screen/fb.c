@@ -21,6 +21,36 @@
 LOCAL Screen scr;
 LOCAL Bool ready = False;
 
+EXPORT ERR screen_lend(AddrSpace *as, UD *user_base)
+{
+	CONST BootFrameBuffer *fb = &bootinfo()->fb;
+	UD size;
+
+	/* **「画面の貸し出し」の実体。**
+	 *
+	 * 仕様 §2.3.1 は `gopn_dev("SCREEN")` を「デバイス描画環境の生成」
+	 * と呼び、固有ビットマップ（画面そのもの）を描画対象にするとしている。
+	 * 外殻をユーザ特権で動かす以上、その画素にユーザ特権で届かなければ
+	 * ならない。だからフレームバッファをプロセスの下位半分へ写す。
+	 *
+	 * **上位半分の別名は残す**（規律 R18）。緊急画面は外殻の協力なしに
+	 * 描けなければならないので、カーネル側の経路を手放せない。 */
+	if (!ready || as == 0 || user_base == 0) {
+		return E_NOEXS;
+	}
+	size = fb->size;
+	if (size == 0) {
+		size = (UD)scr.pitch * scr.height;
+	}
+	if (hal_vm_map(as, BTRON_PROC_SCREEN_BASE, scr.pa, size,
+	               BTRON_PG_READ | BTRON_PG_WRITE | BTRON_PG_USER |
+	                   BTRON_PG_DEVICE) != 0) {
+		return E_NOMEM;
+	}
+	*user_base = BTRON_PROC_SCREEN_BASE;
+	return E_OK;
+}
+
 EXPORT ERR screen_init(void)
 {
 	CONST BootFrameBuffer *fb = &bootinfo()->fb;

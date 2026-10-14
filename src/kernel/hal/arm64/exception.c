@@ -6,6 +6,8 @@
  */
 
 #include <btron/hal.h>
+
+IMPORT UD btron_last_syscall;
 #include <btron/screen.h>
 
 IMPORT void btron_vectors(void);
@@ -97,7 +99,11 @@ EXPORT void hal_exception_report(UD esr, UD far, UD elr)
 	(void)screen_panic_begin("*** 例外 ***");
 
 	hal_console_puts("\n*** 例外 ***\n");
-	hal_console_puts("  ESR_EL1 = ");
+	/* 最後に入ったシステムコールの番号。EL0 からの呼び出しの最中に
+	 * 落ちたのかどうかが、これだけで分かる。 */
+	hal_console_puts("  SYSC    = ");
+	put_hex(btron_last_syscall);
+	hal_console_puts("\n  ESR_EL1 = ");
 	put_hex(esr);
 	hal_console_puts("  (EC = ");
 	put_hex(ec);

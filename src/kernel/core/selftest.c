@@ -693,9 +693,13 @@ LOCAL CONST TC path_nofs[] = {(TC)TC_FDLM, (TC)'n', (TC)'o', (TC)'p',
 /* ビルド時に埋め込んだ実行プログラムレコード (tools/mkobj.py)。 */
 IMPORT CONST UB btron_user_hello[];
 IMPORT CONST UW btron_user_hello_size;
+IMPORT CONST UB btron_user_shell[];
+IMPORT CONST UW btron_user_shell_size;
 
 LOCAL CONST TC nm_prog[] = {(TC)'h', (TC)'e', (TC)'l', (TC)'l', (TC)'o',
                             TNULL};
+LOCAL CONST TC nm_shell[] = {(TC)'s', (TC)'h', (TC)'e', (TC)'l', (TC)'l',
+                             TNULL};
 LOCAL LINK fl_prog;
 LOCAL LINK fl_root;
 LOCAL LINK fl_a;
@@ -5721,6 +5725,62 @@ LOCAL void run_proc_tests(void)
 			}
 			BTRON_CHECK("アドレス不正", cre_prc(0, 2, 0) == ER_ADR);
 			BTRON_CHECK("優先度範囲外", cre_prc(&p, 300, 0) == ER_PPRI);
+		}
+	});
+
+	BTRON_TEST("外殻をユーザ特権で動かす (詳細 E22 / E1)", {
+		if (!fs_up) {
+			BTRON_CHECK("ファイルシステムが無いので飛ばす", True);
+		} else {
+			LINK sh;
+			W fd;
+			W pid;
+			W oldmask;
+
+			/* **ここで確かめたいこと。**
+			 *
+			 * 外殻（ウィンドウマネージャやその下の描画）は、
+			 * 詳細 E22「1 プロセス 1 サーバ」のとおりユーザランドの
+			 * プロセスであるべきもの。そこへ移せるかどうかは
+			 *
+			 *   - 画面をユーザ特権のプロセスへ貸し出せるか
+			 *   - ディスプレイプリミティブがその上で動くか
+			 *     （**システムコールではなくライブラリとして**）
+			 *   - フォントマネージャの共有メモリを読めるか
+			 *   - イベントを取れるか
+			 *
+			 * で決まる。全部まとめて 1 つのプログラムで試す。 */
+			sh = fl_root;
+			BTRON_CHECK("実身を生成",
+			            cre_fil(&sh, nm_shell, 0, 0, F_FLOAT) > 0);
+			fd = opn_fil(&sh, F_UPDATE, 0);
+			BTRON_CHECK("開く", fd > 0);
+			BTRON_CHECK("外殻を書く",
+			            apd_rec(fd, (CONST B *)btron_user_shell,
+			                    (W)btron_user_shell_size, 9,
+			                    (UH)OBJ_CPU_ARM64, 0) == ER_OK);
+			BTRON_CHECK("閉じる", cls_fil(fd) == ER_OK);
+
+			oldmask = chg_emk(EM_NULL);
+			(void)chg_emk(oldmask);
+			(void)clr_msg(MM_ALL, MM_NULL);
+			pid = cre_prc(&sh, 2, 0);
+			BTRON_CHECK("外殻が起きた", pid > 0);
+			if (pid > 0) {
+				MESSAGE r;
+
+				BTRON_CHECK("終了メッセージ",
+				            rcv_msg(MM_EXIT | MM_ABORT, &r,
+				                    (W)sizeof(r), WAIT) >= 0);
+				/* **異常終了なら、どこかで特権境界に当たっている。** */
+				BTRON_CHECK("正常終了", r.msg_type == MS_EXIT);
+				/* 戻り値 0 = 画素の読み返しまで通った。
+				 * 画面が無い構成でも 0 を返す（その場合は描画を
+				 * 飛ばす）ので、どちらでも 0 でなければならない。 */
+				BTRON_CHECK("戻り値", r.msg_body.EXIT.code == 0);
+			}
+			(void)chg_emk(oldmask);
+			(void)clr_msg(MM_ALL, MM_NULL);
 		}
 	});
 

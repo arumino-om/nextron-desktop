@@ -126,31 +126,56 @@ add_custom_command(
 # cre_prc する」ところまでを本物の経路で通せるようにするため。
 # --------------------------------------------------------------------------
 set(BTRON_USER_OBJ "${CMAKE_CURRENT_BINARY_DIR}/user_hello.c")
+set(BTRON_SHELL_OBJ "${CMAKE_CURRENT_BINARY_DIR}/user_shell.c")
 
-if(BTRON_ARCH STREQUAL "arm64")
-  add_executable(btron-user-hello
+# ユーザプログラムを 1 つ組み立てる。
+#   name    実行ファイル名
+#   srcs    固有のソース
+#   libs    追加で結合するソース（ディスプレイプリミティブなど）
+function(btron_add_user name blobname out_c)
+  cmake_parse_arguments(U "" "" "SRCS" ${ARGN})
+  add_executable(${name}
     src/lib/sys/crt0.S
     src/lib/sys/syscall.c
-    src/user/hello.c)
-  target_link_libraries(btron-user-hello PRIVATE btron_flags btron_headers)
-  target_link_options(btron-user-hello PRIVATE
+    src/lib/sys/rt.c
+    ${U_SRCS})
+  target_link_libraries(${name} PRIVATE btron_flags btron_headers)
+  target_link_options(${name} PRIVATE
     -nostdlib -static
     "-Wl,-T,${CMAKE_CURRENT_SOURCE_DIR}/src/user/user.ld"
     -Wl,--build-id=none)
-  set_target_properties(btron-user-hello PROPERTIES
+  set_target_properties(${name} PROPERTIES
     LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/user/user.ld")
-
   add_custom_command(
-    OUTPUT "${BTRON_USER_OBJ}"
+    OUTPUT "${out_c}"
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/mkobj.py"
-            "$<TARGET_FILE:btron-user-hello>"
+            "$<TARGET_FILE:${name}>"
             --arch ${BTRON_ARCH}
-            --out "${CMAKE_CURRENT_BINARY_DIR}/user_hello.obj"
-            --c-array "${BTRON_USER_OBJ}"
-    DEPENDS btron-user-hello
-            "${CMAKE_CURRENT_SOURCE_DIR}/tools/mkobj.py"
-    COMMENT "実行プログラムレコードを生成"
+            --name ${blobname}
+            --out "${CMAKE_CURRENT_BINARY_DIR}/${name}.obj"
+            --c-array "${out_c}"
+    DEPENDS ${name} "${CMAKE_CURRENT_SOURCE_DIR}/tools/mkobj.py"
+    COMMENT "実行プログラムレコードを生成 (${name})"
     VERBATIM)
+endfunction()
+
+if(BTRON_ARCH STREQUAL "arm64")
+  btron_add_user(btron-user-hello btron_user_hello "${BTRON_USER_OBJ}"
+    SRCS src/user/hello.c)
+
+  # 外殻の最小形。ディスプレイプリミティブとフォントの利用側を
+  # **ユーザプログラムに結合する**。描画はシステムコールではない。
+  btron_add_user(btron-user-shell btron_user_shell "${BTRON_SHELL_OBJ}"
+    SRCS src/user/shell.c
+         src/lib/sys/screen.c
+         src/lib/dp/pixel.c
+         src/lib/dp/env.c
+         src/lib/dp/draw.c
+         src/lib/dp/bitmap.c
+         src/lib/dp/text.c
+         src/lib/dp/pointer.c
+         src/lib/appl/font/fontcli.c
+         src/lib/appl/mgr/mgrcli.c)
 endif()
 
 # --------------------------------------------------------------------------
@@ -206,6 +231,7 @@ if(BTRON_ARCH STREQUAL "arm64")
     src/kernel/core/intc.c
     src/kernel/core/syscall.c
     "${BTRON_USER_OBJ}"
+    "${BTRON_SHELL_OBJ}"
     src/kernel/core/selftest.c
     src/kernel/boot/bootinfo.c
     src/kernel/boot/machdesc.c
@@ -225,6 +251,7 @@ if(BTRON_ARCH STREQUAL "arm64")
     src/subsystems/window/winman.c
     src/subsystems/window/demo.c
     src/lib/appl/font/fontcli.c
+    src/lib/appl/mgr/mgrcli.c
     src/lib/dp/pixel.c
     src/lib/dp/env.c
     src/lib/dp/draw.c
@@ -340,7 +367,11 @@ if(TARGET btron-kernel)
             # システムコールを通さずカーネル番地を読んだプロセスが
             # 落とされること（カーネルは生き残る）。
             --expect "ユーザプログラムの異常"
+            # 外殻はユーザ特権で起動する。**画面を借りられるかは構成次第**
+            # なので、ここでは起動だけを見る（画面付きの構成は下で見る）。
+            --expect "[外殻] ユーザ特権で起動しました"
             --deny   "読めてしまいました"
+            --deny   "*** 画素が合いません ***"
             --deny   "[ FAIL ]"
             --deny   "ローダ異常終了"
             "${BTRON_DISK_IMAGE}")
@@ -381,6 +412,10 @@ if(TARGET btron-kernel)
               --expect "入力装置  : 2 台"
               --expect "キーボード"
               --expect "PD(絶対)"
+              # **外殻がユーザ特権で画面を借りて描けること**（詳細 E22 / E1）。
+              # 画面のある構成でしか確かめられない。
+              --expect "[外殻] 画面を借りました"
+              --expect "[外殻] 画素を読み返して確かめました"
               --deny   "[ FAIL ]"
               --deny   "ローダ異常終了"
               "${BTRON_DISK_IMAGE}")

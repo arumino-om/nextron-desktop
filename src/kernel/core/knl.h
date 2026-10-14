@@ -30,6 +30,10 @@
 #include <btron/window.h>
 #include <btron/vmem.h>
 
+/* ランデブで運べるメッセージの上限 (D9。暫定)。
+ * TCB ごとに中継を持つので、大きくすると TCB 表が太る。 */
+#define RDV_MAX_MSG 256
+
 typedef struct TCB TCB;
 typedef struct MTXCB MTXCB; /* 実体は core/mtx.c */
 
@@ -68,7 +72,16 @@ struct TCB {
 
 	/* ランデブ (BTRON3 §1.3)。呼出側と受付側で意味が対応している。 */
 	UW rdv_ptn;   /* calptn / acpptn */
-	VP rdv_msg;   /* メッセージバッファ。呼出側は入出力兼用 */
+	VP rdv_msg;   /* **ユーザ側の**バッファ。呼出側は入出力兼用 */
+	/* カーネル側の中継。
+	 *
+	 * **ポインタをそのまま渡すと、アドレス空間をまたいだ時点で壊れる。**
+	 * ランデブの複写は「呼出側の文脈」と「受付側の文脈」のどちらでも
+	 * 起こりうるので、相手のユーザ番地はそのとき写像されているとは
+	 * 限らない。だから一度カーネルの領域へ写し、受け取る側が自分の
+	 * 文脈で取り出す。外殻をユーザ特権へ移して初めて露見した。 */
+	UB rdv_buf[RDV_MAX_MSG];
+	W rdv_pending; /* 成立したランデブ番号。受付側が自分で *rdv_no へ置く */
 	W rdv_size;   /* 呼出メッセージのバイト数 */
 	W *rdv_no;    /* acp_por の rdv 格納先 */
 	W rdv_result; /* 成立・返答で得たバイト数 */

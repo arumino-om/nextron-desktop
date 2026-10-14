@@ -39,6 +39,14 @@ IMPORT ERR screen_init(void);
 /* 画面。無ければ 0。 */
 IMPORT CONST Screen *screen(void);
 
+/* 画面をプロセスへ貸し出す。下位半分へ写して、その番地を返す。
+ *
+ * **BTRON3 の API ではない。** 仕様 §2.3.1 の `gopn_dev("SCREEN")` が
+ * 「画面の貸し出し」で、その写像を実際に行うのがこれ。外殻をユーザ特権で
+ * 動かすのに要る。上位半分の別名は残す（規律 R18。緊急画面のため）。 */
+struct AddrSpace;
+IMPORT ERR screen_lend(struct AddrSpace *as, UD *user_base);
+
 /* 色を作る。画素形式（BGRA / RGBA）の差をここで吸収する。 */
 IMPORT UW screen_rgb(UW r, UW g, UW b);
 

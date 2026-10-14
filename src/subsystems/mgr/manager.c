@@ -21,19 +21,9 @@
 #include <btron/gname.h>
 #include <btron/manager.h>
 
-EXPORT void mgr_name(CONST B *ascii, TC *out)
-{
-	W i = 0;
-
-	while (i < N_NAMELEN && ascii[i] != 0) {
-		out[i] = (TC)(UB)ascii[i];
-		i++;
-	}
-	while (i < N_NAMELEN) {
-		out[i] = TNULL;
-		i++;
-	}
-}
+/* 利用側（`mgr_name` / `mgr_lookup` / `mgr_call` / `mgr_request`）は
+ * `src/lib/appl/mgr/mgrcli.c` にある。**呼ぶだけのアプリがサーバ本体を
+ * 持ち込まずに済むように分けてある**（規律 R14 / R11）。 */
 
 EXPORT WERR mgr_listen(CONST B *name)
 {
@@ -75,40 +65,4 @@ EXPORT ERR mgr_serve(ID por, MgrFunc f, TMOUT tmo)
 	return rpl_rdv(rdv, (VP)&m, (W)sizeof(MgrMsg));
 }
 
-EXPORT WERR mgr_lookup(CONST B *name)
-{
-	TC key[N_NAMELEN];
-	W data = 0;
-	ERR er;
 
-	mgr_name(name, key);
-	er = get_nam(key, &data);
-	if (er < 0) {
-		return er; /* ER_NOEXS = そのマネージャは立っていない */
-	}
-	return data;
-}
-
-EXPORT ERR mgr_call(ID por, MgrMsg *m, TMOUT tmo)
-{
-	WERR n;
-
-	if (m == 0) {
-		return ER_ADR;
-	}
-	n = cal_por(por, MGR_PTN, (VP)m, (W)sizeof(MgrMsg), tmo);
-	if (n < 0) {
-		return n;
-	}
-	return ER_OK;
-}
-
-EXPORT ERR mgr_request(CONST B *name, MgrMsg *m, TMOUT tmo)
-{
-	WERR por = mgr_lookup(name);
-
-	if (por < 1) {
-		return por;
-	}
-	return mgr_call((ID)por, m, tmo);
-}

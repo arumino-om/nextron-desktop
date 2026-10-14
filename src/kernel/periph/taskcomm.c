@@ -159,8 +159,11 @@ LOCAL W setup_rdv(PORCB *p, TCB *caller, TCB *acceptor)
 	rdvcb[idx].maxrmsz = p->maxrmsz;
 	no = RDV_MAKE(idx, rdv_gen);
 
-	memcpy(acceptor->rdv_msg, caller->rdv_msg, (UD)caller->rdv_size);
-	*acceptor->rdv_no = no;
+	/* **カーネルの中継どうしで写す。** どちらの文脈で走っているか
+	 * 分からないので、ユーザ番地には触らない。受け取る側が自分の
+	 * 文脈に戻ったときに `rdv_buf` から取り出す。 */
+	memcpy(acceptor->rdv_buf, caller->rdv_buf, (UD)caller->rdv_size);
+	acceptor->rdv_pending = no;
 	acceptor->rdv_result = caller->rdv_size;
 	return no;
 }
@@ -278,10 +281,16 @@ EXPORT WERR cal_por(ID id, UW calptn, VP msg, W cmsz, TMOUT tmo)
 		hal_int_restore(state);
 		return ER_CTX;
 	}
+	if (cmsz > RDV_MAX_MSG) {
+		hal_int_restore(state);
+		return ER_PAR; /* D9 の実装上限 */
+	}
 	me->rdv_ptn = calptn;
 	me->rdv_msg = msg;
 	me->rdv_size = cmsz;
 	me->rdv_result = 0;
+	/* **自分の文脈のうちに写す。** 以後はカーネルの中継だけを使う。 */
+	memcpy(me->rdv_buf, msg, (UD)cmsz);
 
 	acc = knl_find_match(&p->accept, calptn);
 	if (acc != 0) {
@@ -312,6 +321,10 @@ EXPORT WERR cal_por(ID id, UW calptn, VP msg, W cmsz, TMOUT tmo)
 		return r;
 	}
 	r = me->rdv_result; /* 返答メッセージのバイト数 */
+	/* 返答を自分の文脈で取り出す。 */
+	if (r > 0) {
+		memcpy(me->rdv_msg, me->rdv_buf, (UD)r);
+	}
 	hal_int_restore(state);
 	return r;
 }
@@ -354,6 +367,10 @@ EXPORT WERR acp_por(ID id, UW acpptn, W *rdv, VP msg, TMOUT tmo)
 		}
 		to_reply_wait(caller);
 		r = me->rdv_result;
+		if (r > 0) {
+			memcpy(me->rdv_msg, me->rdv_buf, (UD)r);
+		}
+		*me->rdv_no = me->rdv_pending;
 		hal_int_restore(state);
 		return r;
 	}
@@ -367,6 +384,10 @@ EXPORT WERR acp_por(ID id, UW acpptn, W *rdv, VP msg, TMOUT tmo)
 		return r;
 	}
 	r = me->rdv_result; /* 呼出メッセージのバイト数 */
+	if (r > 0) {
+		memcpy(me->rdv_msg, me->rdv_buf, (UD)r);
+	}
+	*me->rdv_no = me->rdv_pending;
 	hal_int_restore(state);
 	return r;
 }
@@ -397,7 +418,13 @@ EXPORT ERR rpl_rdv(W rdv, VP msg, W rmsz)
 	caller = e->caller;
 	/* 返答は呼出側の msg に入る。呼出側はそこに maxrmsz 以上の領域を
 	 * 用意する義務があるので（仕様）、収まることが保証されている。 */
-	memcpy(caller->rdv_msg, msg, (UD)rmsz);
+	if (rmsz > RDV_MAX_MSG) {
+		hal_int_restore(state);
+		return ER_PAR;
+	}
+	/* **呼出側のユーザ番地には触らない。** 中継へ置いて、
+	 * 呼出側が自分の文脈で取り出す。 */
+	memcpy(caller->rdv_buf, msg, (UD)rmsz);
 	caller->rdv_result = rmsz;
 	free_rdv(e);
 	knl_wait_release(caller, ER_OK);
@@ -453,9 +480,14 @@ EXPORT ERR fwd_por(ID id, UW calptn, W rdv, VP msg, W cmsz)
 		return ER_PAR;
 	}
 
+	if (cmsz > RDV_MAX_MSG) {
+		hal_int_restore(state);
+		return ER_PAR;
+	}
 	caller = e->caller;
-	/* 回送メッセージを呼出側のバッファへ書き、そのまま次の呼出に使う。 */
-	memcpy(caller->rdv_msg, msg, (UD)cmsz);
+	/* 回送メッセージを呼出側の**中継**へ書き、そのまま次の呼出に使う。
+	 * ユーザ番地には触らない（回送元の文脈で走っているため）。 */
+	memcpy(caller->rdv_buf, msg, (UD)cmsz);
 	caller->rdv_size = cmsz;
 	caller->rdv_ptn = calptn;
 	free_rdv(e); /* 元のランデブは解除される（仕様） */

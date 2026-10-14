@@ -105,7 +105,26 @@
 #define SYS_chg_emk 82
 #define SYS_get_pdp 83
 
-#define SYS_MAX 95
+/* §1.3 同期通信（ランデブ）。外殻のサーバがこれで待つ。 */
+#define SYS_cre_por 90
+#define SYS_del_por 91
+#define SYS_cal_por 92
+#define SYS_acp_por 93
+#define SYS_fwd_por 94
+#define SYS_rpl_rdv 95
+
+/* §1.4 グローバル名。マネージャの置き場を引く。 */
+#define SYS_cre_nam 100
+#define SYS_del_nam 101
+#define SYS_get_nam 102
+
+/* 本OS 固有。BTRON3 の API ではない。
+ * 画面の貸し出し —— 外殻をユーザ特権で動かすのに要る。
+ * 仕様 §2.3.1 の `gopn_dev("SCREEN")` が「画面の貸し出し」で、
+ * その写像を実際に行うのがこれ。 */
+#define SYS_lend_screen 110
+
+#define SYS_MAX 120
 
 /* ------------------------------------------------------------------ */
 /* カーネル側の入口                                                    */

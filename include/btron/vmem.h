@@ -62,6 +62,7 @@
 /* ------------------------------------------------------------------ */
 
 #define BTRON_PROC_TEXT_BASE 0x0000000000400000ULL  /* 実行プログラム (Phase 3) */
+#define BTRON_PROC_SCREEN_BASE 0x0000000800000000ULL /* 画面の貸し出し先 */
 #define BTRON_PROC_LOCAL_BASE 0x0000010000000000ULL /* ローカルメモリ 64TB */
 #define BTRON_PROC_LOCAL_LIMIT 0x0000400000000000ULL
 #define BTRON_PROC_STACK_TOP 0x0000800000000000ULL  /* スタック。上から下へ */

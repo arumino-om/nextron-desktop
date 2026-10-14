@@ -23,7 +23,10 @@
 #include <btron/hal.h>
 #include <btron/memory.h>
 #include <btron/message.h>
+#include <btron/gname.h>
 #include <btron/proc.h>
+#include <btron/screen.h>
+#include <btron/taskcomm.h>
 #include <btron/system.h>
 #include <btron/vmem.h>
 
@@ -140,8 +143,17 @@ EXPORT void hal_user_fault(UD esr, UD far, UD elr)
 #define A(n) ((W)(W)(UW)(a##n))
 #define P(n) ((UD)(a##n))
 
+/* 最後に入ったシステムコールの番号。
+ *
+ * **カーネルが落ちたときに「どの呼び出しの最中だったか」が分かる。**
+ * ユーザから来たポインタを触るのはシステムコールの中だけなので、
+ * 例外の原因を探すとき最初に見たい情報がこれになる。実際、
+ * ランデブがアドレス空間をまたぐ問題はこの 1 語で切り分けられた。 */
+EXPORT UD btron_last_syscall;
+
 EXPORT D btron_syscall_entry(UD a0, UD a1, UD a2, UD a3, UD a4, UD a5, UD num)
 {
+	btron_last_syscall = num;
 	switch (num) {
 	/* --- §1.1 プロセス / タスク管理 --- */
 	case SYS_ext_prc:
@@ -377,6 +389,80 @@ EXPORT D btron_syscall_entry(UD a0, UD a1, UD a2, UD a3, UD a4, UD a5, UD num)
 			return ER_ADR;
 		}
 		return get_pdp((PNT *)(VP)a0);
+
+	/* --- §1.3 同期通信（ランデブ） --- */
+	case SYS_cre_por:
+		return cre_por(A(0), A(1), (UW)(a2 & 0xFFFFFFFFULL));
+	case SYS_del_por:
+		return del_por(A(0));
+	case SYS_cal_por:
+		if (!usr_ok(P(2), A(3), True)) {
+			return ER_ADR;
+		}
+		return cal_por(A(0), (UW)(a1 & 0xFFFFFFFFULL), (VP)a2, A(3), A(4));
+	case SYS_acp_por:
+		if (!usr_ok(P(2), (W)sizeof(W), True)) {
+			return ER_ADR;
+		}
+		if (!usr_ok(P(3), 1, True)) {
+			return ER_ADR;
+		}
+		return acp_por(A(0), (UW)(a1 & 0xFFFFFFFFULL), (W *)(VP)a2,
+		               (VP)a3, A(4));
+	case SYS_fwd_por:
+		if (!usr_ok(P(3), A(4), False)) {
+			return ER_ADR;
+		}
+		return fwd_por(A(0), (UW)(a1 & 0xFFFFFFFFULL), A(2), (VP)a3, A(4));
+	case SYS_rpl_rdv:
+		if (A(2) > 0 && !usr_ok(P(1), A(2), False)) {
+			return ER_ADR;
+		}
+		return rpl_rdv(A(0), (VP)a1, A(2));
+
+	/* --- §1.4 グローバル名 --- */
+	case SYS_cre_nam:
+		if (!usr_ok(P(0), N_NAMELEN * 2, False)) {
+			return ER_ADR;
+		}
+		return cre_nam((CONST TC *)(CONST VP)a0, A(1), A(2));
+	case SYS_del_nam:
+		if (!usr_ok(P(0), N_NAMELEN * 2, False)) {
+			return ER_ADR;
+		}
+		return del_nam((CONST TC *)(CONST VP)a0);
+	case SYS_get_nam:
+		if (!usr_ok(P(0), N_NAMELEN * 2, False)) {
+			return ER_ADR;
+		}
+		if (a1 != 0 && !usr_ok(P(1), (W)sizeof(W), True)) {
+			return ER_ADR;
+		}
+		return get_nam((CONST TC *)(CONST VP)a0, (W *)(VP)a1);
+
+	/* --- 本OS 固有: 画面の貸し出し --- */
+	case SYS_lend_screen: {
+		CONST Screen *sc = screen();
+		UD base = 0;
+		Screen *out = (Screen *)(VP)a0;
+		AddrSpace *as = prc_space(prc_self());
+
+		if (!usr_ok(P(0), (W)sizeof(Screen), True)) {
+			return ER_ADR;
+		}
+		if (sc == 0 || as == 0) {
+			return ER_NOEXS;
+		}
+		if (screen_lend(as, &base) != 0) {
+			return ER_NOMEM;
+		}
+		*out = *sc;
+		/* **ユーザに渡すのは下位半分の番地だけ。**
+		 * 上位半分の別名と物理アドレスは教えない。 */
+		out->base = base;
+		out->pa = 0;
+		return ER_OK;
+	}
 
 	default:
 		break;
