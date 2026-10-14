@@ -427,6 +427,24 @@ LOCAL void t_del_then_reply(INT stacd, VP exinf)
 }
 
 /* por1 で受け付けて por2 へ回送する（中間のサーバ） */
+/* ドラッグを動かす補助タスク。
+ *
+ * `wmov_drg` はボタンが離されるまで戻らないので、**別のタスクが PD を
+ * 動かしてボタンを離さないと検査できない。** 実際の使われ方
+ * （ドライバの割込みがイベントを入れる）に一番近い形でもある。 */
+LOCAL PNT drag_to;
+
+LOCAL void t_drag(INT stacd, VP exinf)
+{
+	(void)stacd;
+	(void)exinf;
+	(void)dly_tsk(40);
+	evt_pd_moved(drag_to);
+	(void)dly_tsk(40);
+	evt_pd_button(False, False); /* EV_BUTUP */
+	tk_ext_tsk();
+}
+
 LOCAL void t_fwd_server(INT stacd, VP exinf)
 {
 	B buf[32];
@@ -5731,6 +5749,193 @@ LOCAL void run_proc_tests(void)
 		}
 	});
 
+	BTRON_TEST("ドラッグによる移動と変形 (§3.1.2.5 / §3.1.4)", {
+		if (!win_up) {
+			BTRON_CHECK("画面が無い構成なので飛ばす", True);
+		} else {
+			WDSTAT st;
+			WEVENT we;
+			RECT nr;
+			PNT p;
+			GID dg;
+			ID dt;
+
+			/* 対象は入力受付状態でなければならない（仕様）。 */
+			(void)wswi_wnd(win_w1, 0);
+			(void)clr_evt(EM_ALL, EM_NULL);
+			(void)wget_sts(win_w1, &st, 0);
+
+			/* --- 契機イベントの検め --- */
+			we.s.type = EV_KEYDWN;
+			we.s.cmd = W_FRAM;
+			we.s.wid = (H)win_w1;
+			BTRON_CHECK("イベントのタイプが不正",
+			            wmov_drg(&we, 0) == EX_PAR);
+			we.s.type = EV_SWITCH;
+			we.s.cmd = W_TITL;
+			/* 仕様「位置コードは、W_FRAM(1)、W_LTHD(4)〜W_RBHD(7) の
+			 * いずれかでなくてはいけない」 */
+			BTRON_CHECK("位置コードが不正",
+			            wmov_drg(&we, 0) == EX_PAR);
+			we.s.cmd = W_FRAM;
+			/* 変形は W_FRAM を受けない（枠を掴んだら移動）。 */
+			BTRON_CHECK("変形に W_FRAM は使えない",
+			            wrsz_drg(&we, 0, 0) == EX_PAR);
+			BTRON_CHECK("アドレス不正", wmov_drg(0, 0) == EX_ADR);
+
+			/* --- ドラッグ描画環境 --- */
+			BTRON_CHECK("ドラッグ中でなければ取り出せない",
+			            wget_drg(&p, &we) == EX_DRAG);
+			dg = wsta_drg(win_w1, 1);
+			BTRON_CHECK("開始できる", dg >= 1);
+			/* 仕様「既に他のプロセスがドラッグ描画を実行していた場合は、
+			 * EX_DRAG のエラー」。**同じプロセスでも二重には始めない。** */
+			BTRON_CHECK("二重には始められない",
+			            wsta_drg(win_w1, 1) == EX_DRAG);
+			/* 座標系は元のウィンドウと同じ（仕様 §3.1.2.5）。 */
+			{
+				RECT fr1;
+				RECT fr2;
+
+				BTRON_CHECK("元の窓の境界",
+				            gget_bnd(wget_gid(win_w1), &fr1) == EG_OK);
+				BTRON_CHECK("ドラッグ環境の境界",
+				            gget_bnd(dg, &fr2) == EG_OK);
+				BTRON_CHECK("座標系が一致",
+				            fr1.c.left == fr2.c.left &&
+				                fr1.c.top == fr2.c.top);
+			}
+			/* PD 位置は相対座標で返る。 */
+			{
+				PNT at;
+
+				at.x = (H)(st.r.c.left + 30);
+				at.y = (H)(st.r.c.top + 30);
+				evt_pd_moved(at);
+				BTRON_CHECK("PD 位置が取れる",
+				            wget_drg(&p, &we) == EV_NULL);
+				/* 仕様「PD 位置は pos に戻される値と同一となる」 */
+				BTRON_CHECK("イベントにも同じ位置",
+				            we.e.pos.x == p.x && we.e.pos.y == p.y);
+			}
+			BTRON_CHECK("終了", wend_drg() == EX_OK);
+			/* 仕様「ドラッグ描画が行なわれていなかった場合は何もしない」 */
+			BTRON_CHECK("二重終了は何もしない", wend_drg() == EX_OK);
+
+			/* --- 実際に動かす --- */
+			(void)wget_sts(win_w1, &st, 0);
+			{
+				PNT at;
+
+				at.x = (H)(st.r.c.left + 4);
+				at.y = (H)(st.r.c.top + 4);
+				evt_pd_moved(at);
+				drag_to.x = (H)(at.x + 30);
+				drag_to.y = (H)(at.y + 20);
+			}
+			dt = make_task(t_drag, 4, 0);
+			BTRON_CHECK("補助タスク", dt >= 1 && tk_sta_tsk(dt, 0) == E_OK);
+			we.s.type = EV_SWITCH;
+			we.s.cmd = W_FRAM;
+			we.s.wid = (H)win_w1;
+			nr.c.left = 0;
+			BTRON_CHECK("ドラッグ移動", wmov_drg(&we, &nr) >= 0);
+			BTRON_CHECK("30 ドット右・20 ドット下へ動いた",
+			            nr.c.left == (H)(st.r.c.left + 30) &&
+			                nr.c.top == (H)(st.r.c.top + 20));
+			BTRON_CHECK("大きさは変わらない",
+			            nr.c.right - nr.c.left ==
+			                st.r.c.right - st.r.c.left);
+			BTRON_CHECK("ウィンドウも動いた",
+			            wget_sts(win_w1, &st, 0) >= 0 &&
+			                st.r.c.left == nr.c.left);
+			/* ドラッグ中に借りた描画環境は返っている。 */
+			BTRON_CHECK("ドラッグは終わっている",
+			            wget_drg(&p, &we) == EX_DRAG);
+
+			/* --- 変形 --- */
+			(void)clr_evt(EM_ALL, EM_NULL);
+			(void)wget_sts(win_w1, &st, 0);
+			{
+				PNT at;
+
+				at.x = (H)(st.r.c.right - 4);
+				at.y = (H)(st.r.c.bottom - 4);
+				evt_pd_moved(at);
+				drag_to.x = (H)(at.x + 40);
+				drag_to.y = (H)(at.y + 30);
+			}
+			dt = make_task(t_drag, 4, 0);
+			BTRON_CHECK("補助タスク", dt >= 1 && tk_sta_tsk(dt, 0) == E_OK);
+			we.s.cmd = W_RBHD; /* 右下のハンドル */
+			nr.c.left = 0;
+			BTRON_CHECK("ドラッグ変形", wrsz_drg(&we, 0, &nr) >= 0);
+			BTRON_CHECK("左上は動かない",
+			            nr.c.left == st.r.c.left && nr.c.top == st.r.c.top);
+			BTRON_CHECK("右下が広がった",
+			            nr.c.right == (H)(st.r.c.right + 40) &&
+			                nr.c.bottom == (H)(st.r.c.bottom + 30));
+
+			/* --- シフトで方向が拘束される --- */
+			(void)clr_evt(EM_ALL, EM_NULL);
+			(void)wget_sts(win_w1, &st, 0);
+			{
+				PNT at;
+
+				at.x = (H)(st.r.c.left + 4);
+				at.y = (H)(st.r.c.top + 4);
+				evt_pd_moved(at);
+				/* 横に大きく、縦に少し動かす。
+				 * 仕様「拘束の方向は、PD の最初の位置から最初に
+				 * 移動した変位の長辺の方向となる」ので横に拘束され、
+				 * 縦は動かないはず。 */
+				drag_to.x = (H)(at.x + 50);
+				drag_to.y = (H)(at.y + 10);
+			}
+			evt_meta(ES_LSHFT, ES_LSHFT);
+			dt = make_task(t_drag, 4, 0);
+			BTRON_CHECK("補助タスク", dt >= 1 && tk_sta_tsk(dt, 0) == E_OK);
+			we.s.type = EV_SWITCH;
+			we.s.cmd = W_FRAM;
+			we.s.wid = (H)win_w1;
+			BTRON_CHECK("拘束付きドラッグ", wmov_drg(&we, &nr) >= 0);
+			BTRON_CHECK("横には動く",
+			            nr.c.left == (H)(st.r.c.left + 50));
+			BTRON_CHECK("縦には動かない", nr.c.top == st.r.c.top);
+			evt_meta(0, ES_LSHFT);
+
+			/* --- 最小サイズでクランプする --- */
+			(void)clr_evt(EM_ALL, EM_NULL);
+			(void)wget_sts(win_w1, &st, 0);
+			{
+				PNT at;
+				RECT lim;
+
+				at.x = (H)(st.r.c.right - 4);
+				at.y = (H)(st.r.c.bottom - 4);
+				evt_pd_moved(at);
+				/* 思い切り左上へ引く。最小サイズで止まるはず。 */
+				drag_to.x = (H)(st.r.c.left + 4);
+				drag_to.y = (H)(st.r.c.top + 4);
+				dt = make_task(t_drag, 4, 0);
+				BTRON_CHECK("補助タスク",
+				            dt >= 1 && tk_sta_tsk(dt, 0) == E_OK);
+				/* 仕様「limit->lefttop はウィンドウの最小サイズ
+				 * ( lefttop.c.v が縦、lefttop.c.h が横の大きさ )」 */
+				lim.p.lefttop.x = 150;  /* 横の最小 */
+				lim.p.lefttop.y = 120;  /* 縦の最小 */
+				lim.p.rightbot.x = 400; /* 横の最大 */
+				lim.p.rightbot.y = 300;
+				we.s.cmd = W_RBHD;
+				BTRON_CHECK("ドラッグ変形", wrsz_drg(&we, &lim, &nr) >= 0);
+				BTRON_CHECK("最小サイズで止まる",
+				            nr.c.right - nr.c.left == 150 &&
+				                nr.c.bottom - nr.c.top == 120);
+			}
+			(void)clr_evt(EM_ALL, EM_NULL);
+		}
+	});
+
 	BTRON_TEST("ウィンドウの移動と片付け (§3.1.4)", {
 		if (!win_up) {
 			BTRON_CHECK("画面が無い構成なので飛ばす", True);
@@ -5739,17 +5944,33 @@ LOCAL void run_proc_tests(void)
 			WDSTAT st;
 			W n0 = win_count();
 
+			(void)wswi_wnd(win_w1, 0);
 			(void)wget_sts(win_w1, &st, 0);
-			nr = st.r;
-			nr.c.left = (H)(st.r.c.left + 20);
-			nr.c.top = (H)(st.r.c.top + 20);
-			BTRON_CHECK("移動", wmov_wnd(win_w1, &nr) == EX_OK);
-			BTRON_CHECK("位置が変わった",
-			            wget_sts(win_w1, &st, 0) >= 0 &&
-			                st.r.c.left == nr.c.left);
-			/* 大きさは変わらない（移動なので） */
-			BTRON_CHECK("大きさは同じ",
-			            st.r.c.right - st.r.c.left == 200);
+			{
+				W wdt = st.r.c.right - st.r.c.left;
+
+				nr = st.r;
+				nr.c.left = (H)(st.r.c.left + 20);
+				nr.c.top = (H)(st.r.c.top + 20);
+				/* 仕様「移動したウィンドウ自体の再表示が必要な場合は、
+				 * 関数値として "1" が戻り」。本OS は作業領域の中身を
+				 * 動かさないので、移動すれば必ず再表示が要る。 */
+				BTRON_CHECK("移動", wmov_wnd(win_w1, &nr) == 1);
+				BTRON_CHECK("再表示要求が立った",
+				            wchk_dsp(win_w1) == 1);
+				BTRON_CHECK("位置が変わった",
+				            wget_sts(win_w1, &st, 0) >= 0 &&
+				                st.r.c.left == nr.c.left);
+				/* 大きさは変わらない（移動なので） */
+				BTRON_CHECK("大きさは同じ",
+				            st.r.c.right - st.r.c.left == wdt);
+			}
+			/* 仕様「対象ウィンドウが入力受付状態でない場合は、
+			 * EX_WND のエラー」 */
+			(void)wswi_wnd(win_w2, 0);
+			BTRON_CHECK("入力受付状態でなければ動かせない",
+			            wmov_wnd(win_w1, &nr) == EX_WND);
+			(void)wswi_wnd(win_w1, 0);
 			/* 仕様「移動 / 変形を行なった場合、その対象としたウィンドウが
 			 * 一番前面に表示される」 */
 			BTRON_CHECK("前面に出た", wget_sts(win_w1, 0, 0) >= 0);

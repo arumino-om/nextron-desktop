@@ -53,6 +53,11 @@
 #define WIN_BAR_W 12   /* スクロールバーの幅 */
 #define WIN_HANDLE 10  /* ハンドルの一辺 */
 
+/* 変形の最小サイズ。仕様は「システムの規定値」とだけ言っている。
+ * 枠とタイトルとバーが収まり、作業領域が残る大きさにした。 */
+#define W_MIN_WIDTH 80
+#define W_MIN_HEIGHT 60
+
 /* ウィンドウのクラス。小さいほど手前。 */
 #define WC_FRONT 0    /* 前面ウィンドウ */
 #define WC_PANEL 1    /* パネルウィンドウ */
@@ -88,6 +93,17 @@ LOCAL Window wnd[W_MAX_WND + 1];
 /* 前後関係。同一クラス内の順序を表す。先頭が手前。 */
 LOCAL W order[W_MAX_WND];
 LOCAL W norder;
+
+/* 画面デバイス名。win_init と wsta_drg が使う。 */
+LOCAL CONST TC nm_screen[] = {(TC)'S', (TC)'C', (TC)'R', (TC)'E', (TC)'E',
+                              (TC)'N', TNULL};
+
+/* ドラッグ (§3.1.2.5)。システムに 1 つだけ。 */
+LOCAL WID drag_wid;  /* 0 ならドラッグしていない */
+LOCAL GID drag_gid;
+LOCAL W drag_pid;
+LOCAL Bool drag_lock;
+LOCAL PNT drag_org;  /* ドラッグ描画環境の相対座標の原点（絶対座標） */
 
 LOCAL W active;    /* 入力受付状態の主ウィンドウ。0 なら無し */
 LOCAL W act_saved; /* パネルに横取りされる前の主ウィンドウ */
@@ -406,6 +422,30 @@ LOCAL void draw_frame(WID wid)
 				               r.c.top + WIN_TITLE_H - 4, w->title,
 				               W_MAX_TITLE, G_STORE);
 			}
+		}
+	}
+
+	/* 四隅のハンドル。**掴める場所が見えていなければ掴めない。**
+	 * wfnd_wnd が返す領域と同じ大きさで描く。 */
+	if ((w->attr & WA_SIZE) != 0) {
+		RECT h[4];
+		W i;
+
+		h[0].c.left = w->frame.c.left;
+		h[0].c.top = w->frame.c.top;
+		h[1].c.left = (H)(w->frame.c.right - WIN_HANDLE);
+		h[1].c.top = w->frame.c.top;
+		h[2].c.left = w->frame.c.left;
+		h[2].c.top = (H)(w->frame.c.bottom - WIN_HANDLE);
+		h[3].c.left = (H)(w->frame.c.right - WIN_HANDLE);
+		h[3].c.top = (H)(w->frame.c.bottom - WIN_HANDLE);
+		for (i = 0; i < 4; i++) {
+			h[i].c.right = (H)(h[i].c.left + WIN_HANDLE);
+			h[i].c.bottom = (H)(h[i].c.top + WIN_HANDLE);
+			(void)gfil_rec(screen_gid, h[i],
+			               act ? (CONST PAT *)BLACK100
+			                   : (CONST PAT *)BLACK50,
+			               0, G_STORE);
 		}
 	}
 
@@ -796,6 +836,12 @@ EXPORT ERR wcls_wnd(WID wid, W opt)
 	if (w->pid != me) {
 		return EX_WPRC;
 	}
+	/* 仕様「ドラッグ描画対象のウィンドウが削除された場合…自動的に
+	 * wend_drg() の処理が行なわれる」。**残すと解放済みのウィンドウを
+	 * 指したまま影を描き続ける。** */
+	if (drag_wid == wid) {
+		(void)wend_drg();
+	}
 	gone = w->frame;
 	if (w->gid >= 1) {
 		(void)gcls_env(w->gid);
@@ -1091,7 +1137,7 @@ EXPORT ERR wget_bar(WID wid, RECT *rbar, RECT *bbar, RECT *lbar)
 /* 位置と大きさ                                                        */
 /* ------------------------------------------------------------------ */
 
-LOCAL W move_resize(WID wid, CONST RECT *newr, Bool keep_size)
+LOCAL W move_resize(WID wid, RECT *newr, Bool keep_size)
 {
 	Window *w = get(wid);
 	RECT old;
@@ -1105,6 +1151,10 @@ LOCAL W move_resize(WID wid, CONST RECT *newr, Bool keep_size)
 	}
 	if (newr == 0) {
 		return EX_ADR;
+	}
+	/* 仕様「対象ウィンドウが入力受付状態でない場合は、EX_WND のエラー」 */
+	if (class_of(wid) > WC_ACTMAIN) {
+		return EX_WND;
 	}
 	old = w->frame;
 	frame = *newr;
@@ -1132,21 +1182,29 @@ LOCAL W move_resize(WID wid, CONST RECT *newr, Bool keep_size)
 	/* 元の場所を消して、動いた先を描く。 */
 	expose(&old);
 	redraw(wid);
+	/* 仕様「対象ウィンドウへの再表示要求イベントは発行されないが、
+	 * 再表示領域は設定されるため、関数値が "1" の場合は、
+	 * wsta_dsp() 〜 wend_dsp() による再表示を行なう必要がある」。
+	 * **だから戻り値が 1 でなければならない。** 0 を返すと、
+	 * 呼び出し側は描き直さず、中身が消えたままになる。 */
 	(void)wreq_dsp(wid);
-	return EX_OK;
+	/* 仕様「最終的な新しいウィンドウの外枠が newr で指定した領域に
+	 * 絶対座標値で格納される」。入出力である。 */
+	*newr = w->frame;
+	return 1;
 }
 
-EXPORT W wmov_wnd(WID wid, CONST RECT *newr)
+EXPORT W wmov_wnd(WID wid, RECT *newr)
 {
 	return move_resize(wid, newr, True);
 }
 
-EXPORT W wrsz_wnd(WID wid, CONST RECT *newr)
+EXPORT W wrsz_wnd(WID wid, RECT *newr)
 {
 	return move_resize(wid, newr, False);
 }
 
-EXPORT W wchg_wnd(WID wid, CONST RECT *r, W mode)
+EXPORT W wchg_wnd(WID wid, RECT *r, W mode)
 {
 	(void)mode;
 	return move_resize(wid, r, False);
@@ -1312,24 +1370,10 @@ EXPORT W wfnd_wnd(CONST PNT *gpos, PNT *lpos, W *wid)
 			return W_WORK;
 		}
 		insets(w->attr, &l, &t, &r, &b);
-		/* タイトル部 */
-		if ((w->attr & WA_TITL) == 0 &&
-		    gpos->y < w->frame.c.top + WIN_BORDER + WIN_TITLE_H &&
-		    gpos->y >= w->frame.c.top + WIN_BORDER) {
-			return W_TITL;
-		}
-		/* スクロールバー */
-		if ((w->attr & WA_RBAR) != 0 && gpos->x >= w->work.c.right) {
-			return W_RBAR;
-		}
-		if ((w->attr & WA_LBAR) != 0 && gpos->x < w->work.c.left &&
-		    gpos->x >= w->frame.c.left + WIN_BORDER) {
-			return W_LBAR;
-		}
-		if ((w->attr & WA_BBAR) != 0 && gpos->y >= w->work.c.bottom) {
-			return W_BBAR;
-		}
-		/* 四隅のハンドル */
+		/* 四隅のハンドル。**タイトル部より先に見る。**
+		 * 後にすると、上辺のハンドルがタイトルバーに食われて
+		 * 枠線の 2 ドットしか残らず、事実上つかめない。
+		 * 見た目どおり「四隅はハンドル、間がタイトル」にする。 */
 		if ((w->attr & WA_SIZE) != 0) {
 			Bool left = (gpos->x < w->frame.c.left + WIN_HANDLE) ? True
 			                                                     : False;
@@ -1354,6 +1398,23 @@ EXPORT W wfnd_wnd(CONST PNT *gpos, PNT *lpos, W *wid)
 			if (right && bot) {
 				return W_RBHD;
 			}
+		}
+		/* タイトル部 */
+		if ((w->attr & WA_TITL) == 0 &&
+		    gpos->y < w->frame.c.top + WIN_BORDER + WIN_TITLE_H &&
+		    gpos->y >= w->frame.c.top + WIN_BORDER) {
+			return W_TITL;
+		}
+		/* スクロールバー */
+		if ((w->attr & WA_RBAR) != 0 && gpos->x >= w->work.c.right) {
+			return W_RBAR;
+		}
+		if ((w->attr & WA_LBAR) != 0 && gpos->x < w->work.c.left &&
+		    gpos->x >= w->frame.c.left + WIN_BORDER) {
+			return W_LBAR;
+		}
+		if ((w->attr & WA_BBAR) != 0 && gpos->y >= w->work.c.bottom) {
+			return W_BBAR;
 		}
 		return W_FRAM;
 	}
@@ -1505,6 +1566,519 @@ EXPORT W wget_evt(WEVENT *evt, W mode)
 	return t;
 }
 
+/* ------------------------------------------------------------------ */
+/* ドラッグ (§3.1.2.5 / §3.1.4)                                        */
+/* ------------------------------------------------------------------ */
+
+EXPORT GID wsta_drg(WID wid, W lock)
+{
+	Window *w = get(wid);
+	GID g;
+	RECT bnd;
+	RECT rel;
+	RECT scr;
+
+	if (w == 0) {
+		return EX_WID;
+	}
+	/* 仕様「この関数は排他的に実行され、既に他のプロセスがドラッグ描画を
+	 * 実行していた場合は、EX_DRAG のエラーとなる」。**同じプロセスでも
+	 * 二重には始められない。**影が 2 つ残る。 */
+	if (drag_wid != 0) {
+		return EX_DRAG;
+	}
+	if (class_of(wid) > WC_ACTMAIN) {
+		return EX_WND;
+	}
+	if (w->pid != prc_self()) {
+		/* 仕様の解説は EX_WPRC、エラーコード一覧は EX_ADR と食い違って
+		 * いる。解説の方を採る（一覧は転記の崩れと見た）。 */
+		return EX_WPRC;
+	}
+	g = gopn_dev(nm_screen, 0);
+	if (g < 1) {
+		return EX_NOSPC;
+	}
+	/* **座標系は元のウィンドウと同じにする。**こうしておくと、影の座標を
+	 * 計算し直さずに済む（仕様 §3.1.2.5 が座標系の一致を要求している）。 */
+	(void)gget_bnd(g, &bnd);
+	(void)gmov_bnd(g, -w->work.c.left - bnd.c.left, -w->work.c.top - bnd.c.top);
+
+	/* フレーム長方形は画面全体。表示長方形は元の作業領域。 */
+	(void)gget_bnd(g, &scr);
+	(void)gset_fra(g, scr);
+	rel.c.left = 0;
+	rel.c.top = 0;
+	rel.c.right = (H)(w->work.c.right - w->work.c.left);
+	rel.c.bottom = (H)(w->work.c.bottom - w->work.c.top);
+	(void)gset_vis(g, rel);
+
+	/* 前置長方形リストは元のウィンドウと同じ。
+	 * setup_gid が入れた値をそのまま写す。
+	 *
+	 * **`gget_for` は連結リストを辿る。**仕様に「リストの各要素の
+	 * r_next は正しく設定されているものとする」とある通り、
+	 * 鎖を張ってから渡さなければ野良ポインタを踏む。 */
+	{
+		RLIST rl[DP_MAX_FORE];
+		W i;
+
+		for (i = 0; i < DP_MAX_FORE; i++) {
+			rl[i].next = (i + 1 < DP_MAX_FORE) ? &rl[i + 1] : 0;
+			rl[i].comp.c.left = 0;
+			rl[i].comp.c.top = 0;
+			rl[i].comp.c.right = 0;
+			rl[i].comp.c.bottom = 0;
+		}
+		if (gget_for(w->gid, rl) == EG_OK) {
+			(void)gset_for(g, rl);
+		}
+	}
+
+	drag_wid = wid;
+	drag_gid = g;
+	drag_pid = prc_self();
+	drag_lock = (lock != 0);
+	drag_org.x = w->work.c.left;
+	drag_org.y = w->work.c.top;
+	return g;
+}
+
+EXPORT ERR wend_drg(void)
+{
+	if (drag_wid == 0) {
+		return EX_OK; /* 仕様「行なわれていなかった場合は何もしない」 */
+	}
+	if (drag_pid != prc_self()) {
+		return EX_DRAG;
+	}
+	if (drag_gid >= 1) {
+		(void)gcls_env(drag_gid);
+	}
+	drag_wid = 0;
+	drag_gid = 0;
+	drag_pid = 0;
+	drag_lock = False;
+	return EX_OK;
+}
+
+EXPORT W wget_drg(PNT *pos, WEVENT *evt)
+{
+	EVENT ev;
+	PNT p;
+	W t;
+
+	if (drag_wid == 0) {
+		return EX_DRAG;
+	}
+	if (get_pdp(&p) < 0) {
+		return EX_NOSPT;
+	}
+	if (pos != 0) {
+		pos->x = (H)(p.x - drag_org.x);
+		pos->y = (H)(p.y - drag_org.y);
+	}
+	/* 仕様「EV_REQUEST、EV_SWITCH を除くウィンドウイベントが発生して
+	 * いた場合は、そのイベントを取り出し」「その他のイベントが発生した
+	 * 場合はイベントキューに残される」。
+	 * **マスクで絞ることが「残す」の実装**で、取り出してから戻すのでは
+	 * 順序が狂う。 */
+	t = get_evt(EM_BUTDWN | EM_BUTUP | EM_KEYDWN | EM_KEYUP | EM_AUTKEY, &ev,
+	            CLR);
+	if (t < 0) {
+		return EX_NOSPT;
+	}
+	if (evt == 0) {
+		return t;
+	}
+	if (t == EV_NULL) {
+		/* 仕様「ウィンドウ ID、位置コード、および発生時刻の値は
+		 * 設定されず、PD 位置とメタキー状態のみ設定され、
+		 * PD 位置は pos に戻される値と同一となる」 */
+		evt->e.type = EV_NULL;
+		evt->e.time = 0;
+		evt->e.pos.x = (H)(p.x - drag_org.x);
+		evt->e.pos.y = (H)(p.y - drag_org.y);
+		evt->e.data.info = 0;
+		evt->e.stat = ev.stat;
+		return EV_NULL;
+	}
+	evt->e = ev;
+	return t;
+}
+
+/* ドラッグ中の共通処理 ----------------------------------------------- */
+
+/* 影の矩形を XOR で描く。2 度描けば消える。 */
+LOCAL void shadow(GID g, CONST RECT *r)
+{
+	(void)gfra_rec(g, *r, LATTR_MAKE(LN_SOLID, 2), (CONST PAT *)BLACK100, 0,
+	               G_XOR);
+}
+
+/* 契機となったイベントを検める。戻り値は位置コード、負ならエラー。 */
+LOCAL W drag_event(CONST WEVENT *evt, WID *wid)
+{
+	W t;
+	W code;
+
+	if (evt == 0) {
+		return EX_ADR;
+	}
+	t = evt->s.type;
+	/* 仕様「*evt には、ドラッグの契機となった EV_SWITCH または
+	 * EV_BUTDWN または EV_RSWITCH のウィンドウイベントを指定する」 */
+	if (t != EV_SWITCH && t != EV_BUTDWN && t != EV_RSWITCH) {
+		return EX_PAR;
+	}
+	code = evt->s.cmd;
+	*wid = evt->s.wid;
+	return code;
+}
+
+/* シフトによる拘束方向。0:自由 1:縦 2:横 */
+#define DRG_FREE 0
+#define DRG_VERT 1
+#define DRG_HORZ 2
+
+LOCAL W constrain(UW stat, W dx, W dy, W cur)
+{
+	if ((stat & (ES_LSHFT | ES_RSHFT)) == 0) {
+		return DRG_FREE; /* 仕様「シフトキーを離した場合は、拘束は解除」 */
+	}
+	if (cur != DRG_FREE) {
+		return cur;
+	}
+	/* 仕様「拘束の方向は、PD の最初の位置から最初に移動した変位の
+	 * 長辺の方向となる」 */
+	if (dx == 0 && dy == 0) {
+		return DRG_FREE;
+	}
+	{
+		W ax = (dx < 0) ? -dx : dx;
+		W ay = (dy < 0) ? -dy : dy;
+
+		return (ax >= ay) ? DRG_HORZ : DRG_VERT;
+	}
+}
+
+EXPORT W wmov_drg(WEVENT *evt, RECT *newr)
+{
+	WID wid = 0;
+	W code = drag_event(evt, &wid);
+	Window *w;
+	GID g;
+	PNT start;
+	RECT base;
+	RECT cur;
+	RECT prev;
+	Bool shown = False;
+	W dir = DRG_FREE;
+	PTRSTS saved;
+	W r;
+
+	if (code < 0) {
+		return code;
+	}
+	/* 仕様「このイベントの位置コードは、W_FRAM(1)、W_LTHD(4) 〜
+	 * W_RBHD(7) のいずれかでなくてはいけない」 */
+	if (code != W_FRAM && (code < W_LTHD || code > W_RBHD)) {
+		return EX_PAR;
+	}
+	w = get(wid);
+	if (w == 0) {
+		return EX_WID;
+	}
+	g = wsta_drg(wid, 1);
+	if (g < 1) {
+		return g;
+	}
+	/* 影は作業領域をはみ出す。表示長方形を画面全体に広げる
+	 * （仕様「元のウィンドウをはみ出た描画を行なう必要がある場合は、
+	 * 表示長方形を変更する必要がある」）。 */
+	{
+		RECT scr;
+
+		(void)gget_bnd(g, &scr);
+		(void)gset_vis(g, scr);
+	}
+
+	(void)gget_ptr(&saved, 0);
+	(void)gset_ptr(PS_GRIP, 0, COL_BLACK, COL_WHITE);
+
+	/* 影の基準。外枠を描画環境の相対座標に直す。 */
+	base.c.left = (H)(w->frame.c.left - drag_org.x);
+	base.c.top = (H)(w->frame.c.top - drag_org.y);
+	base.c.right = (H)(w->frame.c.right - drag_org.x);
+	base.c.bottom = (H)(w->frame.c.bottom - drag_org.y);
+	(void)wget_drg(&start, 0);
+	cur = base;
+	prev = base;
+
+	for (;;) {
+		PNT p;
+		WEVENT we;
+		W t = wget_drg(&p, &we);
+		W dx;
+		W dy;
+
+		if (t < 0) {
+			break;
+		}
+		dx = p.x - start.x;
+		dy = p.y - start.y;
+		dir = constrain(we.e.stat, dx, dy, dir);
+		if (dir == DRG_VERT) {
+			dx = 0;
+		} else if (dir == DRG_HORZ) {
+			dy = 0;
+		}
+		cur.c.left = (H)(base.c.left + dx);
+		cur.c.right = (H)(base.c.right + dx);
+		cur.c.top = (H)(base.c.top + dy);
+		cur.c.bottom = (H)(base.c.bottom + dy);
+
+		if (!shown || cur.c.left != prev.c.left || cur.c.top != prev.c.top) {
+			/* **ポインタを消してから影を動かす。**ポインタは下地を
+			 * 退避して持っているので、その上から描くと戻すときに
+			 * 影の残骸が出る (§2.6)。 */
+			(void)gdsp_ptr(0);
+			if (shown) {
+				shadow(g, &prev);
+			}
+			shadow(g, &cur);
+			(void)gdsp_ptr(1);
+			prev = cur;
+			shown = True;
+		}
+		/* 拘束の向きに合わせてポインタを変える（仕様）。 */
+		(void)gset_ptr(dir == DRG_VERT  ? PS_VGRIP
+		               : dir == DRG_HORZ ? PS_HGRIP
+		                                 : PS_GRIP,
+		               0, COL_BLACK, COL_WHITE);
+
+		if (t == EV_BUTUP) {
+			break; /* 仕様「リリース時の EV_BUTUP は取り除かれる」 */
+		}
+		/* EV_KEYDWN / EV_KEYUP / EV_AUTKEY は取り出した時点で
+		 * 取り除かれている。無視する（仕様）。 */
+		(void)dly_tsk(10);
+	}
+
+	(void)gdsp_ptr(0);
+	if (shown) {
+		shadow(g, &prev);
+	}
+	(void)gdsp_ptr(1);
+	(void)wend_drg();
+	(void)gset_ptr(saved.style, 0, saved.fgcol, saved.bgcol);
+
+	/* 影の位置へ動かす。絶対座標に戻す。 */
+	{
+		RECT nf;
+
+		nf.c.left = (H)(prev.c.left + drag_org.x);
+		nf.c.top = (H)(prev.c.top + drag_org.y);
+		nf.c.right = (H)(prev.c.right + drag_org.x);
+		nf.c.bottom = (H)(prev.c.bottom + drag_org.y);
+		r = wmov_wnd(wid, &nf);
+		if (r >= 0 && newr != 0) {
+			*newr = nf;
+		}
+	}
+	return r;
+}
+
+EXPORT W wrsz_drg(WEVENT *evt, CONST RECT *limit, RECT *newr)
+{
+	WID wid = 0;
+	W code = drag_event(evt, &wid);
+	Window *w;
+	GID g;
+	PNT start;
+	RECT base;
+	RECT cur;
+	RECT prev;
+	Bool shown = False;
+	W dir = DRG_FREE;
+	PTRSTS saved;
+	W minw = W_MIN_WIDTH;
+	W minh = W_MIN_HEIGHT;
+	W maxw = 0x7FFF;
+	W maxh = 0x7FFF;
+	W r;
+
+	if (code < 0) {
+		return code;
+	}
+	/* 仕様「位置コードは、W_LTHD(4)〜W_RBHD(7) のいずれか」。
+	 * **移動と違って W_FRAM は受けない。**枠を掴んだら移動である。 */
+	if (code < W_LTHD || code > W_RBHD) {
+		return EX_PAR;
+	}
+	w = get(wid);
+	if (w == 0) {
+		return EX_WID;
+	}
+	if (limit != 0) {
+		/* 仕様「limit->lefttop はウィンドウの最小サイズ
+		 * ( lefttop.c.v が縦、lefttop.c.h が横の大きさ )」。
+		 * **PNT の x/y ではなく SIZE の h/v として読む**という、
+		 * 取り違えやすい約束。 */
+		minw = limit->p.lefttop.x;
+		minh = limit->p.lefttop.y;
+		maxw = limit->p.rightbot.x;
+		maxh = limit->p.rightbot.y;
+		if (minw < W_MIN_WIDTH) {
+			minw = W_MIN_WIDTH;
+		}
+		if (minh < W_MIN_HEIGHT) {
+			minh = W_MIN_HEIGHT;
+		}
+		if (maxw <= 0) {
+			maxw = 0x7FFF;
+		}
+		if (maxh <= 0) {
+			maxh = 0x7FFF;
+		}
+	}
+	g = wsta_drg(wid, 1);
+	if (g < 1) {
+		return g;
+	}
+	{
+		RECT scr;
+
+		(void)gget_bnd(g, &scr);
+		(void)gset_vis(g, scr);
+	}
+	(void)gget_ptr(&saved, 0);
+	(void)gset_ptr(PS_PICK, 0, COL_BLACK, COL_WHITE);
+
+	base.c.left = (H)(w->frame.c.left - drag_org.x);
+	base.c.top = (H)(w->frame.c.top - drag_org.y);
+	base.c.right = (H)(w->frame.c.right - drag_org.x);
+	base.c.bottom = (H)(w->frame.c.bottom - drag_org.y);
+	(void)wget_drg(&start, 0);
+	cur = base;
+	prev = base;
+
+	for (;;) {
+		PNT p;
+		WEVENT we;
+		W t = wget_drg(&p, &we);
+		W dx;
+		W dy;
+		W wdt;
+		W hgt;
+
+		if (t < 0) {
+			break;
+		}
+		dx = p.x - start.x;
+		dy = p.y - start.y;
+		/* 仕様「上下左右ともに変形可のウィンドウに対してのみ有効」 */
+		if ((w->attr & (WA_HHDL | WA_VHDL)) == (WA_HHDL | WA_VHDL)) {
+			dir = constrain(we.e.stat, dx, dy, dir);
+		} else {
+			dir = DRG_FREE;
+		}
+		if (dir == DRG_VERT) {
+			dx = 0;
+		} else if (dir == DRG_HORZ) {
+			dy = 0;
+		}
+		/* 変形できない向きは動かさない。 */
+		if ((w->attr & WA_HHDL) == 0) {
+			dx = 0;
+		}
+		if ((w->attr & WA_VHDL) == 0) {
+			dy = 0;
+		}
+		cur = base;
+		/* 位置コードが掴んだ隅を決める (W_LTHD 4 〜 W_RBHD 7)。 */
+		if (code == W_LTHD || code == W_LBHD) {
+			cur.c.left = (H)(base.c.left + dx);
+		} else {
+			cur.c.right = (H)(base.c.right + dx);
+		}
+		if (code == W_LTHD || code == W_RTHD) {
+			cur.c.top = (H)(base.c.top + dy);
+		} else {
+			cur.c.bottom = (H)(base.c.bottom + dy);
+		}
+		/* 仕様「最大サイズ以上になった場合は…最大サイズでクランプし、
+		 * PD の位置に追従しなくなる」。最小も同じ。 */
+		wdt = cur.c.right - cur.c.left;
+		hgt = cur.c.bottom - cur.c.top;
+		if (wdt < minw) {
+			wdt = minw;
+		}
+		if (wdt > maxw) {
+			wdt = maxw;
+		}
+		if (hgt < minh) {
+			hgt = minh;
+		}
+		if (hgt > maxh) {
+			hgt = maxh;
+		}
+		if (code == W_LTHD || code == W_LBHD) {
+			cur.c.left = (H)(cur.c.right - wdt);
+		} else {
+			cur.c.right = (H)(cur.c.left + wdt);
+		}
+		if (code == W_LTHD || code == W_RTHD) {
+			cur.c.top = (H)(cur.c.bottom - hgt);
+		} else {
+			cur.c.bottom = (H)(cur.c.top + hgt);
+		}
+
+		if (!shown || cur.c.left != prev.c.left || cur.c.top != prev.c.top ||
+		    cur.c.right != prev.c.right || cur.c.bottom != prev.c.bottom) {
+			(void)gdsp_ptr(0);
+			if (shown) {
+				shadow(g, &prev);
+			}
+			shadow(g, &cur);
+			(void)gdsp_ptr(1);
+			prev = cur;
+			shown = True;
+		}
+		(void)gset_ptr(dir == DRG_VERT  ? PS_VPICK
+		               : dir == DRG_HORZ ? PS_HPICK
+		                                 : PS_PICK,
+		               0, COL_BLACK, COL_WHITE);
+
+		if (t == EV_BUTUP) {
+			break;
+		}
+		(void)dly_tsk(10);
+	}
+
+	(void)gdsp_ptr(0);
+	if (shown) {
+		shadow(g, &prev);
+	}
+	(void)gdsp_ptr(1);
+	(void)wend_drg();
+	(void)gset_ptr(saved.style, 0, saved.fgcol, saved.bgcol);
+
+	{
+		RECT nf;
+
+		nf.c.left = (H)(prev.c.left + drag_org.x);
+		nf.c.top = (H)(prev.c.top + drag_org.y);
+		nf.c.right = (H)(prev.c.right + drag_org.x);
+		nf.c.bottom = (H)(prev.c.bottom + drag_org.y);
+		r = wrsz_wnd(wid, &nf);
+		if (r >= 0 && newr != 0) {
+			*newr = nf;
+		}
+	}
+	return r;
+}
+
 EXPORT W wsnd_evt(CONST WEVENT *evt)
 {
 	EVENT ev;
@@ -1554,6 +2128,14 @@ EXPORT void win_finish(void)
 {
 	W i;
 
+	if (drag_gid >= 1) {
+		(void)gcls_env(drag_gid);
+	}
+	drag_wid = 0;
+	drag_gid = 0;
+	drag_pid = 0;
+	drag_lock = False;
+
 	for (i = 1; i <= W_MAX_WND; i++) {
 		if (wnd[i].used) {
 			if (wnd[i].gid >= 1) {
@@ -1577,6 +2159,17 @@ EXPORT void win_release_process(W pid)
 
 	if (pid < 1) {
 		return;
+	}
+	/* 仕様「wsta_drg() を実行したプロセスが終了した場合は、自動的に
+	 * wend_drg() の処理が行なわれる」。 */
+	if (drag_wid != 0 && drag_pid == pid) {
+		if (drag_gid >= 1) {
+			(void)gcls_env(drag_gid);
+		}
+		drag_wid = 0;
+		drag_gid = 0;
+		drag_pid = 0;
+		drag_lock = False;
 	}
 	for (i = 1; i <= W_MAX_WND; i++) {
 		if (wnd[i].used && wnd[i].pid == pid) {

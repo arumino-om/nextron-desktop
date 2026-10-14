@@ -249,10 +249,14 @@ IMPORT ERR wset_wrk(WID wid, CONST RECT *r);
 IMPORT ERR wget_org(WID wid, W *parent, RECT *org);
 IMPORT ERR wset_org(WID wid, W parent, CONST RECT *org);
 
-/* 位置と大きさの変更。 */
-IMPORT W wmov_wnd(WID wid, CONST RECT *newr);
-IMPORT W wrsz_wnd(WID wid, CONST RECT *newr);
-IMPORT W wchg_wnd(WID wid, CONST RECT *r, W mode);
+/* 位置と大きさの変更。
+ *
+ * **`newr` は入出力。** 仕様「最終的な新しいウィンドウの外枠が newr で
+ * 指定した領域に絶対座標値で格納される」。
+ * 戻り値は 0（再表示不要）か 1（再表示必要）。 */
+IMPORT W wmov_wnd(WID wid, RECT *newr);
+IMPORT W wrsz_wnd(WID wid, RECT *newr);
+IMPORT W wchg_wnd(WID wid, RECT *r, W mode);
 
 /* 作業領域のスクロール。 */
 IMPORT W wscr_wnd(WID wid, CONST RECT *r, W dh, W dv, W mode);
@@ -287,6 +291,44 @@ IMPORT W wget_evt(WEVENT *evt, W mode);
 
 /* ウィンドウイベントの送信。 */
 IMPORT W wsnd_evt(CONST WEVENT *evt);
+
+/* ------------------------------------------------------------------ */
+/* ドラッグ (§3.1.2.5 / §3.1.4)                                        */
+/*                                                                     */
+/* ドラッグ「影」は作業領域をはみ出して描くので、ウィンドウの描画環境   */
+/* では描けない。専用の描画環境を借りる。仕様 §3.1.2.5 によれば、       */
+/* 元のウィンドウの描画環境と違うのは                                   */
+/*                                                                     */
+/*   フレーム長方形   画面全体                                         */
+/*   表示長方形       元のウィンドウの作業領域（相対座標）              */
+/*   前置長方形リスト 元のウィンドウと同じ                              */
+/*                                                                     */
+/* の 3 点だけで、座標系は元のウィンドウと同じ。だから影の座標を         */
+/* 計算し直さなくてよい。                                              */
+/* ------------------------------------------------------------------ */
+
+/* ドラッグ描画の開始。戻り値は影を描くための描画環境 ID。
+ * `lock` が 0 でなければ他のウィンドウの同時描画を禁止する
+ * （元のウィンドウをはみ出して描くなら必須）。
+ * 既に他がドラッグ中なら `EX_DRAG`。 */
+IMPORT GID wsta_drg(WID wid, W lock);
+
+/* ドラッグ描画の終了。描画環境を解放する。 */
+IMPORT ERR wend_drg(void);
+
+/* ドラッグ中の PD 位置（ドラッグ描画環境の相対座標）とイベント。
+ * `EV_REQUEST` と `EV_SWITCH` はキューに残す。 */
+IMPORT W wget_drg(PNT *pos, WEVENT *evt);
+
+/* ドラッグによる移動。`evt` は契機となったイベントで、位置コードは
+ * `W_FRAM` か `W_LTHD`〜`W_RBHD` でなければならない。
+ * 戻り値は 0（再表示不要）か 1（再表示必要）。 */
+IMPORT W wmov_drg(WEVENT *evt, RECT *newr);
+
+/* ドラッグによる変形。位置コードは `W_LTHD`〜`W_RBHD`。
+ * `limit->lefttop` が最小、`limit->rightbot` が最大の大きさ
+ * （`h` が横、`v` が縦）。`limit` が NULL なら既定値。 */
+IMPORT W wrsz_drg(WEVENT *evt, CONST RECT *limit, RECT *newr);
 
 /* 枠座標 ←→ 作業領域座標の変換。 */
 IMPORT ERR wcnv_rec(UW attr, RECT *r, UW opt);

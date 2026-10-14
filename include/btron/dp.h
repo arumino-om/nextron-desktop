@@ -416,6 +416,11 @@ IMPORT ERR gget_vis(GID gid, RECT *rp);
  *
  * `rlp = NULL` でリストを空にする。 */
 IMPORT ERR gset_for(GID gid, CONST RLIST *rlp);
+
+/* **`rlp` は呼び出し側が鎖を張った配列でなければならない。**
+ * 仕様「リストの各要素の r_next は正しく設定されているものとする」。
+ * 未初期化の `RLIST` を 1 つ渡すと、2 要素目で野良ポインタを踏む。
+ * 要素数が足りなければそこで打ち切られる（個数は返らない）。 */
 IMPORT ERR gget_for(GID gid, RLIST *rlp);
 
 /* 対象ビットマップと座標系。 */

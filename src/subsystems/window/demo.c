@@ -239,6 +239,26 @@ LOCAL Bool redisplay(WID wid, CONST TC *line1, CONST TC *line2, Bool dots)
 	return True;
 }
 
+/* 枠やハンドルを掴んだらドラッグに入る。
+ *
+ * 仕様 §3.1.4: `wmov_drg` の位置コードは `W_FRAM` と `W_LTHD`〜`W_RBHD`、
+ * `wrsz_drg` は `W_LTHD`〜`W_RBHD`。**つまり四隅は移動にも変形にも
+ * 使える。** ここでは四隅を変形、枠を移動に割り当てる。
+ * タイトル部は移動に使えない（仕様の位置コードに入っていない）。 */
+LOCAL void drag(WEVENT *evt)
+{
+	W code = evt->s.cmd;
+	RECT nr;
+
+	if (code >= W_LTHD && code <= W_RBHD) {
+		(void)wrsz_drg(evt, 0, &nr);
+	} else if (code == W_FRAM) {
+		(void)wmov_drg(evt, &nr);
+	}
+	/* 動かした窓自身の再表示は戻り値 1 で知らされるが、
+	 * 再表示領域は設定されているので、下の再表示処理が拾う。 */
+}
+
 /* ------------------------------------------------------------------ */
 /* 本体                                                                */
 /* ------------------------------------------------------------------ */
@@ -345,12 +365,34 @@ EXPORT void win_demo_hold(void)
 			 * **切換はマネージャがもう済ませている**（仕様
 			 * §3.1.2.2「このイベントを取り出した時点では、既に wid で
 			 * 示されるウィンドウに入力受付状態は切り換わっており」）。
-			 * アプリがすることは下の再表示処理だけ。 */
+			 * 切り換えついでに枠を掴んでいたらドラッグへ入る。 */
+			drag(&ev);
 			need_status = True;
 			break;
 
 		case EV_BUTDWN:
-			/* 作業領域の中の押し下げ。入力受付状態の窓に来る。 */
+			/* 入力受付状態の窓への押し下げ。どこを押したかは
+			 * 自分で引く（仕様はイベントに位置コードを載せない）。 */
+			{
+				PNT lp;
+				W hit = 0;
+				W code = wfnd_wnd(&ev.e.pos, &lp, &hit);
+
+				if (code > W_WORK && hit >= 1) {
+					/* 枠やハンドル。SEVENT の形に組み直して渡す。 */
+					WEVENT de;
+
+					de.s.type = EV_BUTDWN;
+					de.s.time = ev.e.time;
+					de.s.pos = ev.e.pos;
+					de.s.cmd = (H)code;
+					de.s.wid = (H)hit;
+					de.s.stat = ev.e.stat;
+					drag(&de);
+					need_status = True;
+					break;
+				}
+			}
 			drawing = True;
 			last_stat = ev.e.stat | ES_BUT;
 			need_status = True;
