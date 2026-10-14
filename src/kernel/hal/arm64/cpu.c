@@ -8,6 +8,9 @@
 
 #define CPACR_FPEN_NOTRAP (3ULL << 20)
 
+/* SCTLR_EL1.SPAN。1 なら、EL0 からの例外で PSTATE.PAN を立てない。 */
+#define SCTLR_SPAN (1ULL << 23)
+
 EXPORT void hal_cpu_init(void)
 {
 	/* Advanced SIMD / 浮動小数点を EL1 で使えるようにする。
@@ -29,6 +32,28 @@ EXPORT void hal_cpu_init(void)
 	    :
 	    : "r"(CPACR_FPEN_NOTRAP)
 	    : "memory");
+
+	/* PAN (Privileged Access Never) を立てないようにする。
+	 *
+	 * FEAT_PAN がある CPU では、EL0 からの例外で PSTATE.PAN が 1 になり、
+	 * **カーネルがユーザのメモリを読めなくなる**。システムコールの引数に
+	 * ポインタを取る以上、読めなければ何もできない。
+	 *
+	 * もちろん「読めてしまう」ことこそが危ないので、ユーザから来た
+	 * ポインタは必ず usr_ok()（syscall.c）で範囲と写像を確かめてから
+	 * 触る。PAN に頼らず、明示的に検める方を選んだ。 */
+	{
+		UD sctlr;
+
+		__asm__ volatile("mrs %0, sctlr_el1" : "=r"(sctlr));
+		sctlr |= SCTLR_SPAN;
+		__asm__ volatile(
+		    "msr sctlr_el1, %0\n"
+		    "isb\n"
+		    :
+		    : "r"(sctlr)
+		    : "memory");
+	}
 }
 
 /* DMA の順序づけ (hal.h)。

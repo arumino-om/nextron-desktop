@@ -65,6 +65,37 @@ hal_ctx_switch:
  * 「タスクの終了は tk_ext_tsk を呼ぶこと」としているが、return したときに
  * 無言で暴走させるより明示的に終了させた方が安全。
  */
+/*
+ * ユーザ特権 (EL0) で走り始めるタスクの着地点。
+ *
+ * hal_ctx_init_user() が x19 = ユーザのエントリ、x20 = ユーザスタックの
+ * 先頭、x21 = 第 1 引数、として仕込んでいる。
+ *
+ * **ここで EL1 から EL0 へ降りる。** 以後このタスクは
+ *
+ *   EL0 で走る → svc か割込み → EL1 のベクタ → SP_EL1 (このスタック) で
+ *   処理 → eret で EL0 へ戻る
+ *
+ * を繰り返す。SP_EL1 はこの時点の値のまま残るので、例外のたびに同じ
+ * カーネルスタックが使われる。タスクごとに 1 本ずつある。
+ */
+    .globl btron_user_trampoline
+    .type btron_user_trampoline, @function
+btron_user_trampoline:
+    msr     daifclr, #2             /* 割込みを許可してから降りる */
+    msr     sp_el0, x20             /* ユーザスタック */
+    msr     elr_el1, x19            /* 戻り先 = ユーザのエントリ */
+    /* SPSR_EL1 = 0 : M[3:0] = 0 (EL0t)、DAIF はすべて 0（許可）。
+     * **ここを間違えると EL1 のまま走り続けて保護が効かない。** */
+    msr     spsr_el1, xzr
+    mov     x0, x21                 /* ユーザ側の第 1 引数 */
+    mov     x1, xzr
+    mov     x2, xzr
+    mov     x3, xzr
+    mov     x29, xzr
+    mov     x30, xzr
+    eret
+
     .globl btron_task_trampoline
     .type btron_task_trampoline, @function
 btron_task_trampoline:

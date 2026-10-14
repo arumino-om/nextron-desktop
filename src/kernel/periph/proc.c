@@ -450,7 +450,57 @@ LOCAL void sub_trampoline(INT stacd, VP exinf)
 	ext_tsk();
 }
 
-EXPORT WERR prc_create(PRCMAIN entry, W pri, CONST TC *name, CONST MESSAGE *msg)
+/* 子のアドレス空間へ 1 バイトずつ書く。
+ *
+ * **自分の TTBR0 は親のものなので、子の番地へ直接は書けない。**
+ * 変換して物理アドレスを出し、上位半分の直接マップ経由で書く。
+ * 1 バイトずつ変換するのは遅いが、ここを通るのはプロセス生成のときの
+ * 起動メッセージだけ（最大 1KB）なので問題にならない。 */
+LOCAL Bool user_write(CONST AddrSpace *as, UD va, CONST UB *src, W n)
+{
+	UD ps = (UD)hal_page_size();
+	W i;
+
+	for (i = 0; i < n; i++) {
+		UD a = va + (UD)i;
+		UD pa = hal_vm_translate(as, a);
+
+		if (pa == 0) {
+			return False;
+		}
+		(void)ps;
+		*(volatile UB *)(VP)BTRON_PA_TO_VA(pa) = src[i];
+	}
+	return True;
+}
+
+/* 起動メッセージをユーザスタックの上端へ写す。
+ *
+ * 仕様 §1.1.6 の形式-A は `W MAIN(MESSAGE *msg)` で、**メッセージは
+ * プロセスから読める場所になければならない**。カーネルヒープに置いた
+ * ままアドレスを渡すと、EL0 から触れずにフォルトする。 */
+LOCAL UD copy_msg_to_user(CONST AddrSpace *as, UD sp_top, CONST MESSAGE *m)
+{
+	W total = MSG_HEADER_SIZE + m->msg_size;
+	UD at;
+
+	if (m->msg_size < 0 || total > PRC_MAX_MSGSZ + MSG_HEADER_SIZE) {
+		return 0;
+	}
+	at = (sp_top - (UD)total) & ~0xFULL;
+	if (!user_write(as, at, (CONST UB *)(CONST VP)m, total)) {
+		return 0;
+	}
+	return at;
+}
+
+/* プロセスを 1 つ作る。
+ *
+ * `entry` が 0 でなければカーネル特権のメインタスク（既存の用法）。
+ * `obj` が 0 でなければ実行プログラムレコードを読み込んで EL0 で走らせる。
+ * **両方同時には指定しない。** */
+LOCAL WERR create_common(PRCMAIN entry, CONST UB *obj, W objsz, W pri,
+                         CONST TC *name, CONST MESSAGE *msg)
 {
 	W parent = prc_self();
 	PCB *p;
@@ -458,9 +508,11 @@ EXPORT WERR prc_create(PRCMAIN entry, W pri, CONST TC *name, CONST MESSAGE *msg)
 	T_CTSK c;
 	ID tid;
 	UD state;
+	UD uentry = 0;
+	UD usp = 0;
 	W i;
 
-	if (entry == 0) {
+	if (entry == 0 && obj == 0) {
 		return ER_ADR;
 	}
 	if (pri == P_PRI_SELF) {
@@ -541,8 +593,28 @@ EXPORT WERR prc_create(PRCMAIN entry, W pri, CONST TC *name, CONST MESSAGE *msg)
 		fil_inherit(parent, p->pid);
 	}
 
+	/* 実行プログラムレコードを読み込む。**タスクを作る前に行う** —
+	 * 失敗したらプロセスごと畳むので、タスクが残らない方が後始末が楽。 */
+	if (obj != 0) {
+		ERR ler;
+
+		if (!p->has_as) {
+			p->used = False;
+			return ER_NOMEM;
+		}
+		ler = exec_load(p->pid, &p->as, obj, objsz, &uentry, &usp);
+		if (ler < 0) {
+			hal_vm_destroy(&p->as);
+			p->has_as = False;
+			kfree(p->msg);
+			p->msg = 0;
+			p->used = False;
+			return ler;
+		}
+	}
+
 	c.exinf = (VP)p;
-	c.tskatr = TA_HLNG;
+	c.tskatr = (obj != 0) ? (TA_HLNG | TA_RNG3) : TA_HLNG;
 	c.task = main_trampoline;
 	c.itskpri = prc_to_tskpri(pri);
 	/* ファイル管理を呼ぶとブロックとエントリが何段も重なる。
@@ -577,7 +649,37 @@ EXPORT WERR prc_create(PRCMAIN entry, W pri, CONST TC *name, CONST MESSAGE *msg)
 	}
 	hal_int_restore(state);
 
-	/* 仕様: 「同時にメインタスクが生成され実行を開始する」 */
+	/* 仕様: 「同時にメインタスクが生成され実行を開始する」。
+	 *
+	 * ユーザプログラムは EL0 へ降ろす。渡すのは
+	 *   エントリ点 / ユーザスタックの先頭 / 起動メッセージのアドレス
+	 * で、メッセージはプロセスの空間には写していないので**上位半分の
+	 * アドレスをそのまま渡してはいけない**。下の `copy_msg_to_user` が
+	 * ユーザスタックの上へ写す。 */
+	if (obj != 0) {
+		UD marg = 0;
+
+		if (p->msg != 0) {
+			marg = copy_msg_to_user(&p->as, usp, p->msg);
+			if (marg != 0) {
+				usp = marg & ~0xFULL;
+			}
+		}
+		if (knl_sta_tsk_user(tid, uentry, usp, marg) != E_OK) {
+			(void)tk_del_tsk(tid);
+			detach_task(p, tid);
+			exec_release_process(p->pid);
+			if (p->has_as) {
+				hal_vm_destroy(&p->as);
+				p->has_as = False;
+			}
+			kfree(p->msg);
+			p->msg = 0;
+			p->used = False;
+			return ER_INNER;
+		}
+		return p->pid;
+	}
 	if (tk_sta_tsk(tid, 0) != E_OK) {
 		(void)tk_del_tsk(tid);
 		detach_task(p, tid);
@@ -593,8 +695,34 @@ EXPORT WERR prc_create(PRCMAIN entry, W pri, CONST TC *name, CONST MESSAGE *msg)
 	return p->pid;
 }
 
+EXPORT WERR prc_create(PRCMAIN entry, W pri, CONST TC *name,
+                       CONST MESSAGE *msg)
+{
+	return create_common(entry, 0, 0, pri, name, msg);
+}
+
+/* ------------------------------------------------------------------ */
+/* cre_prc (§1.1.6)                                                    */
+/*                                                                     */
+/* 仕様「指定したファイル内の最初の実行プログラムレコードの内容が      */
+/* 生成するプロセスのプログラムコードとなる。実行プログラムレコードは、*/
+/* **先頭レコードでなければならない**」。                               */
+/*                                                                     */
+/* レコードタイプ 9 が実行プログラムレコードで、サブタイプが CPU の     */
+/* タイプ（共有データ仕様 3.2）。合わなければ走らせない。               */
+/* ------------------------------------------------------------------ */
+
+#define REC_PROGRAM 9
+
 EXPORT WERR cre_prc(CONST LINK *lnk, W pri, CONST MESSAGE *msg)
 {
+	W fd;
+	W t;
+	W rsz = 0;
+	UH sub = 0;
+	UB *buf;
+	WERR r;
+
 	if (lnk == 0) {
 		return ER_ADR;
 	}
@@ -604,10 +732,45 @@ EXPORT WERR cre_prc(CONST LINK *lnk, W pri, CONST MESSAGE *msg)
 	if (msg != 0 && msg->msg_size > PRC_MAX_MSGSZ) {
 		return ER_SZOVR;
 	}
-	/* 実身の実行プログラムレコードを読むにはファイルシステムが要る。
-	 * まだ 1 つも接続されていないので、仕様の ER_NOFS がそのまま当たる。
-	 * Phase 3 (T3-01 以降) でここが本物になる。 */
-	return ER_NOFS;
+	/* 仕様「ER_ACCES: ファイル(lnk)のアクセス権(E)がない」。
+	 * E は「ファイルの実行またはファイル内のリンクの検索」(§1.6.4)。 */
+	r = chk_fil(lnk, F_EXCUTE, 0);
+	if (r < 0) {
+		return r;
+	}
+	fd = opn_fil(lnk, F_READ, 0);
+	if (fd < 0) {
+		return fd;
+	}
+	/* **先頭レコードでなければならない。** 探し回らない。 */
+	if (see_rec(fd, 0, 1, 0) < 0) {
+		(void)cls_fil(fd);
+		return ER_REC;
+	}
+	t = rea_rec(fd, 0, 0, 0, &rsz, &sub);
+	if (t < 0) {
+		(void)cls_fil(fd);
+		return (t == ER_ENDR) ? ER_REC : t;
+	}
+	if (t != REC_PROGRAM || (W)sub != exec_cpu_type() || rsz <= 0) {
+		(void)cls_fil(fd);
+		return ER_REC;
+	}
+	buf = (UB *)kmalloc((UD)rsz);
+	if (buf == 0) {
+		(void)cls_fil(fd);
+		return ER_NOSPC;
+	}
+	if (rea_rec(fd, 0, (B *)buf, rsz, 0, 0) < 0) {
+		kfree(buf);
+		(void)cls_fil(fd);
+		return ER_IO;
+	}
+	(void)cls_fil(fd);
+
+	r = create_common(0, buf, rsz, pri, 0, msg);
+	kfree(buf);
+	return r;
 }
 
 EXPORT WERR cre_tsk(SUBTASK entry, W pri, W arg)
@@ -740,6 +903,9 @@ LOCAL void teardown(W pid, W code, W msgtype, Bool self)
 
 	/* イベントメッセージ要求を外す (§1.7.6)。 */
 	evt_release_process(pid);
+
+	/* 実行プログラムの像を返す。**ページテーブルを畳む前に。** */
+	exec_release_process(pid);
 
 	/* 開いたままのファイルを閉じる (§1.6.5)。
 	 * **デバイスより先に閉じる。** ファイルシステムはデバイスの上に

@@ -283,6 +283,15 @@ IMPORT W prc_count(void);
  * `get_usr` と違って隠し名を 0 にしない。周辺核の中だけで使う。 */
 IMPORT Bool prc_user(W pid, P_USER *buff);
 
+/* --- 実行プログラムレコードの読み込み (src/kernel/periph/exec.c) ---
+ *
+ * 形式は include/btron/objfmt.h。`cre_prc` だけが使う。 */
+IMPORT ERR exec_load(W pid, AddrSpace *as, CONST UB *obj, W size, UD *entry,
+                     UD *user_sp);
+IMPORT void exec_release_process(W pid);
+IMPORT W exec_cpu_type(void); /* この機械の CPU タイプ (OBJ_CPU_*) */
+IMPORT W exec_pages(W pid);   /* 検証用。確保したページ数 */
+
 /* プロセスが存在するか。
  *
  * **タスク独立部（割込みハンドラ）から使えるのはこちら。** `prc_sts()` は

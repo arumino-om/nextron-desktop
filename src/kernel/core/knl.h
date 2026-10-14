@@ -198,6 +198,9 @@ IMPORT UD knl_alloc_stack(SZ size);
 /* 見張りを検める。壊れていれば戻らない（緊急画面へ）。 */
 IMPORT void knl_check_stack(CONST TCB *t);
 
+/* ユーザ特権 (EL0) で走り始めるタスクを起動する。周辺核だけが呼ぶ。 */
+IMPORT ER knl_sta_tsk_user(ID tskid, UD entry, UD user_sp, UD arg);
+
 /* タイマ割込みのハンドラ。*/
 IMPORT void knl_timer_handler(UW intid, VP arg);
 

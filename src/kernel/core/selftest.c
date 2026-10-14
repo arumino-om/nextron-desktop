@@ -17,6 +17,7 @@
 
 #include <btron/bootinfo.h>
 #include <btron/device.h>
+#include <btron/objfmt.h>
 #include <btron/virtio.h>
 #include <btron/dp.h>
 #include <btron/event.h>
@@ -689,6 +690,13 @@ LOCAL CONST TC path_own[] = {(TC)TC_FOWN, TNULL};
 /* ／nope */
 LOCAL CONST TC path_nofs[] = {(TC)TC_FDLM, (TC)'n', (TC)'o', (TC)'p',
                               (TC)'e', TNULL};
+/* ビルド時に埋め込んだ実行プログラムレコード (tools/mkobj.py)。 */
+IMPORT CONST UB btron_user_hello[];
+IMPORT CONST UW btron_user_hello_size;
+
+LOCAL CONST TC nm_prog[] = {(TC)'h', (TC)'e', (TC)'l', (TC)'l', (TC)'o',
+                            TNULL};
+LOCAL LINK fl_prog;
 LOCAL LINK fl_root;
 LOCAL LINK fl_a;
 LOCAL LINK fl_b;
@@ -5565,6 +5573,157 @@ LOCAL void run_proc_tests(void)
 		}
 	});
 
+	BTRON_TEST("実身からプロセスを起こす (§1.1.6)", {
+		if (!fs_up) {
+			BTRON_CHECK("ファイルシステムが無いので飛ばす", True);
+		} else {
+			LINK p;
+			W fd;
+			W pid;
+			MESSAGE m;
+			W i;
+			UD before = free_pages_settled();
+
+			/* 実身を作り、**先頭レコード**に実行プログラムレコードを
+			 * 置く。仕様「実行プログラムレコードは、先頭レコードで
+			 * なければならない」。 */
+			p = fl_root;
+			BTRON_CHECK("実身を生成", cre_fil(&p, nm_prog, 0, 0,
+			                                  F_FLOAT) > 0);
+			fl_prog = p;
+			fd = opn_fil(&p, F_UPDATE, 0);
+			BTRON_CHECK("開く", fd > 0);
+			BTRON_CHECK("プログラムを書く",
+			            apd_rec(fd, (CONST B *)btron_user_hello,
+			                    (W)btron_user_hello_size, 9,
+			                    (UH)OBJ_CPU_ARM64, 0) == ER_OK);
+			BTRON_CHECK("閉じる", cls_fil(fd) == ER_OK);
+
+			/* 起動メッセージ。先頭バイトがそのまま終了コードになる
+			 * ようにプログラムを書いてある。 */
+			m.msg_type = 0;
+			m.msg_size = 5;
+			for (i = 0; i < 5; i++) {
+				m.msg_body.ANYMSG.msg_str[i] = (UB)("BTRON"[i]);
+			}
+			(void)clr_msg(MM_ALL, MM_NULL);
+
+			pid = cre_prc(&p, 2, &m);
+			BTRON_CHECK("プロセスが起きた", pid > 0);
+			if (pid > 0) {
+				MESSAGE r;
+				W got;
+
+				/* 子が終わると正常終了メッセージが届く (§1.2)。
+				 *
+				 * **異常終了も受け付けて型で判定する。** 片方だけを
+				 * 待つと、落ち方を間違えたときに検査が落ちるのでは
+				 * なく永久に待ってしまう（逆検査で踏んだ）。 */
+				got = rcv_msg(MM_EXIT | MM_ABORT, &r, (W)sizeof(r),
+				              WAIT);
+				BTRON_CHECK("終了メッセージが届く", got >= 0);
+				BTRON_CHECK("正常終了メッセージ",
+				            r.msg_type == MS_EXIT);
+				BTRON_CHECK("送り主は子プロセス",
+				            r.msg_body.EXIT.pid == pid);
+				/* 'B' = 0x42 = 66。メッセージがユーザ空間まで
+				 * 届いていなければ 0 になる。 */
+				BTRON_CHECK("終了コードはメッセージの先頭バイト",
+				            r.msg_body.EXIT.code == 'B');
+			}
+
+			/* **特権が本当に落ちているかを確かめる。**
+			 *
+			 * 'F' で始まるメッセージを渡すと、プログラムは
+			 * カーネルの番地をシステムコールを通さず直接読む。
+			 * EL0 なら変換フォルトでこのプロセスだけが落ち、
+			 * 親には異常終了が届く。EL1 のままなら読めてしまう。 */
+			(void)clr_msg(MM_ALL, MM_NULL);
+			m.msg_body.ANYMSG.msg_str[0] = (UB)'F';
+			pid = cre_prc(&p, 2, &m);
+			BTRON_CHECK("もう一度起こす", pid > 0);
+			if (pid > 0) {
+				MESSAGE r;
+
+				BTRON_CHECK("異常終了が届く",
+				            rcv_msg(MM_ABORT | MM_EXIT, &r,
+				                    (W)sizeof(r), WAIT) >= 0);
+				/* 仕様 §1.2.2「プロセスがシステムエラーにより
+				 * 異常終了させられた場合」= MS_ABORT。
+				 * **MS_EXIT が来たら読めてしまっている。** */
+				BTRON_CHECK("異常終了メッセージ",
+				            r.msg_type == MS_ABORT);
+				BTRON_CHECK("落ちたのは子プロセス",
+				            r.msg_body.ABORT.pid == pid);
+			}
+			(void)clr_msg(MM_ALL, MM_NULL);
+
+			/* **像のページが返っていること。** プロセスごとに
+			 * 数ページずつ失うと、すぐ枯れる。 */
+			BTRON_CHECK("ページが戻った",
+			            free_pages_settled() + 2 >= before);
+
+			/* **ヘッダの中身が壊れていたら走らせない。**
+			 *
+			 * レコードのサブタイプ（外側）とヘッダの CPU（内側）は
+			 * 別の場所にある。片方だけ見ていると、もう片方が
+			 * 壊れていても通ってしまう。両方を別々に試す。 */
+			fd = opn_fil(&p, F_UPDATE, 0);
+			if (fd > 0) {
+				B bad[4];
+
+				BTRON_CHECK("先頭へ", see_rec(fd, 0, 1, 0) == ER_OK);
+				/* ヘッダの CPU（本体の 12 バイト目）だけを壊す。
+				 * レコードのサブタイプは正しいままにする。 */
+				bad[0] = 0x42; /* 68000 */
+				bad[1] = 0;
+				bad[2] = 0;
+				bad[3] = 0;
+				BTRON_CHECK("ヘッダの CPU を壊す",
+				            wri_rec(fd, OBJ_CPU, bad, 4, 0, 0, 0) == ER_OK);
+				BTRON_CHECK("閉じる", cls_fil(fd) == ER_OK);
+				BTRON_CHECK("ヘッダの CPU が違えば走らせない",
+				            cre_prc(&p, 2, 0) == ER_REC);
+			}
+			/* 印（マジック）を壊す。 */
+			fd = opn_fil(&p, F_UPDATE, 0);
+			if (fd > 0) {
+				B bad[1];
+
+				bad[0] = 'X';
+				BTRON_CHECK("先頭へ", see_rec(fd, 0, 1, 0) == ER_OK);
+				BTRON_CHECK("印を壊す",
+				            wri_rec(fd, 0, bad, 1, 0, 0, 0) == ER_OK);
+				BTRON_CHECK("閉じる", cls_fil(fd) == ER_OK);
+				BTRON_CHECK("印が違えば走らせない",
+				            cre_prc(&p, 2, 0) == ER_REC);
+			}
+			/* レコードのサブタイプ（外側）を壊す。 */
+			fd = opn_fil(&p, F_UPDATE, 0);
+			if (fd > 0) {
+				UH wrong = 0x0042; /* 68000 */
+
+				BTRON_CHECK("先頭へ", see_rec(fd, 0, 1, 0) == ER_OK);
+				BTRON_CHECK("サブタイプを変える",
+				            wri_rec(fd, 0, 0, 0, 0, &wrong, 0) == ER_OK);
+				BTRON_CHECK("閉じる", cls_fil(fd) == ER_OK);
+				BTRON_CHECK("サブタイプが違えば走らせない",
+				            cre_prc(&p, 2, 0) == ER_REC);
+			}
+			/* レコードタイプが違う実身も断る。 */
+			{
+				LINK q = fl_root;
+
+				BTRON_CHECK("別の実身", cre_fil(&q, nm_f3, 0, 0,
+				                                F_FLOAT) > 0);
+				BTRON_CHECK("プログラムレコードが無い",
+				            cre_prc(&q, 2, 0) == ER_REC);
+			}
+			BTRON_CHECK("アドレス不正", cre_prc(0, 2, 0) == ER_ADR);
+			BTRON_CHECK("優先度範囲外", cre_prc(&p, 300, 0) == ER_PPRI);
+		}
+	});
+
 	BTRON_TEST("切り離しと後始末 (§1.6.2 / §1.6.5)", {
 		if (!fs_up) {
 			BTRON_CHECK("ファイルシステムが無いので飛ばす", True);
@@ -6524,23 +6683,20 @@ LOCAL void run_proc_tests(void)
 		            clr_msg(MM_ALL, MM_NULL) == ER_OK);
 	});
 
-	BTRON_TEST("cre_prc はファイルシステムを要求する (§1.1.6)", {
+	BTRON_TEST("cre_prc は接続されていないファイルシステムを断る (§1.1.6)", {
 		LINK lnk;
 		W i;
 
 		for (i = 0; i < L_FSNM; i++) {
-			lnk.fs_name[i] = TNULL;
+			lnk.fs_name[i] = (TC)'z';
 		}
+		lnk.fs_name[L_FSNM - 1] = TNULL;
 		lnk.f_id = 1;
 		lnk.atr1 = 0;
 		lnk.atr2 = 0;
 		lnk.atr3 = 0;
 		lnk.atr4 = 0;
 		lnk.atr5 = 0;
-
-		BTRON_CHECK("アドレス不正", cre_prc(0, 0, 0) == ER_ADR);
-		BTRON_CHECK("優先度範囲外", cre_prc(&lnk, 300, 0) == ER_PPRI);
-		/* 実身を読む経路がまだ無い。Phase 3 でここが本物になる。 */
 		BTRON_CHECK("ファイルシステム未接続", cre_prc(&lnk, 0, 0) == ER_NOFS);
 	});
 }

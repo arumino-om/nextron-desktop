@@ -8,6 +8,7 @@
 
 IMPORT void btron_task_trampoline(void);
 IMPORT void btron_msg_trampoline(void);
+IMPORT void btron_user_trampoline(void);
 
 /* フレーム内の添字 (8 バイト単位)。context.S のオフセットを 8 で割った値。 */
 #define F_X19 0
@@ -45,6 +46,27 @@ EXPORT UD hal_ctx_init(UD stack_top, void (*entry)(W stacd, VP exinf), W stacd, 
 	/* hal_ctx_switch の ldp x29,x30 + ret でここへ飛ぶ */
 	f[F_X29] = 0;
 	f[F_X30] = (UD)(VP)btron_task_trampoline;
+	return sp;
+}
+
+EXPORT UD hal_ctx_init_user(UD stack_top, UD entry, UD user_sp, UD arg)
+{
+	UD sp;
+	UD *f;
+	W i;
+
+	sp = (stack_top & ~0xFULL) - HAL_CTX_FRAME_SIZE;
+	f = (UD *)(VP)sp;
+
+	for (i = 0; i < F_WORDS; i++) {
+		f[i] = 0;
+	}
+	/* btron_user_trampoline が読む 3 つ。 */
+	f[F_X19] = entry;
+	f[F_X20] = user_sp;
+	f[F_X21] = arg;
+	f[F_X29] = 0;
+	f[F_X30] = (UD)(VP)btron_user_trampoline;
 	return sp;
 }
 

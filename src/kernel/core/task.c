@@ -301,6 +301,44 @@ EXPORT ER tk_del_tsk(ID tskid)
 /* 起動と終了                                                          */
 /* ------------------------------------------------------------------ */
 
+/* ユーザ特権 (EL0) で走り始めるタスクを起動する。
+ *
+ * **中心核の内部口。BTRON3 の API ではない。** μT-Kernel の
+ * `tk_sta_tsk` はカーネル特権の関数を起こすものなので、別に用意した。
+ * 仕様の `TA_RNG1〜3`（保護レベル）に対応する概念だが、どの特権で
+ * どこへ降りるかを決めるのは周辺核（プロセス管理）なので、
+ * 入口だけ開けて判断は渡さない。 */
+EXPORT ER knl_sta_tsk_user(ID tskid, UD entry, UD user_sp, UD arg)
+{
+	UD state;
+	ER er = E_OK;
+	TCB *t;
+
+	state = hal_int_disable();
+	t = knl_get_tcb(tskid, &er);
+	if (t == 0) {
+		hal_int_restore(state);
+		return er;
+	}
+	if (t->state != TTS_DMT) {
+		hal_int_restore(state);
+		return E_OBJ;
+	}
+	t->pri = t->itskpri;
+	t->bpri = t->itskpri;
+	t->wupcnt = 0;
+	t->suscnt = 0;
+	t->waitcause = 0;
+	t->wid = 0;
+	t->timeout = 0;
+	t->sp = hal_ctx_init_user(t->stack + (UD)t->stksz, entry, user_sp, arg);
+
+	knl_make_ready(t, False);
+	knl_dispatch();
+	hal_int_restore(state);
+	return E_OK;
+}
+
 EXPORT ER tk_sta_tsk(ID tskid, INT stacd)
 {
 	UD state;

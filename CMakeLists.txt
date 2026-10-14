@@ -115,6 +115,45 @@ add_custom_command(
   VERBATIM)
 
 # --------------------------------------------------------------------------
+# ユーザプログラム (EL0)
+#
+# **カーネルとは別に結合する。** 特権が違うので一緒にできない。
+# src/lib/sys/ のスタブ（システムコールを svc に直す）と crt0 を足して
+# BTRON_PROC_TEXT_BASE に固定で結合し、tools/mkobj.py が実行プログラム
+# レコードの形式に直す。
+#
+# できた像はカーネルにも C 配列として埋め込む。検査が「実身に書いて
+# cre_prc する」ところまでを本物の経路で通せるようにするため。
+# --------------------------------------------------------------------------
+set(BTRON_USER_OBJ "${CMAKE_CURRENT_BINARY_DIR}/user_hello.c")
+
+if(BTRON_ARCH STREQUAL "arm64")
+  add_executable(btron-user-hello
+    src/lib/sys/crt0.S
+    src/lib/sys/syscall.c
+    src/user/hello.c)
+  target_link_libraries(btron-user-hello PRIVATE btron_flags btron_headers)
+  target_link_options(btron-user-hello PRIVATE
+    -nostdlib -static
+    "-Wl,-T,${CMAKE_CURRENT_SOURCE_DIR}/src/user/user.ld"
+    -Wl,--build-id=none)
+  set_target_properties(btron-user-hello PROPERTIES
+    LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/user/user.ld")
+
+  add_custom_command(
+    OUTPUT "${BTRON_USER_OBJ}"
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/mkobj.py"
+            "$<TARGET_FILE:btron-user-hello>"
+            --arch ${BTRON_ARCH}
+            --out "${CMAKE_CURRENT_BINARY_DIR}/user_hello.obj"
+            --c-array "${BTRON_USER_OBJ}"
+    DEPENDS btron-user-hello
+            "${CMAKE_CURRENT_SOURCE_DIR}/tools/mkobj.py"
+    COMMENT "実行プログラムレコードを生成"
+    VERBATIM)
+endif()
+
+# --------------------------------------------------------------------------
 # カーネル (Phase 1)
 #
 # いまのところ arm64 のみ。起動してシリアルに出し、実行時に設計上の
@@ -155,6 +194,7 @@ if(BTRON_ARCH STREQUAL "arm64")
     src/kernel/periph/event.c
     src/kernel/periph/device.c
     src/kernel/periph/file.c
+    src/kernel/periph/exec.c
     src/kernel/fs/btronfs.c
     src/drivers/serial/serdev.c
     src/drivers/ramdisk/ramdisk.c
@@ -164,6 +204,8 @@ if(BTRON_ARCH STREQUAL "arm64")
     src/kernel/periph/system.c
     src/kernel/core/time.c
     src/kernel/core/intc.c
+    src/kernel/core/syscall.c
+    "${BTRON_USER_OBJ}"
     src/kernel/core/selftest.c
     src/kernel/boot/bootinfo.c
     src/kernel/boot/machdesc.c
@@ -291,6 +333,14 @@ if(TARGET btron-kernel)
             --expect "BTRON3 準拠 OS — UEFI ローダ"
             --expect "起動経路  : UEFI"
             --expect "ハード記述: ACPI"
+            # ユーザ特権 (EL0) の経路。**ここが通らなければ保護が無い。**
+            --expect "[EL0] ユーザプログラムが動いています"
+            --expect "[EL0] 起動メッセージ: BTRON"
+            --expect "[EL0] カーネル番地は断られました"
+            # システムコールを通さずカーネル番地を読んだプロセスが
+            # 落とされること（カーネルは生き残る）。
+            --expect "ユーザプログラムの異常"
+            --deny   "読めてしまいました"
             --deny   "[ FAIL ]"
             --deny   "ローダ異常終了"
             "${BTRON_DISK_IMAGE}")

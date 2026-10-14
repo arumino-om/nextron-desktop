@@ -144,6 +144,9 @@ LOCAL UD attr_to_desc(UW attr)
 
 	if (attr & BTRON_PG_USER) {
 		d |= (attr & BTRON_PG_WRITE) ? D_AP_RW_ALL : D_AP_RO_ALL;
+		/* **ユーザのページをカーネル特権で実行させない。**
+		 * ユーザが用意したコードへ飛ばされても EL1 では走らない。 */
+		d |= D_PXN;
 	} else {
 		d |= (attr & BTRON_PG_WRITE) ? D_AP_RW_EL1 : D_AP_RO_EL1;
 		d |= D_UXN; /* EL1 専用のページを EL0 から実行させない */

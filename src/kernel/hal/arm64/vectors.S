@@ -78,8 +78,8 @@ btron_vectors:
     ENTRY_PAD .Lirq
     ENTRY_PAD .Lirq
     ENTRY_PAD .Lsync
-    /* Lower EL using AArch64 */
-    ENTRY_PAD .Lsync
+    /* Lower EL using AArch64 — **ここが EL0 からの入口** */
+    ENTRY_PAD .Lsync_el0
     ENTRY_PAD .Lirq
     ENTRY_PAD .Lirq
     ENTRY_PAD .Lsync
@@ -91,6 +91,45 @@ btron_vectors:
 
 .Lsync:
     /* 同期例外と SError。握りつぶして情報だけ出す。復帰はしない。 */
+    mrs     x0, esr_el1
+    mrs     x1, far_el1
+    mrs     x2, elr_el1
+    b       hal_exception_report
+
+/*
+ * EL0 からの同期例外。
+ *
+ * **ほとんどは svc（システムコール）**で、それ以外はユーザプログラムの
+ * 誤りである。前者は処理して戻し、後者はそのプロセスだけを落とす。
+ * カーネルごと止めてはならない —— 保護の意味が無くなる。
+ *
+ * システムコールの約束 (本OS の ABI):
+ *   x8       システムコール番号
+ *   x0〜x5   引数
+ *   x0       戻り値
+ */
+.Lsync_el0:
+    SAVE_IRQ_FRAME
+    mrs     x9, esr_el1
+    lsr     x9, x9, #26             /* EC */
+    cmp     x9, #0x15               /* SVC from AArch64 */
+    b.ne    .Lfault_el0
+
+    ldp     x0, x1, [sp, #0x00]
+    ldp     x2, x3, [sp, #0x10]
+    ldp     x4, x5, [sp, #0x20]
+    ldr     x6, [sp, #0x40]         /* 退避した x8 = 番号 */
+    bl      btron_syscall_entry
+    str     x0, [sp, #0x00]         /* 戻り値を x0 の退避位置へ */
+    RESTORE_IRQ_FRAME
+    eret
+
+.Lfault_el0:
+    mrs     x0, esr_el1
+    mrs     x1, far_el1
+    mrs     x2, elr_el1
+    bl      hal_user_fault
+    /* 戻ってきた = プロセスを落とせなかった。カーネルの例外として扱う。 */
     mrs     x0, esr_el1
     mrs     x1, far_el1
     mrs     x2, elr_el1
