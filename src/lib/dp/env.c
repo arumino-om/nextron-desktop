@@ -321,6 +321,53 @@ EXPORT GID gopn_dev(CONST TC *dev, CONST B *par)
 	return gid;
 }
 
+/* 画面全体を指す描画環境を、GID を消費せずに組む（dpi.h）。
+ *
+ * ポインタ制御 (§2.6) 用。ポインタは「スクリーン上の表示にオーバーラップ
+ * する形で表示される」画面全体で 1 つの資源で、どの GID にも属さない。
+ * `gopn_dev` で GID を 1 つ食うと、アプリが使える数が減ってしまう。
+ *
+ * **クリッピングも前置長方形も掛けない。** ポインタは手前の窓の上にも
+ * 出なければならないので、そのための仕掛けを通してはいけない。 */
+EXPORT Bool dp_screen_env(DEnv *e)
+{
+	DEVSPEC sp;
+	CONST Screen *s;
+	BMP b;
+
+	if (!dp_ready) {
+		(void)gini_dsp(0);
+	}
+	if (!screen_spec(&sp)) {
+		return False;
+	}
+	s = screen();
+	if (s == 0) {
+		return False;
+	}
+	b.planes = 1;
+	b.pixbits = (UH)sp.pixbits;
+	b.rowbytes = (UH)s->pitch;
+	b.bounds.c.left = 0;
+	b.bounds.c.top = 0;
+	b.bounds.c.right = (H)s->width;
+	b.bounds.c.bottom = (H)s->height;
+	b.baseaddr[0] = (UB *)(VP)s->base;
+
+	if (!set_bitmap(e, &b)) {
+		return False;
+	}
+	name_set(e->dev, DP_DEV_SCREEN);
+	e->spec = sp;
+	e->has_spec = True;
+	spec_to_cspec(&sp, &e->cspec);
+	e->has_cspec = True;
+	init_fields(e);
+	e->owner = 0;
+	e->used = True;
+	return True;
+}
+
 EXPORT GID gopn_mem(CONST TC *dev, BMP *bmap, CONST B *par)
 {
 	DEVSPEC sp;

@@ -185,7 +185,8 @@ if(BTRON_ARCH STREQUAL "arm64")
     src/lib/dp/env.c
     src/lib/dp/draw.c
     src/lib/dp/bitmap.c
-    src/lib/dp/text.c)
+    src/lib/dp/text.c
+    src/lib/dp/pointer.c)
 
   target_link_libraries(btron-kernel PRIVATE btron_flags btron_headers btron_test)
   set_target_properties(btron-kernel PROPERTIES OUTPUT_NAME "btron-arm64" SUFFIX ".elf")

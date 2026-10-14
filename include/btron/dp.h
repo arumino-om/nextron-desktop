@@ -481,4 +481,96 @@ IMPORT WERR gdra_chp(GID gid, W x, W y, TC ch, DCM mode);
 IMPORT WERR gdra_str(GID gid, CONST TC *str, W len, DCM mode);
 IMPORT WERR gdra_stp(GID gid, W x, W y, CONST TC *str, W len, DCM mode);
 
+/* ------------------------------------------------------------------ */
+/* ポインタ制御 (§2.6)                                                 */
+/*                                                                     */
+/* ポインタは「スクリーン上の表示にオーバーラップする形で表示される」  */
+/* 特殊な図形で、描画環境 (GID) に属さない**画面全体で 1 つ**の資源。   */
+/* だから他の関数と違って gid を取らない。                             */
+/* ------------------------------------------------------------------ */
+
+typedef W PTRSTL; /* ポインタの形状 */
+
+/* 標準ポインタ形状。≧0 がシステム定義、<0 がアプリ定義。 */
+#define PS_SELECT 0 /* 選択指 */
+#define PS_MODIFY 1 /* 修正選択指 */
+#define PS_MOVE 2   /* 移動手 */
+#define PS_VMOVE 3  /* 移動手（縦方向） */
+#define PS_HMOVE 4  /* 移動手（横方向） */
+#define PS_GRIP 5   /* 握り（移動ドラッグ中） */
+#define PS_VGRIP 6
+#define PS_HGRIP 7
+#define PS_RSIZ 8 /* 変形手 */
+#define PS_VRSIZ 9
+#define PS_HRSIZ 10
+#define PS_PICK 11 /* つまみ（変形ドラッグ中） */
+#define PS_VPICK 12
+#define PS_HPICK 13
+#define PS_BUSY 14 /* 湯のみ（待ち状態） */
+#define PS_MENU 15 /* プリメニュー */
+#define PS_STD_COUNT 16
+
+typedef struct PointerStatus {
+	PNT pos;      /* 現在のポインタの座標位置（スクリーン絶対座標） */
+	PTRSTL style; /* ポインタの形状 */
+	COLOR fgcol;  /* 前景色 */
+	COLOR bgcol;  /* 背景色 */
+	W motion;     /* 追従状態 (0:非追従、1:追従) */
+	W hidden;     /* 消去要求数。0 なら表示されている */
+	W size;       /* ポインタサイズ（16, 24, 32 等） */
+} PTRSTS;
+
+#define MAX_PTR_SIZE 64 /* ポインタイメージデータの一辺の上限 */
+#define P_SIZE ((MAX_PTR_SIZE * MAX_PTR_SIZE) / 8)
+
+/* ポインタイメージ。
+ *
+ * data と mask の組で表示が決まる（仕様 §2.6.2）。
+ *
+ *   data mask  表示
+ *    0    1    背景色
+ *    1    1    前景色
+ *    0    0    元のイメージのまま（透明）
+ *    1    0    元のイメージの反転 (XOR)
+ *
+ * ビットマップとしての形は planes=1 / rowbytes=((n+15)÷16)×2 /
+ * bounds=(0,0,n,n)。n はポインタサイズ。 */
+typedef struct PointerImage {
+	PNT hotpt; /* ホットポイント。イメージ長方形の左上を (0,0) とする */
+	SIZE size; /* ポインタサイズ */
+	UB data[P_SIZE];
+	UB mask[P_SIZE];
+} PTRIMG;
+
+/* 初期状態（表示・style=0・既定色・追従）にしてPDの位置に表示する。 */
+IMPORT ERR gini_ptr(void);
+
+/* 消去 (req=0) / 表示 (req>0) / 強制表示 (req<0)。
+ * 戻り値は結果としての消去要求数。0 なら表示されている。 */
+IMPORT ERR gdsp_ptr(W req);
+
+/* 形状と色。style<0 なら img が有効、style≧0 なら img は無視。
+ * fgcol<0 / bgcol<0 はそれぞれ既定色の指定。 */
+IMPORT ERR gset_ptr(PTRSTL style, PTRIMG *img, COLOR fgcol, COLOR bgcol);
+
+/* 非追従状態のときだけ位置を動かす。戻り値は追従状態 (0:非追従/1:追従)。 */
+IMPORT ERR gmov_ptr(PNT pos);
+
+/* 追従 (sts≠0) / 非追従 (sts=0) の設定。 */
+IMPORT ERR gmot_ptr(W sts);
+
+/* 状態と形状の取り出し。戻り値はポインタのサイズ。 */
+IMPORT W gget_ptr(PTRSTS *sts, PTRIMG *img);
+
+/* ------------------------------------------------------------------ */
+/* 以下は BTRON3 の API ではない。本OS 内部の口                         */
+/* ------------------------------------------------------------------ */
+
+/* 追従状態なら、ポインティングデバイスの現在位置へポインタを動かす。
+ *
+ * **誰かが周期的に呼ぶ必要がある。** 割込みハンドラから画面を書くのは
+ * 避けたいので、ドライバではなくウィンドウマネージャの主ループが呼ぶ。
+ * BTRON の「システムがポインタを動かす」をそこで実現している。 */
+IMPORT void gptr_follow(void);
+
 #endif /* __BTRON_DP_H__ */

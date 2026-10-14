@@ -1409,7 +1409,24 @@ EXPORT W wget_evt(WEVENT *evt, W mode)
 		}
 		if (t == EV_NULL) {
 			if ((mode & W_NOWAIT) != 0) {
-				evt->e = ev;
+				/* 仕様「有効なイベントが何も存在していない場合に
+				 * 得られるイベントであり、PD の位置するウィンドウ
+				 * ID、位置コード、および PD の現在位置が設定されて
+				 * いる」。**ヌルイベントにも窓と位置コードが載る。**
+				 * 主ループはこれだけで「いまどこを指しているか」が
+				 * 分かる。 */
+				W nw = 0;
+				PNT nl;
+				W nc = wfnd_wnd(&ev.pos, &nl, &nw);
+
+				evt->s.type = EV_NULL;
+				evt->s.time = ev.time;
+				evt->s.pos = (nw != 0 && (mode & W_DRGEVT) == W_DRGEVT)
+				                 ? nl
+				                 : ev.pos;
+				evt->s.cmd = (H)((nc < 0) ? W_WORK : nc);
+				evt->s.wid = (H)nw;
+				evt->s.stat = ev.stat;
 				return EV_NULL;
 			}
 			/* **待つが、イベントは別のタスクが入れる。**
@@ -1442,28 +1459,44 @@ EXPORT W wget_evt(WEVENT *evt, W mode)
 		evt->e = ev;
 		return t; /* どのウィンドウでもない場所 */
 	}
-	/* 入力受付状態でないウィンドウが押された → 切換イベント。
-	 * 仕様の W_SWITCH がこれ。 */
+	/* **切換イベントになるのはプレスで、かつ実際に切り換わったときだけ。**
+	 *
+	 * 仕様 §3.1.2.2 の EV_SWITCH の説明:
+	 *   「位置コードの場合は、PD のプレスにより入力受付状態の切換えが
+	 *     発生したことを意味し、プレスした位置の位置コード、および
+	 *     相対座標位置が入っている」
+	 *   「このイベントを取り出した時点では、既に wid で示される
+	 *     ウィンドウに入力受付状態は切り換わっており」
+	 *
+	 * つまり
+	 *   - リリース (EV_BUTUP) は常に EV_BUTUP。仕様の EV_BUTUP の説明も
+	 *     「PD のリリースにより発生するイベント」で切換には触れていない
+	 *   - 入力受付状態のウィンドウを押したら、枠の上でも EV_BUTDWN
+	 *     （EV_BUTDWN の説明「対応するウィンドウが現在入力受付状態の
+	 *     主ウィンドウまたは従属ウィンドウである場合に得られる」）。
+	 *     どこを押したかは wfnd_wnd で引ける
+	 *   - cmd は W_SWITCH ではなく**押した位置の位置コード**。W_SWITCH は
+	 *     アプリからの要求やパネルのクローズによる切換のときの値
+	 *   - 切換は**マネージャが行う**。アプリが wswi_wnd を呼ぶのではない
+	 */
 	if (t == EV_BUTDWN && class_of(hit) > WC_ACTMAIN) {
+		Window *hw = get(hit);
+
+		/* 従属ウィンドウや前面ウィンドウは主ウィンドウ間の切換の
+		 * 対象外。activate() が扱えるものだけ切り換える。 */
+		if (hw != 0 && (hw->attr & (WA_SUBW | WA_FRONT)) == 0) {
+			activate(hit);
+		}
 		evt->s.type = EV_SWITCH;
 		evt->s.time = ev.time;
-		evt->s.pos = ev.pos;
-		evt->s.cmd = W_SWITCH;
-		evt->s.wid = (H)hit;
-		evt->s.stat = ev.stat;
-		return EV_SWITCH;
-	}
-	/* 枠・タイトル・バーの上 → 位置コードを入れた切換イベント。 */
-	if (pos_code != W_WORK) {
-		evt->s.type = EV_SWITCH;
-		evt->s.time = ev.time;
-		evt->s.pos = ev.pos;
+		evt->s.pos = ((mode & W_DRGEVT) == W_DRGEVT) ? lpos : ev.pos;
 		evt->s.cmd = (H)pos_code;
 		evt->s.wid = (H)hit;
 		evt->s.stat = ev.stat;
 		return EV_SWITCH;
 	}
-	/* 作業領域の中。相対座標に直して渡す指定なら直す。 */
+	/* 入力受付状態のウィンドウ。生イベントとして渡す。
+	 * 相対座標に直して渡す指定なら直す。 */
 	evt->e = ev;
 	if ((mode & W_DRGEVT) == W_DRGEVT) {
 		evt->e.pos = lpos;

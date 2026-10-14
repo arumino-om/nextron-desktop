@@ -139,6 +139,24 @@ python3 tools/run_qemu.py --arch arm64 --uefi --timeout 30 \
 記述しているのは Device Tree だけで、ACPI では DSDT の AML の中にあり、
 まだ読めないためです（docs/tasks.md の T1-15）。
 
+`--gui` の窓では**実際に触れます**。ポインタを動かすと矢印が追従し、
+奥の窓を押すと手前に出て、右の窓で押しながら動かすと点が描けます。
+キーを打つと左の窓の下に出ます。
+
+表示の無い環境でも、入力を流し込んで結果を撮れます。
+
+```sh
+python3 tools/run_qemu.py --arch arm64 --uefi --timeout 60 --input \
+        --screenshot /tmp/shots --send-after 12 \
+        --send "ptr 12000 20000" --send "sendkey b" \
+        --send "press" --send "ptr 17000 24000" --send "release" \
+        build/arm64/btron-arm64-gui.img
+```
+
+`ptr X Y` は QEMU の絶対座標 (0〜32767) で、画素への換算はゲスト側の
+仕事です。`press` / `release` はボタン、それ以外は QEMU モニタの命令
+（`sendkey a` など）として送られます。
+
 ### 実行
 
 ```sh

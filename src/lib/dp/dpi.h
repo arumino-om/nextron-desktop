@@ -108,6 +108,10 @@ IMPORT void dp_plot(CONST DEnv *e, CONST RECT *clip, W rx, W ry, UW src,
 #define DP_ABS_X(e, x) ((x) - (e)->bmp.bounds.c.left)
 #define DP_ABS_Y(e, y) ((y) - (e)->bmp.bounds.c.top)
 
+/* 画面全体を指す描画環境を GID を消費せずに組む。pointer.c が使う。
+ * クリッピングも前置長方形も掛けない。 */
+IMPORT Bool dp_screen_env(DEnv *e);
+
 /* 文字描画の内部。text.c が使う。 */
 IMPORT CONST FontShared *dp_font(void);
 

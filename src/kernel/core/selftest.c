@@ -637,6 +637,7 @@ LOCAL W fontman_pid;  /* 立てたフォントマネージャ。最後に止め�
 LOCAL W fontman_por;
 LOCAL GID dpt_gid;    /* メモリ描画環境 */
 LOCAL GID dpt_sgid;   /* 画面の描画環境 */
+LOCAL PTRIMG ptr_img; /* ポインタイメージ。1KB 超なのでスタックに置かない */
 
 LOCAL CONST TC nm_screen[] = {(TC)'S', (TC)'C', (TC)'R', (TC)'E', (TC)'E',
                               (TC)'N', TNULL};
@@ -4353,6 +4354,209 @@ LOCAL void run_proc_tests(void)
 	});
 
 	/* -------------------------------------------------------------- */
+	/* §2.6 ポインタ制御                                              */
+	/* -------------------------------------------------------------- */
+
+	BTRON_TEST("ポインタの状態遷移 (§2.6.3)", {
+		PTRSTS ps;
+
+		BTRON_CHECK("初期化", gini_ptr() == EG_OK);
+		BTRON_CHECK("初期状態",
+		            gget_ptr(&ps, 0) == 16 && ps.style == PS_SELECT &&
+		                ps.motion == 1 && ps.hidden == 0);
+
+		/* 仕様「消去要求では、ポインタの消去要求数を＋１して消去する。
+		 * 表示要求では、表示要求数が 0 でない場合、−１して 0 になった
+		 * 場合に表示を行なう」。**カウンタであることが肝。**
+		 * 単なる真偽値にすると、入れ子になった描画で早く出てしまう。 */
+		BTRON_CHECK("消去で 1", gdsp_ptr(0) == 1);
+		BTRON_CHECK("もう一度消去で 2", gdsp_ptr(0) == 2);
+		BTRON_CHECK("表示で 1", gdsp_ptr(1) == 1);
+		BTRON_CHECK("まだ消えている", gget_ptr(&ps, 0) == 16 &&
+		                                  ps.hidden == 1);
+		BTRON_CHECK("表示で 0", gdsp_ptr(1) == 0);
+		/* 0 のときに表示要求を出しても負にはならない。 */
+		BTRON_CHECK("0 から下がらない", gdsp_ptr(1) == 0);
+		BTRON_CHECK("消去を 3 回", gdsp_ptr(0) == 1 && gdsp_ptr(0) == 2 &&
+		                               gdsp_ptr(0) == 3);
+		/* 仕様「強制表示要求では、表示要求数を 0 としてポインタの表示を
+		 * 行なう」。入れ子を数え損ねたときの逃げ道。 */
+		BTRON_CHECK("強制表示で 0", gdsp_ptr(-1) == 0);
+
+		/* 追従 / 非追従。 */
+		BTRON_CHECK("非追従にする", gmot_ptr(0) == EG_OK);
+		BTRON_CHECK("状態が変わった",
+		            gget_ptr(&ps, 0) == 16 && ps.motion == 0);
+		/* 仕様「非追従の時に非追従指定を行なった場合は何もしない」 */
+		BTRON_CHECK("もう一度非追従", gmot_ptr(0) == EG_OK);
+		BTRON_CHECK("追従に戻す", gmot_ptr(1) == EG_OK);
+		/* 仕様「追従状態の場合は、何もしない。関数値は 1」 */
+		{
+			PNT z;
+
+			z.x = 0;
+			z.y = 0;
+			BTRON_CHECK("追従中は動かせない", gmov_ptr(z) == 1);
+		}
+	});
+
+	BTRON_TEST("ポインタ形状の指定 (§2.6.3 gset_ptr)", {
+		PTRSTS ps;
+		W i;
+
+		for (i = 0; i < PS_STD_COUNT; i++) {
+			if (gset_ptr(i, 0, COL_BLACK, COL_WHITE) != EG_OK) {
+				BTRON_CHECK("標準形状の設定", False);
+			}
+		}
+		BTRON_CHECK("形状が入った",
+		            gget_ptr(&ps, 0) == 16 && ps.style == PS_MENU);
+		/* 仕様「= 16 〜 : 予約」 */
+		BTRON_CHECK("予約された形状",
+		            gset_ptr(PS_STD_COUNT, 0, COL_BLACK, COL_WHITE) ==
+		                EG_PAR);
+		/* 仕様「style<0 の場合は、img で指定したポインタイメージが有効」。
+		 * アドレスを渡さなければ EG_ADR。 */
+		BTRON_CHECK("イメージが無い",
+		            gset_ptr(-1, 0, COL_BLACK, COL_WHITE) == EG_ADR);
+
+		ptr_img.hotpt.x = 0;
+		ptr_img.hotpt.y = 0;
+		ptr_img.size.h = 0;
+		ptr_img.size.v = 0;
+		BTRON_CHECK("大きさ 0",
+		            gset_ptr(-1, &ptr_img, COL_BLACK, COL_WHITE) == EG_PAR);
+		ptr_img.size.h = MAX_PTR_SIZE + 1;
+		ptr_img.size.v = MAX_PTR_SIZE + 1;
+		BTRON_CHECK("大きさが上限超え",
+		            gset_ptr(-1, &ptr_img, COL_BLACK, COL_WHITE) == EG_PAR);
+		/* ポインタ形状は正方形として定義されている。 */
+		ptr_img.size.h = 8;
+		ptr_img.size.v = 16;
+		BTRON_CHECK("正方形でない",
+		            gset_ptr(-1, &ptr_img, COL_BLACK, COL_WHITE) == EG_PAR);
+		ptr_img.size.h = 8;
+		ptr_img.size.v = 8;
+		ptr_img.hotpt.x = 8;
+		BTRON_CHECK("ホットポイントが外",
+		            gset_ptr(-1, &ptr_img, COL_BLACK, COL_WHITE) == EG_PAR);
+		ptr_img.hotpt.x = 0;
+		for (i = 0; i < P_SIZE; i++) {
+			ptr_img.data[i] = 0;
+			ptr_img.mask[i] = 0;
+		}
+		BTRON_CHECK("8x8 のイメージを設定",
+		            gset_ptr(-1, &ptr_img, COL_BLACK, COL_WHITE) == EG_OK);
+		BTRON_CHECK("サイズが追従する",
+		            gget_ptr(&ps, 0) == 8 && ps.style == -1);
+		/* 片付け。以後の検査は標準形状で動かす。 */
+		BTRON_CHECK("標準形状に戻す",
+		            gset_ptr(PS_SELECT, 0, COL_BLACK, COL_WHITE) == EG_OK);
+	});
+
+	BTRON_TEST("ポインタは下地を壊さない (§2.6.2)", {
+		GID sg = gopn_dev(nm_screen, 0);
+		RECT bnd;
+		PIXVAL mark = 0x00123456;
+		PIXVAL v;
+		PNT at;
+		PNT pfg;
+		PNT pbg;
+		PNT ptr;
+		W i;
+
+		/* 画面が無い構成では何も確かめられない。**その場合でも
+		 * 上の状態遷移の検査は走っている**（規律 R27: 構成に依る
+		 * 検査と依らない検査を混ぜない）。 */
+		if (sg >= 1 && gget_bnd(sg, &bnd) == EG_OK &&
+		    bnd.c.right > 200 && bnd.c.bottom > 200) {
+			/* 選択指 (PS_SELECT) の先端は (0,0) で、絵は
+			 *   行 0 = "X..............."
+			 *   行 1 = "XX.............."
+			 * なので、ホットポイントを (100,100) に置くと
+			 *   (100,100)  data=1 mask=1 → 前景色
+			 *   (102,101)  data=0 mask=1 → 背景色（自動の縁取り）
+			 *   (115,100)  data=0 mask=0 → 透明（下地のまま）
+			 * になる。3 通りすべてを 1 度に確かめられる。 */
+			at.x = 100;
+			at.y = 100;
+			pfg.x = 100;
+			pfg.y = 100;
+			pbg.x = 102;
+			pbg.y = 101;
+			ptr.x = 115;
+			ptr.y = 100;
+
+			BTRON_CHECK("非追従にする", gmot_ptr(0) == EG_OK);
+			BTRON_CHECK("強制表示", gdsp_ptr(-1) == 0);
+			/* いったん画面の外へ逃がしてから下地を作る。
+			 * 置いたままだと退避した下地が古くなる。 */
+			{
+				PNT far;
+
+				far.x = (H)(bnd.c.right - 1);
+				far.y = (H)(bnd.c.bottom - 1);
+				BTRON_CHECK("端へ寄せる", gmov_ptr(far) == 0);
+			}
+			BTRON_CHECK("下地を置く",
+			            gdra_pnt(sg, pfg, mark, G_STORE) == EG_OK &&
+			                gdra_pnt(sg, pbg, mark, G_STORE) == EG_OK &&
+			                gdra_pnt(sg, ptr, mark, G_STORE) == EG_OK);
+
+			BTRON_CHECK("そこへ動かす", gmov_ptr(at) == 0);
+			BTRON_CHECK("先端は前景色（黒 = 0）",
+			            gtst_pnt(sg, pfg, &v) == 0 && v == 0);
+			BTRON_CHECK("縁は背景色（白）",
+			            gtst_pnt(sg, pbg, &v) == 0 &&
+			                (UW)v == 0x00FFFFFFU);
+			BTRON_CHECK("透明な所は下地のまま",
+			            gtst_pnt(sg, ptr, &v) == 0 && v == mark);
+
+			/* **ここが save-under の検査。**消したら元に戻ること。 */
+			BTRON_CHECK("消す", gdsp_ptr(0) == 1);
+			BTRON_CHECK("先端が戻った",
+			            gtst_pnt(sg, pfg, &v) == 0 && v == mark);
+			BTRON_CHECK("縁が戻った",
+			            gtst_pnt(sg, pbg, &v) == 0 && v == mark);
+
+			/* data=1 mask=0 は反転 (XOR)。標準形状には現れないので
+			 * アプリ定義イメージで確かめる。 */
+			ptr_img.hotpt.x = 0;
+			ptr_img.hotpt.y = 0;
+			ptr_img.size.h = 8;
+			ptr_img.size.v = 8;
+			for (i = 0; i < P_SIZE; i++) {
+				ptr_img.data[i] = 0xFF; /* 全部 1 */
+				ptr_img.mask[i] = 0;    /* 全部 0 */
+			}
+			BTRON_CHECK("反転イメージを設定",
+			            gset_ptr(-1, &ptr_img, COL_BLACK, COL_WHITE) ==
+			                EG_OK);
+			BTRON_CHECK("出す", gdsp_ptr(-1) == 0);
+			BTRON_CHECK("下地が反転した",
+			            gtst_pnt(sg, pfg, &v) == 0 &&
+			                (UW)v == ((UW)mark ^ 0x00FFFFFFU));
+			BTRON_CHECK("消すと戻る",
+			            gdsp_ptr(0) == 1 &&
+			                gtst_pnt(sg, pfg, &v) == 0 && v == mark);
+
+			BTRON_CHECK("標準形状に戻す",
+			            gset_ptr(PS_SELECT, 0, COL_BLACK, COL_WHITE) ==
+			                EG_OK);
+			/* 画面の外は EG_PAR。 */
+			{
+				PNT out;
+
+				out.x = (H)bnd.c.right;
+				out.y = 0;
+				BTRON_CHECK("画面の外", gmov_ptr(out) == EG_PAR);
+			}
+			BTRON_CHECK("追従に戻す", gmot_ptr(1) == EG_OK);
+			BTRON_CHECK("閉じる", gcls_env(sg) == EG_OK);
+		}
+	});
+
+	/* -------------------------------------------------------------- */
 	/* §1.7 イベント管理                                              */
 	/* -------------------------------------------------------------- */
 
@@ -5367,21 +5571,68 @@ LOCAL void run_proc_tests(void)
 			(void)wget_sts(win_w1, &st, 0);
 
 			/* **入力受付状態でないウィンドウ (win_w1) を押すと
-			 * 切換イベントになる。** 仕様の W_SWITCH。 */
+			 * 切換イベントになる。**
+			 *
+			 * 仕様「位置コードの場合は、PD のプレスにより入力受付
+			 * 状態の切換えが発生したことを意味し、プレスした位置の
+			 * 位置コードが入っている」。つまり cmd は W_SWITCH では
+			 * なく**押した場所の位置コード**で、W_SWITCH はアプリから
+			 * の要求による切換のときの値。 */
+			/* win_w1 は (10,10)-(210,150)、win_w2 は (60,60)-(260,200)。
+			 * win_w2 に隠れていない所を押す。 */
 			ev.type = EV_BUTDWN;
 			ev.time = 0;
-			ev.pos.x = (H)(st.r.c.left + 8);
-			ev.pos.y = (H)(st.r.c.bottom - 8);
+			ev.pos.x = 40;
+			ev.pos.y = 100;
 			ev.data.info = 0;
 			ev.stat = ES_BUT;
 			BTRON_CHECK("ボタンを押す", put_evt(&ev, EP_TIME) == ER_OK);
 			t = wget_evt(&we, W_NOWAIT);
 			BTRON_CHECK("切換イベント", t == EV_SWITCH);
-			BTRON_CHECK("コマンド", we.s.cmd == W_SWITCH);
+			BTRON_CHECK("コマンドは位置コード",
+			            we.s.cmd >= W_WORK && we.s.cmd <= W_LBAR);
+			BTRON_CHECK("W_SWITCH ではない", we.s.cmd != W_SWITCH);
 			BTRON_CHECK("対象ウィンドウ", we.s.wid == (H)win_w1);
+			/* 仕様「このイベントを取り出した時点では、既に wid で
+			 * 示されるウィンドウに入力受付状態は切り換わっており」。
+			 * **アプリが wswi_wnd を呼ぶのではない。** */
+			BTRON_CHECK("もう切り換わっている", wget_act(0) == win_w1);
+
+			/* 入力受付状態になったウィンドウをもう一度押すと、
+			 * 切換は起きないので生イベントになる。
+			 * 枠の上でも同じ（仕様の EV_BUTDWN の条件）。 */
+			BTRON_CHECK("もう一度押す", put_evt(&ev, EP_TIME) == ER_OK);
+			BTRON_CHECK("今度は生イベント",
+			            wget_evt(&we, W_NOWAIT) == EV_BUTDWN);
+			ev.type = EV_BUTUP;
+			BTRON_CHECK("離す", put_evt(&ev, EP_TIME) == ER_OK);
+			/* 仕様「EV_BUTUP は PD のリリースにより発生するイベント」。
+			 * **切換イベントにはならない。** */
+			BTRON_CHECK("リリースは常に生イベント",
+			            wget_evt(&we, W_NOWAIT) == EV_BUTUP);
+
+			/* **入力受付状態でない窓の上で離しても同じ。**
+			 * ここを押し下げと同じ扱いにすると、ドラッグして別の窓で
+			 * 手を離しただけで入力受付状態が飛んでいく。
+			 * （入力受付状態の窓で離す経路だけ見ていると気づけない。） */
+			ev.pos.x = 230;
+			ev.pos.y = 170;
+			BTRON_CHECK("別の窓の上で離す",
+			            put_evt(&ev, EP_TIME) == ER_OK);
+			BTRON_CHECK("やはり生イベント",
+			            wget_evt(&we, W_NOWAIT) == EV_BUTUP);
+			BTRON_CHECK("入力受付状態は動かない", wget_act(0) == win_w1);
+			ev.type = EV_BUTDWN;
+
+			/* win_w2 を押し直して入力受付状態を戻す。
+			 * いまは win_w1 が手前なので、重なっていない所を選ぶ。 */
+			ev.pos.x = 230;
+			ev.pos.y = 170;
+			(void)put_evt(&ev, EP_TIME);
+			BTRON_CHECK("戻す", wget_evt(&we, W_NOWAIT) == EV_SWITCH);
+			BTRON_CHECK("入力受付状態が戻った", wget_act(0) == win_w2);
 
 			/* 入力受付状態のウィンドウの作業領域を押すと生イベント。 */
-			(void)wget_sts(win_w2, &st, 0);
 			ev.pos.x = (H)((st.r.c.left + st.r.c.right) / 2);
 			ev.pos.y = (H)((st.r.c.top + st.r.c.bottom) / 2);
 			(void)put_evt(&ev, EP_TIME);
@@ -5393,10 +5644,35 @@ LOCAL void run_proc_tests(void)
 			BTRON_CHECK("相対座標",
 			            t == EV_BUTDWN && we.e.pos.x < ev.pos.x);
 
-			/* 何も無ければ EV_NULL（W_NOWAIT のとき）。 */
+			/* 何も無ければ EV_NULL（W_NOWAIT のとき）。
+			 * 仕様「PD の位置するウィンドウ ID、位置コード、および
+			 * PD の現在位置が設定されている」「PD の位置にウィンドウが
+			 * 存在しない場合はウィンドウ ID = 0」。 */
 			(void)clr_evt(EM_ALL, EM_NULL);
 			BTRON_CHECK("空なら EV_NULL",
 			            wget_evt(&we, W_NOWAIT) == EV_NULL);
+			{
+				PNT at;
+
+				/* **set_pdp は使えない。**入力装置が絶対動作タイプ
+				 * だと仕様により位置設定が断られる (§1.7.3)。
+				 * ドライバの口から入れる。 */
+				at.x = 0;
+				at.y = 0;
+				evt_pd_moved(at);
+				BTRON_CHECK("ヌルイベント",
+				            wget_evt(&we, W_NOWAIT) == EV_NULL);
+				/* 原点にはウィンドウが無い構成にしてある。 */
+				BTRON_CHECK("窓の外なら wid = 0", we.s.wid == 0);
+
+				at.x = 230;
+				at.y = 170;
+				evt_pd_moved(at);
+				BTRON_CHECK("窓の上",
+				            wget_evt(&we, W_NOWAIT) == EV_NULL &&
+				                we.s.wid == (H)win_w2 &&
+				                we.s.cmd == W_WORK);
+			}
 			BTRON_CHECK("アドレス不正", wget_evt(0, W_NOWAIT) == EX_ADR);
 			BTRON_CHECK("モード不正", wget_evt(&we, 0x100) == EX_PAR);
 		}

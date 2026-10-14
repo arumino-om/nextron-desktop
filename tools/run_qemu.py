@@ -43,6 +43,7 @@ PixelBltOnly を返すのでカーネルが画面を取れない（詳細 D8）�
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import socket
@@ -97,7 +98,7 @@ def input_args(arch: str) -> list[str]:
 
 def qemu_argv(arch: str, image: Path, interactive: bool, uefi: bool,
               machine: str, extra: list[str], gui: bool = False,
-              monitor: str = "") -> list[str]:
+              monitor: str = "", qmp: str = "") -> list[str]:
     if arch == "arm64":
         argv = [
             "qemu-system-aarch64",
@@ -141,6 +142,11 @@ def qemu_argv(arch: str, image: Path, interactive: bool, uefi: bool,
         argv += ["-kernel", str(image)]
 
     argv += extra
+    if qmp:
+        # 人間向けモニタ (HMP) には「絶対座標でポインタを動かす」命令が
+        # 無い。`mouse_move` は相対イベントを出すので、絶対座標タイプの
+        # タブレットには届かない。QMP の input-send-event なら届く。
+        argv += ["-qmp", f"unix:{qmp},server,nowait"]
     if monitor:
         # 画面を撮るためにモニタを UNIX ソケットへ出す。
         argv += ["-monitor", f"unix:{monitor},server,nowait",
@@ -195,6 +201,53 @@ def ppm_to_png(src: Path, dst: Path) -> tuple[int, int]:
     return w, h
 
 
+def qmp_connect(path: str, deadline: float):
+    """QMP につないで能力交渉まで済ませる。失敗したら None。"""
+    sk = None
+    while time.time() < deadline and sk is None:
+        try:
+            sk = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sk.connect(path)
+        except OSError:
+            sk = None
+            time.sleep(0.05)
+    if sk is None:
+        return None
+    sk.settimeout(2.0)
+    try:
+        sk.recv(65536)  # greeting
+        sk.sendall(b'{"execute":"qmp_capabilities"}\n')
+        sk.recv(65536)
+    except (socket.timeout, OSError):
+        return None
+    return sk
+
+
+def qmp_input(sk, spec: str) -> bool:
+    """`ptr X Y` / `press` / `release` を QMP の入力イベントに直す。
+
+    X, Y は QEMU の絶対座標 (0〜32767)。画面の画素ではない。
+    画素に直すのはゲスト側の仕事で、まさにそこを試したい。
+    """
+    parts = spec.split()
+    if parts[0] == "ptr" and len(parts) == 3:
+        ev = [{"type": "abs", "data": {"axis": "x", "value": int(parts[1])}},
+              {"type": "abs", "data": {"axis": "y", "value": int(parts[2])}}]
+    elif parts[0] in ("press", "release"):
+        btn = parts[1] if len(parts) > 1 else "left"
+        ev = [{"type": "btn",
+               "data": {"down": parts[0] == "press", "button": btn}}]
+    else:
+        return False
+    msg = {"execute": "input-send-event", "arguments": {"events": ev}}
+    sk.sendall((json.dumps(msg) + "\n").encode())
+    try:
+        sk.recv(65536)
+    except socket.timeout:
+        pass
+    return True
+
+
 def screenshot_run(args) -> int:
     """QEMU のモニタ経由で画面を撮り続ける。
 
@@ -206,10 +259,11 @@ def screenshot_run(args) -> int:
     outdir.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory() as tmp:
         sock = str(Path(tmp) / "mon.sock")
+        qsock = str(Path(tmp) / "qmp.sock") if args.send else ""
         raw = Path(tmp) / "frame.ppm"
         argv = qemu_argv(args.arch, args.image, False, args.uefi,
                          args.machine or DEFAULT_MACHINE[args.arch],
-                         args.extra, monitor=sock)
+                         args.extra, monitor=sock, qmp=qsock)
         print(f"$ {' '.join(argv)}\n", file=sys.stderr)
         proc = subprocess.Popen(argv, stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT, text=True)
@@ -230,8 +284,23 @@ def screenshot_run(args) -> int:
                 proc.kill()
                 sys.exit("QEMU のモニタにつながりませんでした")
             mon.settimeout(2.0)
+            qmp = qmp_connect(qsock, deadline) if qsock else None
+            started = time.time()
+            pending = list(args.send)
             while time.time() < deadline and proc.poll() is None:
                 try:
+                    # 入力を流し込む。**自己検査が終わるまで待つ**ので
+                    # --send-after は余裕を持った値にする。
+                    if pending and time.time() - started >= args.send_after:
+                        cmd = pending.pop(0)
+                        print(f"  > {cmd}", file=sys.stderr)
+                        if qmp is None or not qmp_input(qmp, cmd):
+                            mon.sendall((cmd + "\n").encode())
+                            time.sleep(0.2)
+                            try:
+                                mon.recv(65536)
+                            except socket.timeout:
+                                pass
                     mon.sendall(f"screendump {raw}\n".encode())
                     time.sleep(args.shot_interval)
                     try:
@@ -290,6 +359,15 @@ def main() -> int:
                     help="画面を PNG に落とす。窓は開かないので CI でも使える")
     ap.add_argument("--shot-interval", type=float, default=0.3, metavar="SEC",
                     help="--screenshot のとき、何秒ごとに撮るか")
+    ap.add_argument("--send", action="append", default=[], metavar="CMD",
+                    help="--screenshot のとき、1 コマに 1 つずつ順に送る"
+                         "入力（複数可）。"
+                         "'ptr X Y'（絶対座標 0〜32767）/ 'press' / 'release' は"
+                         " QMP の入力イベント、それ以外は QEMU モニタの命令"
+                         "（例 'sendkey a'）")
+    ap.add_argument("--send-after", type=float, default=12.0, metavar="SEC",
+                    help="--send を始めるまでの待ち時間。"
+                         "自己検査が終わるのを待つ")
     args = ap.parse_args()
 
     if not args.image.exists():
