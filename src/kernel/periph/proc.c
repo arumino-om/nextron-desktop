@@ -534,11 +534,20 @@ EXPORT WERR prc_create(PRCMAIN entry, W pri, CONST TC *name, CONST MESSAGE *msg)
 		p->has_as = True;
 	}
 
+	/* 仕様 §1.6.5「プロセスの環境として作業ファイル、ユーザ管理情報は
+	 * 子プロセスに継承される」。**ファイルディスクリプタと現在レコードは
+	 * 継承されない。** */
+	if (parent >= 1) {
+		fil_inherit(parent, p->pid);
+	}
+
 	c.exinf = (VP)p;
 	c.tskatr = TA_HLNG;
 	c.task = main_trampoline;
 	c.itskpri = prc_to_tskpri(pri);
-	c.stksz = TK_MIN_STKSZ * 2;
+	/* ファイル管理を呼ぶとブロックとエントリが何段も重なる。
+	 * 4KB では足りない（selftest.c の make_task と同じ理由）。 */
+	c.stksz = TK_MIN_STKSZ * 4;
 	c.sstksz = 0;
 	c.stkptr = 0;
 	c.bufptr = 0;
@@ -731,6 +740,11 @@ LOCAL void teardown(W pid, W code, W msgtype, Bool self)
 
 	/* イベントメッセージ要求を外す (§1.7.6)。 */
 	evt_release_process(pid);
+
+	/* 開いたままのファイルを閉じる (§1.6.5)。
+	 * **デバイスより先に閉じる。** ファイルシステムはデバイスの上に
+	 * 載っているので、逆にすると書き戻しの途中で下が消える。 */
+	fil_release_process(pid);
 
 	/* 開いたままのデバイスを閉じる (§1.8.4)。 */
 	dev_release_process(pid);
@@ -1109,6 +1123,19 @@ EXPORT WERR get_usr(W pid, P_USER *buff)
 		}
 	}
 	return target;
+}
+
+EXPORT Bool prc_user(W pid, P_USER *buff)
+{
+	/* **隠し名を含めたそのままの値を返す。** ファイル管理のアクセス
+	 * チェックは隠し名まで突き合わせる（仕様 §1.6.4）ので、
+	 * `get_usr` の「隠し名は常に 0」では足りない。
+	 * BTRON3 の API ではなく、周辺核の中だけで使う口である。 */
+	if (pid < 1 || pid > PRC_MAX_PRCID || buff == 0 || !pcb[pid].used) {
+		return False;
+	}
+	*buff = pcb[pid].usr;
+	return True;
 }
 
 EXPORT ERR get_inf(W pid, P_INFO *buff)

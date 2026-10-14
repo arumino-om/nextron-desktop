@@ -278,6 +278,9 @@ EXPORT void knl_dispatch(void)
 	 * 判断は周辺核に任せる。カーネルは上位半分で走っているので、
 	 * 下位半分 (TTBR0 / CR3) を差し替えても実行中のコードは壊れない。 */
 	prc_task_switch(next->tskid);
+	/* **切り替える直前に、降りるタスクのスタックを検める。**
+	 * ここが溢れの一番近い検査点になる。 */
+	knl_check_stack(prev);
 	hal_ctx_switch(&prev->sp, next->sp);
 	/* 戻ってきた = このタスクが再び選ばれた。割込みは禁止のまま。 */
 }

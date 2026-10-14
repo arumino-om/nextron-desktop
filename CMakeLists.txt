@@ -154,6 +154,8 @@ if(BTRON_ARCH STREQUAL "arm64")
     src/kernel/periph/gname.c
     src/kernel/periph/event.c
     src/kernel/periph/device.c
+    src/kernel/periph/file.c
+    src/kernel/fs/btronfs.c
     src/drivers/serial/serdev.c
     src/drivers/ramdisk/ramdisk.c
     src/drivers/virtio/mmio.c

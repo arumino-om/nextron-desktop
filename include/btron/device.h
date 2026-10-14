@@ -175,6 +175,10 @@ IMPORT void dev_release_process(W pid);
 
 IMPORT W dev_open_count(void); /* 検証用 */
 
+/* システム（ファイル管理）がファイルシステムのために開く口。
+ * 所有者を持たないので、プロセスが終わっても閉じられない。 */
+IMPORT WERR dev_open_system(CONST TC *dev, W o_mode);
+
 /* ドライバの登録口。起動時に呼ぶ。 */
 IMPORT ERR serdev_register(void);  /* "com" シリアル（文字型） */
 IMPORT ERR ramdisk_register(void); /* "rda" RAM ディスク（ブロック型） */

@@ -229,12 +229,40 @@ EXPORT ID tk_cre_tsk(CONST T_CTSK *pk_ctsk)
 	t->sp = 0;
 	t->stack = stack_top - (UD)stksz;
 	t->stksz = stksz;
+	/* **スタックの底に見張りを置く。**
+	 *
+	 * 溢れても何も起きない — その場では下にある別のページを壊すだけで、
+	 * 症状はずっと後の、まったく関係ない場所に出る。実際にファイル管理の
+	 * 再帰が 4KB を溢れ、プロセスのページテーブルを壊して、
+	 * アドレス空間を畳むときに初めて落ちた。
+	 * 見張りがあれば、次に切り替わった時点で分かる。
+	 *
+	 * **完全ではない。** 1 語しか見ないので、飛び飛びに書いて見張りを
+	 * 跨いだ溢れは見逃す（逆検査で確認した）。連続して書く普通の溢れ
+	 * ——配列や構造体の複写——は捕まえられる。 */
+	*(volatile UD *)(VP)t->stack = KNL_STACK_GUARD;
 	for (i = 0; i < 8; i++) {
 		t->dsname[i] = ((pk_ctsk->tskatr & TA_DSNAME) != 0) ? pk_ctsk->dsname[i] : 0;
 	}
 	t->used = True;
 	hal_int_restore(state);
 	return id;
+}
+
+EXPORT void knl_check_stack(CONST TCB *t)
+{
+	if (t == 0 || t->stack == 0 || t->stksz == 0) {
+		return; /* アイドルタスクは起動スタックを使うので見張りが無い */
+	}
+	if (*(volatile UD *)(VP)t->stack == KNL_STACK_GUARD) {
+		return;
+	}
+	/* **ここで止める。** 溢れたまま走らせると、壊した先が何だったかで
+	 * 症状が変わり、原因にたどり着けなくなる。 */
+	hal_console_puts("\n*** タスクのスタックが溢れています ***\n");
+	hal_console_puts("  スタックの底の見張りが壊れています。"
+	                 "stksz を増やすか、関数の中の配列を減らしてください\n");
+	hal_exit(3);
 }
 
 EXPORT ER tk_del_tsk(ID tskid)

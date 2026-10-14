@@ -117,6 +117,7 @@ EXPORT ER knl_init(void)
 	(void)tobj_init(); /* 周辺核 §1.3（ランデブ以外） */
 	(void)evt_init(); /* 周辺核 §1.7 */
 	(void)dev_init(); /* 周辺核 §1.8 */
+	(void)fil_init(); /* 周辺核 §1.6 */
 
 	for (i = 0; i <= TK_MAX_TSKID; i++) {
 		knl_tcb[i].used = False;

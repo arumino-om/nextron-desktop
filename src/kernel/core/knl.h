@@ -19,6 +19,7 @@
 #include <btron/clock.h>
 #include <btron/device.h>
 #include <btron/event.h>
+#include <btron/file.h>
 #include <btron/gname.h>
 #include <btron/intc.h>
 #include <btron/kernel.h>
@@ -190,6 +191,12 @@ IMPORT void knl_free_pages(UD va, SZ size);
 
 /* スタックを確保する。戻り値はスタックの**上端**（仮想アドレス）。失敗で 0。 */
 IMPORT UD knl_alloc_stack(SZ size);
+
+/* スタックの底に置く見張り。これが壊れていれば溢れている。 */
+#define KNL_STACK_GUARD 0x5354414B47554152ULL /* "STAKGUAR" */
+
+/* 見張りを検める。壊れていれば戻らない（緊急画面へ）。 */
+IMPORT void knl_check_stack(CONST TCB *t);
 
 /* タイマ割込みのハンドラ。*/
 IMPORT void knl_timer_handler(UW intid, VP arg);

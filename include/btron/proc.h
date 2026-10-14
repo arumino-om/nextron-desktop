@@ -279,6 +279,10 @@ IMPORT W prc_self(void);
 /* 生成済みプロセス数。 */
 IMPORT W prc_count(void);
 
+/* ユーザ情報を隠し名ごと取り出す。ファイル管理のアクセスチェック用で、
+ * `get_usr` と違って隠し名を 0 にしない。周辺核の中だけで使う。 */
+IMPORT Bool prc_user(W pid, P_USER *buff);
+
 /* プロセスが存在するか。
  *
  * **タスク独立部（割込みハンドラ）から使えるのはこちら。** `prc_sts()` は

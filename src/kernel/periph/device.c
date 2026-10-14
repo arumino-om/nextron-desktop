@@ -303,6 +303,19 @@ EXPORT WERR opn_dev(CONST TC *dev, W o_mode, W *error)
 	return (W)(slot - opens) + 1;
 }
 
+EXPORT WERR dev_open_system(CONST TC *dev, W o_mode)
+{
+	W dd = opn_dev(dev, o_mode, 0);
+
+	/* **所有者を外す。** ファイルシステムの接続はプロセスの持ち物では
+	 * ないので、接続したプロセスが終わっても閉じてはならない
+	 * （`dev_release_process` は所有者 pid でしか閉じない）。 */
+	if (dd >= 1) {
+		opens[dd - 1].owner = 0;
+	}
+	return dd;
+}
+
 LOCAL DevOpen *get_dd(W dd)
 {
 	if (dd < 1 || dd > DEV_MAX_OPEN || !opens[dd - 1].used) {

@@ -26,7 +26,10 @@
 #include <btron/memory.h>
 
 #define RAM_BLKSZ 512          /* 1 ブロックのバイト数 */
-#define RAM_SUB_BLOCKS 16      /* サブユニットあたりのブロック数 */
+/* サブユニットあたりのブロック数。
+ * 512B × 1024 = 512KB。ファイルシステムを 1 つ載せるのに足りる大きさ。
+ * メモリから取るので、実機のディスクが入るまでの暫定。 */
+#define RAM_SUB_BLOCKS 1024
 #define RAM_SUBS 2             /* サブユニット数 */
 #define RAM_BLOCKS (RAM_SUB_BLOCKS * RAM_SUBS)
 
