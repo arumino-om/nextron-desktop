@@ -44,7 +44,7 @@ EXPORT ERR screen_lend(AddrSpace *as, UD *user_base)
 	}
 	if (hal_vm_map(as, BTRON_PROC_SCREEN_BASE, scr.pa, size,
 	               BTRON_PG_READ | BTRON_PG_WRITE | BTRON_PG_USER |
-	                   BTRON_PG_DEVICE) != 0) {
+	                   BTRON_PG_NOCACHE) != 0) {
 		return E_NOMEM;
 	}
 	*user_base = BTRON_PROC_SCREEN_BASE;
@@ -63,7 +63,11 @@ EXPORT ERR screen_init(void)
 	if (fb->width == 0 || fb->height == 0 || fb->pitch < fb->width * 4U) {
 		return E_SYS;
 	}
-	va = hal_vm_map_device(fb->base, fb->size);
+	/* **デバイスメモリではなく「通常メモリ・キャッシュ無効」で張る。**
+	 * 画素は順序を保証する必要が無い（表示器が勝手に読むだけ）ので、
+	 * 書き込みをまとめてよい。効き目は vmem.h の注記を読むこと。
+	 * QEMU では差が小さく、画面の塗りが遅い原因は別にあった。 */
+	va = hal_vm_map_framebuf(fb->base, fb->size);
 	if (va == 0) {
 		return E_NOMEM;
 	}

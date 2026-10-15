@@ -88,18 +88,38 @@ EXPORT ERR gfil_pnt(GID gid, PNT p, CONST PAT *pat, DCM mode)
 /* 長方形                                                              */
 /* ------------------------------------------------------------------ */
 
-/* 長方形をパターンで塗る。クリップは dp_plot が見る。 */
+/* 長方形をパターンで塗る。
+ *
+ * 走査線ごとに「パターンを 1 周期だけ解く」「前置長方形で切った区間を
+ * 求める」の 2 つを済ませてから、区間を一気に書く。1 ピクセルずつ
+ * dp_plot を呼ぶと同じ判定を全ピクセルで繰り返すことになり、全画面の
+ * 塗りが人の目に見える長さになる（pixel.c の「走査線単位の高速経路」）。
+ *
+ * 高速経路に乗らないモード・パターンのときだけ 1 ピクセルずつに落ちる。 */
 LOCAL void fill_rect(CONST DEnv *e, CONST RECT *clip, CONST RECT *r,
                      CONST PAT *pat, DCM mode)
 {
 	RECT a = dp_rect_isect(clip, r);
+	Bool fast;
+	PatRow pr;
 	W x;
 	W y;
 
 	if (dp_rect_empty(&a)) {
 		return;
 	}
+	fast = dp_fast_ok(e, mode);
 	for (y = a.c.top; y < a.c.bottom; y++) {
+		if (fast && dp_pat_row(e, pat, y, &pr)) {
+			W rs;
+			W re;
+
+			x = a.c.left;
+			while (dp_next_run(e, y, a.c.right, &x, &rs, &re)) {
+				dp_run(e, &pr, rs, re, y);
+			}
+			continue;
+		}
 		for (x = a.c.left; x < a.c.right; x++) {
 			UW pix;
 

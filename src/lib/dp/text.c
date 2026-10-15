@@ -286,7 +286,24 @@ LOCAL void frame_origin(CONST DEnv *e, UW w, UW h, W *x, W *y)
 	}
 }
 
-/* 1 文字描く。文字描画位置は更新しない。 */
+/* 字形のビット。g が NULL なら字形が無い文字で、背景だけになる。 */
+LOCAL Bool glyph_bit(CONST UB *g, UW bytes, UW row, UW col)
+{
+	UW b;
+
+	if (g == 0) {
+		return False;
+	}
+	b = g[row * bytes + (col >> 3)];
+	return ((b >> (7U - (col & 7U))) & 1U) != 0 ? True : False;
+}
+
+/* 1 文字描く。文字描画位置は更新しない。
+ *
+ * 行の中で色が続く区間をまとめて渡す。字形は 1 行 1〜2 バイトなので
+ * 区間は数個しかなく、1 ピクセルずつ dp_plot を呼ぶのに比べて判定の
+ * 回数が桁で減る。文字を書くのが遅いと、状態行のような頻繁に書き替える
+ * 場所がそのままちらつきになる。 */
 LOCAL void draw_glyph(CONST DEnv *e, CONST RECT *clip, CONST UB *g, UW w,
                       UW h, W ox, W oy, DCM mode)
 {
@@ -296,31 +313,25 @@ LOCAL void draw_glyph(CONST DEnv *e, CONST RECT *clip, CONST UB *g, UW w,
 	Bool has_fg = dp_color(e, e->chfgc, &fg);
 	Bool has_bg = dp_color(e, e->chbgc, &bg);
 	UW row;
-	UW col;
 
 	if (!has_fg && !has_bg) {
 		return; /* 両方透明なら何も起きない */
 	}
 	for (row = 0; row < h; row++) {
-		for (col = 0; col < w; col++) {
-			Bool ink;
+		UW col = 0;
 
-			if (g != 0) {
-				UW b = g[row * bytes + (col >> 3)];
+		while (col < w) {
+			Bool ink = glyph_bit(g, bytes, row, col);
+			UW end = col + 1;
 
-				ink = ((b >> (7U - (col & 7U))) & 1U) != 0 ? True : False;
-			} else {
-				ink = False; /* 字形が無い文字は背景だけ描く */
+			while (end < w && glyph_bit(g, bytes, row, end) == ink) {
+				end++;
 			}
-			if (ink) {
-				if (has_fg) {
-					dp_plot(e, clip, ox + (W)col, oy + (W)row, fg, mode);
-				}
-			} else {
-				if (has_bg) {
-					dp_plot(e, clip, ox + (W)col, oy + (W)row, bg, mode);
-				}
+			if (ink ? has_fg : has_bg) {
+				dp_hline(e, clip, ox + (W)col, ox + (W)end, oy + (W)row,
+				         ink ? fg : bg, mode);
 			}
+			col = end;
 		}
 	}
 }

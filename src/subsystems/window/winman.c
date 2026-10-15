@@ -535,8 +535,15 @@ LOCAL void redraw(WID wid)
 	draw_work(wid, 0);
 }
 
-/* 消えた領域を背景（画面）で埋め、下のウィンドウに再表示要求を出す。 */
-LOCAL void expose(CONST RECT *area)
+/* 消えた領域を背景（画面）で埋め、下のウィンドウに再表示要求を出す。
+ *
+ * `keep` に長方形を渡すと、そこは塗らない。移動・変形のときに**新しい
+ * 位置**を渡すためにある。元の場所と新しい場所は普通ぶつかるので、
+ * 全部を背景で塗ってから描き直すと、重なりが一瞬デスクトップ柄に
+ * 見える。ドラッグ中はこれが毎回起きるのでちらつきとして目に付く。
+ * 前置長方形リストはまさにこういう「塗ってはいけない区画」を表す
+ * 仕掛けなので（仕様 §2.2.4）、それに任せる。 */
+LOCAL void expose(CONST RECT *area, CONST RECT *keep)
 {
 	W z[W_MAX_WND];
 	W nz;
@@ -545,8 +552,17 @@ LOCAL void expose(CONST RECT *area)
 	if (screen_gid < 1 || rect_empty(area)) {
 		return;
 	}
-	(void)gset_for(screen_gid, 0);
+	if (keep != 0 && !rect_empty(keep)) {
+		RLIST rl;
+
+		rl.next = 0;
+		rl.comp = *keep;
+		(void)gset_for(screen_gid, &rl);
+	} else {
+		(void)gset_for(screen_gid, 0);
+	}
 	(void)gfil_rec(screen_gid, *area, (CONST PAT *)BLACK50, 0, G_STORE);
+	(void)gset_for(screen_gid, 0);
 
 	nz = zsort(z);
 	for (i = 0; i < nz; i++) {
@@ -913,7 +929,7 @@ EXPORT ERR wsv_cls_wnd(WID wid, W opt)
 	}
 	/* 仕様: opt = CLR なら表示をクリアする。 */
 	if ((opt & NOCLR) == 0) {
-		expose(&gone);
+		expose(&gone, 0);
 	}
 	return EX_OK;
 }
@@ -1237,8 +1253,9 @@ LOCAL W move_resize(WID wid, RECT *newr, Bool keep_size)
 	push_order(wid);
 	refresh_fore();
 	setup_gid(wid);
-	/* 元の場所を消して、動いた先を描く。 */
-	expose(&old);
+	/* 元の場所を消して、動いた先を描く。新しい位置はこの直後に
+	 * 自分で描くので、背景で塗らせない。 */
+	expose(&old, &frame);
 	/* **下にあったウィンドウにも再表示を頼む。**
 	 * 動いた先だけを描き直しても、元居た場所に現れたウィンドウの
 	 * 中身は誰も描かない。マネージャは隠れた中身を保存していないので

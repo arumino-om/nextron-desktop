@@ -331,6 +331,11 @@ LOCAL PNT drawn_at; /* 出ている位置（イメージ左上の絶対座標）
 LOCAL UW under[MAX_PTR_SIZE * MAX_PTR_SIZE];
 LOCAL Bool under_ok[MAX_PTR_SIZE * MAX_PTR_SIZE]; /* 画面内だったか */
 
+/* 移動先の下地を組み立てる器。古い方をまだ使っている間に新しい方を
+ * 作るので、2 面必要になる（paint の前書き）。 */
+LOCAL UW nunder[MAX_PTR_SIZE * MAX_PTR_SIZE];
+LOCAL Bool nunder_ok[MAX_PTR_SIZE * MAX_PTR_SIZE];
+
 /* ------------------------------------------------------------------ */
 /* ビットマップの出し入れ                                              */
 /* ------------------------------------------------------------------ */
@@ -448,46 +453,126 @@ LOCAL Bool on_screen(W ax, W ay)
 	       ay < (W)scr.bmp.bounds.c.bottom;
 }
 
-/* 下地を退避して、ポインタを描く。 */
+/* その点をポインタが書き替えるか。data も mask も 0 なら透明で、
+ * 下地をそのまま残す（仕様 §2.6.2 の 4 通りのうちの 1 つ）。 */
+LOCAL Bool touches(W x, W y)
+{
+	W n = img.size.v;
+
+	if (x < 0 || y < 0 || x >= n || y >= n) {
+		return False;
+	}
+	if (bit_get(img.data, n, x, y)) {
+		return True;
+	}
+	return bit_get(img.mask, n, x, y);
+}
+
+/* いま出ている位置で (ax, ay) の下地を退避してあるか。あれば値を返す。
+ * img は unpaint を経てからしか差し替わらないので、drawn の間は
+ * イメージの大きさも変わらない。 */
+LOCAL Bool saved_bg(W ax, W ay, UW *v)
+{
+	W n = img.size.v;
+	W x = ax - drawn_at.x;
+	W y = ay - drawn_at.y;
+	W i;
+
+	if (!drawn || x < 0 || y < 0 || x >= n || y >= n) {
+		return False;
+	}
+	i = y * MAX_PTR_SIZE + x;
+	if (!under_ok[i]) {
+		return False;
+	}
+	*v = under[i];
+	return True;
+}
+
+/*
+ * ポインタを at へ出す。いま出ているなら、そこからの移動として扱う。
+ *
+ * 「消してから描く」と、重なった部分が一瞬だけ下地に戻る。画面の走査が
+ * ちょうどそこに当たるとちらつきとして見えるし、ポインタは PD の動きに
+ * 追いて毎回書き替わるので、人の目に付きやすい場所である。そこで
+ * **画面の 1 点を 1 回しか書かない**ようにする。
+ *
+ *   1. 新しい位置の下地を集める。重なりの中は画面から読んでも
+ *      ポインタが写っているだけなので、退避してある下地から取る
+ *   2. 古い位置のうち、新しい位置で書かない点だけを下地に戻す
+ *   3. 新しい位置を書く
+ *
+ * 1 で新しい下地を別の器に作るのは、2 がまだ古い器を使うからである。
+ */
 LOCAL void paint(PNT at)
 {
 	W n = img.size.v;
+	W x;
 	W y;
 
 	for (y = 0; y < n; y++) {
-		W x;
-
 		for (x = 0; x < n; x++) {
 			W ax = at.x + x;
 			W ay = at.y + y;
 			W i = y * MAX_PTR_SIZE + x;
-			Bool d;
-			Bool m;
-			UW v;
 
-			under_ok[i] = on_screen(ax, ay);
-			if (!under_ok[i]) {
+			nunder_ok[i] = on_screen(ax, ay);
+			if (!nunder_ok[i]) {
 				continue;
 			}
-			under[i] = dp_pix_get(&scr, ax, ay);
-			d = bit_get(img.data, n, x, y);
-			m = bit_get(img.mask, n, x, y);
-			if (!d && !m) {
-				continue; /* 透明。元のまま */
+			if (!saved_bg(ax, ay, &nunder[i])) {
+				nunder[i] = dp_pix_get(&scr, ax, ay);
+			}
+		}
+	}
+	if (drawn) {
+		for (y = 0; y < n; y++) {
+			for (x = 0; x < n; x++) {
+				W i = y * MAX_PTR_SIZE + x;
+				W ax = drawn_at.x + x;
+				W ay = drawn_at.y + y;
+
+				if (!under_ok[i] || !touches(x, y)) {
+					continue;
+				}
+				if (touches(ax - at.x, ay - at.y)) {
+					continue; /* この点は 3 で上書きする */
+				}
+				dp_pix_put(&scr, ax, ay, under[i]);
+			}
+		}
+	}
+	for (y = 0; y < n; y++) {
+		for (x = 0; x < n; x++) {
+			W i = y * MAX_PTR_SIZE + x;
+			Bool d = bit_get(img.data, n, x, y);
+			Bool m = bit_get(img.mask, n, x, y);
+			UW v;
+
+			if (!nunder_ok[i] || (!d && !m)) {
+				continue;
 			}
 			if (m) {
 				v = d ? fgpix : bgpix;
 			} else {
-				v = under[i] ^ scr.vmask; /* data=1 mask=0 は反転 */
+				v = nunder[i] ^ scr.vmask; /* data=1 mask=0 は反転 */
 			}
-			dp_pix_put(&scr, ax, ay, v);
+			dp_pix_put(&scr, at.x + x, at.y + y, v);
+		}
+	}
+	for (y = 0; y < n; y++) {
+		for (x = 0; x < n; x++) {
+			W i = y * MAX_PTR_SIZE + x;
+
+			under[i] = nunder[i];
+			under_ok[i] = nunder_ok[i];
 		}
 	}
 	drawn_at = at;
 	drawn = True;
 }
 
-/* 退避した下地を書き戻す。 */
+/* 退避した下地を書き戻す。消すときだけ使う（移動は paint が済ませる）。 */
 LOCAL void unpaint(void)
 {
 	W n = img.size.v;
@@ -501,15 +586,8 @@ LOCAL void unpaint(void)
 
 		for (x = 0; x < n; x++) {
 			W i = y * MAX_PTR_SIZE + x;
-			Bool d;
-			Bool m;
 
-			if (!under_ok[i]) {
-				continue;
-			}
-			d = bit_get(img.data, n, x, y);
-			m = bit_get(img.mask, n, x, y);
-			if (!d && !m) {
+			if (!under_ok[i] || !touches(x, y)) {
 				continue; /* 触っていないので戻す必要も無い */
 			}
 			dp_pix_put(&scr, drawn_at.x + x, drawn_at.y + y, under[i]);
@@ -544,7 +622,8 @@ LOCAL void refresh(void)
 	if (drawn && want.x == drawn_at.x && want.y == drawn_at.y) {
 		return;
 	}
-	unpaint();
+	/* paint が古い位置の後始末もする。ここで unpaint を挟むと、
+	 * 重なった部分が一瞬下地に戻ってちらつく。 */
 	paint(want);
 }
 

@@ -80,16 +80,48 @@ EXPORT ERR gcop_bmp(GID srcid, CONST RECT *sr, GID dstid, CONST RECT *dr,
 	{
 		Bool same = (s->base == d->base) ? True : False;
 		Bool back = False;
+		Bool fast;
 
 		if (same && (darea.c.top > sarea.c.top ||
 		             (darea.c.top == sarea.c.top &&
 		              darea.c.left > sarea.c.left))) {
 			back = True;
 		}
+		/* 形式が同じで上書きなら、走査線ごとにまとめて運べる。
+		 * 二重緩衝（裏画面を作って一度に送る）はこの経路の速さが
+		 * そのまま効くので、ここを 1 画素ずつにはできない。 */
+		fast = (dp_fast_ok(d, mode) && s->valid == d->valid &&
+		        s->bound == d->bound)
+		           ? True
+		           : False;
 		for (y = 0; y < h; y++) {
 			W sy = back ? (h - 1 - y) : y;
 			W x;
 
+			if (fast) {
+				W x0 = darea.c.left;
+				W x1 = darea.c.left + w;
+				W dy = darea.c.top + sy;
+				W rs;
+				W re;
+
+				if (dy < clip.c.top || dy >= clip.c.bottom) {
+					continue;
+				}
+				if (x0 < clip.c.left) {
+					x0 = clip.c.left;
+				}
+				if (x1 > clip.c.right) {
+					x1 = clip.c.right;
+				}
+				x = x0;
+				while (dp_next_run(d, dy, x1, &x, &rs, &re)) {
+					dp_copy_run(s,
+					            sarea.c.left + (rs - darea.c.left),
+					            sarea.c.top + sy, d, rs, re, dy, back);
+				}
+				continue;
+			}
 			for (x = 0; x < w; x++) {
 				W sxx = back ? (w - 1 - x) : x;
 

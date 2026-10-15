@@ -464,3 +464,296 @@ EXPORT Bool dp_pat(CONST DEnv *e, CONST PAT *pat, W rx, W ry, UW *pix)
 		return False;
 	}
 }
+
+/* ------------------------------------------------------------------ */
+/* 走査線単位の高速経路                                                */
+/* ------------------------------------------------------------------ */
+
+/*
+ * dp_plot は 1 ピクセルごとにクリップ判定・前置長方形の走査・行頭
+ * アドレスの計算・読み出し・マスク判定をやり直す。1 点を打つには
+ * これでよいが、面を塗ると同じ判定を全ピクセルで繰り返すことになる。
+ * 800x600 を 1 回塗ると 48 万回で、実測 238ms かかっていた。画面の
+ * 塗り替えがこの速さだと、走査が追い越してちらつきとして見える。
+ *
+ * そこで**行単位で判定をまとめる**。1 走査線について
+ *
+ *   - パターンは横方向に周期 period で繰り返すので 1 周期だけ解く
+ *   - 前置長方形で切った区間を求める
+ *   - 区間の中はもう判定が要らないので、素直な代入で書く
+ *
+ * とすれば、内側のループは添字の増加と代入だけになる。
+ *
+ * この経路に乗せられるのは「上書き (G_STORE) で、マスクピクセル指定が
+ * 無く、境界ビット数がバイトの整数倍」のときだけである。それ以外は
+ * 読み出しや部分書き換えが必要なので dp_plot に落ちる。塗り潰しの
+ * ほとんどは G_STORE なので、これで足りる。
+ */
+
+EXPORT Bool dp_fast_ok(CONST DEnv *e, DCM mode)
+{
+	if ((mode & G_OPMASK) != G_STORE) {
+		return False; /* dest を読む必要がある */
+	}
+	if ((mode & (G_MASK | G_MASKN)) != 0) {
+		return False; /* dest ごとに描くか決める必要がある */
+	}
+	if (e->bound != 8 && e->bound != 16 && e->bound != 32) {
+		return False; /* サブバイトは読んで部分書き換えになる */
+	}
+	return True;
+}
+
+/* パターンの横方向の周期。0 なら行単位に解けない。 */
+LOCAL W pat_period(CONST PAT *pat)
+{
+	UW n;
+	UW h;
+
+	if (is_std((CONST VP)pat, &n)) {
+		return 8; /* 標準パターンは 8x8 のディザ */
+	}
+	switch (pat->spat.kind) {
+	case PAT_SPAT:
+		h = pat->spat.hsize;
+		break;
+	case PAT_MPAT:
+		h = pat->mpat.hsize;
+		break;
+	default:
+		return 0;
+	}
+	if (h < 1 || h > DP_PAT_PERIOD) {
+		return 0;
+	}
+	return (W)h;
+}
+
+EXPORT Bool dp_pat_row(CONST DEnv *e, CONST PAT *pat, W ry, PatRow *pr)
+{
+	W p = pat_period(pat);
+	W i;
+
+	if (p <= 0) {
+		return False;
+	}
+	pr->period = p;
+	pr->solid = True;
+	for (i = 0; i < p; i++) {
+		UW pix = 0;
+		Bool op = dp_pat(e, pat, i, ry, &pix);
+
+		pr->pix[i] = pix;
+		pr->opaque[i] = (UB)(op ? 1 : 0);
+		if (!op || pix != pr->pix[0] || pr->opaque[0] == 0) {
+			pr->solid = False;
+		}
+	}
+	return True;
+}
+
+EXPORT Bool dp_next_run(CONST DEnv *e, W ry, W x1, W *x, W *rs, W *re)
+{
+	W s = *x;
+	W t = x1;
+	W i;
+
+	/* s が前置長方形の内側なら、その右端まで飛ぶ。飛んだ先がまた
+	 * 別の長方形の内側かもしれないので、動かなくなるまで繰り返す。 */
+	for (;;) {
+		Bool hit = False;
+
+		if (s >= x1) {
+			return False;
+		}
+		for (i = 0; i < e->nfore; i++) {
+			CONST RECT *f = &e->fore[i];
+
+			if (ry >= f->c.top && ry < f->c.bottom && s >= f->c.left &&
+			    s < f->c.right) {
+				s = f->c.right;
+				hit = True;
+				break;
+			}
+		}
+		if (!hit) {
+			break;
+		}
+	}
+	/* s から次の前置長方形の左端までが塗れる。 */
+	for (i = 0; i < e->nfore; i++) {
+		CONST RECT *f = &e->fore[i];
+
+		if (ry >= f->c.top && ry < f->c.bottom && f->c.left > s &&
+		    f->c.left < t) {
+			t = f->c.left;
+		}
+	}
+	*rs = s;
+	*re = t;
+	*x = t;
+	return True;
+}
+
+EXPORT void dp_run(CONST DEnv *e, CONST PatRow *pr, W rx0, W rx1, W ry)
+{
+	UB *row = row_of(e, DP_ABS_Y(e, ry));
+	W a0 = DP_ABS_X(e, rx0);
+	W a1 = DP_ABS_X(e, rx1);
+	W i = pmod(rx0, pr->period);
+	W a;
+
+	if (pr->solid) {
+		UW v = pr->pix[0];
+
+		switch (e->bound) {
+		case 32: {
+			UW *p = (UW *)(VP)row;
+
+			for (a = a0; a < a1; a++) {
+				p[a] = v;
+			}
+			return;
+		}
+		case 16: {
+			UH *p = (UH *)(VP)row;
+
+			for (a = a0; a < a1; a++) {
+				p[a] = (UH)v;
+			}
+			return;
+		}
+		default:
+			for (a = a0; a < a1; a++) {
+				row[a] = (UB)v;
+			}
+			return;
+		}
+	}
+	switch (e->bound) {
+	case 32: {
+		UW *p = (UW *)(VP)row;
+
+		for (a = a0; a < a1; a++) {
+			if (pr->opaque[i] != 0) {
+				p[a] = pr->pix[i];
+			}
+			i = (i + 1 < pr->period) ? (i + 1) : 0;
+		}
+		return;
+	}
+	case 16: {
+		UH *p = (UH *)(VP)row;
+
+		for (a = a0; a < a1; a++) {
+			if (pr->opaque[i] != 0) {
+				p[a] = (UH)pr->pix[i];
+			}
+			i = (i + 1 < pr->period) ? (i + 1) : 0;
+		}
+		return;
+	}
+	default:
+		for (a = a0; a < a1; a++) {
+			if (pr->opaque[i] != 0) {
+				row[a] = (UB)pr->pix[i];
+			}
+			i = (i + 1 < pr->period) ? (i + 1) : 0;
+		}
+		return;
+	}
+}
+
+EXPORT void dp_hline(CONST DEnv *e, CONST RECT *clip, W rx0, W rx1, W ry,
+                     UW src, DCM mode)
+{
+	PatRow pr;
+	W x;
+	W rs;
+	W re;
+
+	if (ry < clip->c.top || ry >= clip->c.bottom) {
+		return;
+	}
+	if (rx0 < clip->c.left) {
+		rx0 = clip->c.left;
+	}
+	if (rx1 > clip->c.right) {
+		rx1 = clip->c.right;
+	}
+	if (rx0 >= rx1) {
+		return;
+	}
+	if (!dp_fast_ok(e, mode)) {
+		for (x = rx0; x < rx1; x++) {
+			dp_plot(e, clip, x, ry, src, mode);
+		}
+		return;
+	}
+	/* 単色は「周期 1 の不透明なパターン」として同じ経路に乗せる。 */
+	pr.period = 1;
+	pr.solid = True;
+	pr.pix[0] = src & e->vmask;
+	pr.opaque[0] = 1;
+	x = rx0;
+	while (dp_next_run(e, ry, rx1, &x, &rs, &re)) {
+		dp_run(e, &pr, rs, re, ry);
+	}
+}
+
+EXPORT void dp_copy_run(CONST DEnv *s, W sx0, W sy, CONST DEnv *d, W dx0,
+                        W dx1, W dy, Bool back)
+{
+	CONST UB *sr = row_of(s, DP_ABS_Y(s, sy));
+	UB *dr = row_of(d, DP_ABS_Y(d, dy));
+	W sa = DP_ABS_X(s, sx0);
+	W da = DP_ABS_X(d, dx0);
+	W n = dx1 - dx0;
+	W i;
+
+	/* 同じビットマップで区間が重なるときは、読む前に書いてしまわない
+	 * 向きで回す（bitmap.c の前書き）。 */
+	switch (d->bound) {
+	case 32: {
+		CONST UW *p = (CONST UW *)(CONST VP)sr;
+		UW *q = (UW *)(VP)dr;
+
+		if (back) {
+			for (i = n - 1; i >= 0; i--) {
+				q[da + i] = p[sa + i] & d->vmask;
+			}
+		} else {
+			for (i = 0; i < n; i++) {
+				q[da + i] = p[sa + i] & d->vmask;
+			}
+		}
+		return;
+	}
+	case 16: {
+		CONST UH *p = (CONST UH *)(CONST VP)sr;
+		UH *q = (UH *)(VP)dr;
+
+		if (back) {
+			for (i = n - 1; i >= 0; i--) {
+				q[da + i] = (UH)(p[sa + i] & d->vmask);
+			}
+		} else {
+			for (i = 0; i < n; i++) {
+				q[da + i] = (UH)(p[sa + i] & d->vmask);
+			}
+		}
+		return;
+	}
+	default:
+		if (back) {
+			for (i = n - 1; i >= 0; i--) {
+				dr[da + i] = (UB)(sr[sa + i] & d->vmask);
+			}
+		} else {
+			for (i = 0; i < n; i++) {
+				dr[da + i] = (UB)(sr[sa + i] & d->vmask);
+			}
+		}
+		return;
+	}
+}

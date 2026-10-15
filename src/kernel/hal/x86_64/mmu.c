@@ -137,7 +137,13 @@ LOCAL UD attr_to_entry(UW attr)
 		e |= E_G;
 	}
 	if (attr & BTRON_PG_DEVICE) {
-		e |= E_PCD | E_PWT; /* キャッシュ無効 */
+		e |= E_PCD | E_PWT; /* キャッシュ無効・ライトスルー */
+	} else if (attr & BTRON_PG_NOCACHE) {
+		/* フレームバッファ。**ライトスルーは立てない。**
+		 * PCD だけなら書き込みの結合が効く（PAT を立てれば
+		 * Write-Combining にできるが、まずはここまで）。
+		 * arm64 の MAIR_NC に対応する。 */
+		e |= E_PCD;
 	}
 	if (!(attr & BTRON_PG_EXEC)) {
 		e |= E_NX;
@@ -362,7 +368,7 @@ EXPORT CONST AddrSpace *hal_vm_kernel_space(void)
 	return &kernel_space;
 }
 
-EXPORT UD hal_vm_map_device(UD pa, UD size)
+LOCAL UD map_alias(UD pa, UD size, UW attr)
 {
 	UD ps = (UD)hal_page_size();
 	UD start = pa & ~(ps - 1);
@@ -376,7 +382,7 @@ EXPORT UD hal_vm_map_device(UD pa, UD size)
 		return BTRON_MMIO_BASE + pa;
 	}
 	if (hal_vm_map(&kernel_space, va, start, end - start,
-	               BTRON_PG_READ | BTRON_PG_WRITE | BTRON_PG_DEVICE
+	               BTRON_PG_READ | BTRON_PG_WRITE | attr
 	                   | BTRON_PG_GLOBAL) != 0) {
 		return 0;
 	}
@@ -384,6 +390,16 @@ EXPORT UD hal_vm_map_device(UD pa, UD size)
 	 * 起動時の一括設定しか想定していないので単純にする。 */
 	write_cr3(kernel_space.root_pa & E_ADDR_MASK);
 	return BTRON_MMIO_BASE + pa;
+}
+
+EXPORT UD hal_vm_map_device(UD pa, UD size)
+{
+	return map_alias(pa, size, BTRON_PG_DEVICE);
+}
+
+EXPORT UD hal_vm_map_framebuf(UD pa, UD size)
+{
+	return map_alias(pa, size, BTRON_PG_NOCACHE);
 }
 
 /* ------------------------------------------------------------------ */

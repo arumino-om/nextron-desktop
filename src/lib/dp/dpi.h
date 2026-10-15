@@ -104,6 +104,50 @@ IMPORT Bool dp_in_fore(CONST DEnv *e, W rx, W ry);
 IMPORT void dp_plot(CONST DEnv *e, CONST RECT *clip, W rx, W ry, UW src,
                     DCM mode);
 
+/* ------------------------------------------------------------------ */
+/* 走査線単位の高速経路                                                */
+/* ------------------------------------------------------------------ */
+
+/* 面を塗るときに 1 ピクセルずつ dp_plot を呼ぶと、同じクリップ判定と
+ * 行頭アドレス計算を全ピクセルで繰り返すことになる。行単位にまとめる
+ * ための道具をここに置く。詳しい理由は pixel.c の同名の節。 */
+
+/* パターン 1 行を先に解いておく器。横方向の周期の分だけ持つ。 */
+#define DP_PAT_PERIOD 64
+
+typedef struct PatRow {
+	W period;              /* 横方向の周期。1 以上 */
+	UW pix[DP_PAT_PERIOD]; /* 相対 x = 0, 1, ... の値 */
+	UB opaque[DP_PAT_PERIOD]; /* 0 なら透明（描かない） */
+	Bool solid;               /* 全て同じ値で不透明。塗りを単純化できる */
+} PatRow;
+
+/* 高速経路に乗せられるモード・環境か。乗らなければ dp_plot を使う。 */
+IMPORT Bool dp_fast_ok(CONST DEnv *e, DCM mode);
+
+/* 走査線 ry のパターンを 1 周期だけ解く。周期が大きすぎる等で
+ * 行単位に解けないパターンなら False。 */
+IMPORT Bool dp_pat_row(CONST DEnv *e, CONST PAT *pat, W ry, PatRow *pr);
+
+/* 走査線 ry の [*x, x1) から前置長方形を除いた次の区間 [*rs, *re) を返す。
+ * *x は呼ぶたびに進む。区間が尽きたら False。 */
+IMPORT Bool dp_next_run(CONST DEnv *e, W ry, W x1, W *x, W *rs, W *re);
+
+/* 走査線の区間をパターン行で塗る。**判定は一切しない** —— クリップも
+ * 前置長方形も呼び出し側で外してあることが前提。 */
+IMPORT void dp_run(CONST DEnv *e, CONST PatRow *pr, W rx0, W rx1, W ry);
+
+/* 走査線の区間を単色で塗る。クリップと前置長方形はここで見る。
+ * 高速経路に乗らないときは dp_plot に落ちるので、呼ぶ側は気にしなくてよい。 */
+IMPORT void dp_hline(CONST DEnv *e, CONST RECT *clip, W rx0, W rx1, W ry,
+                     UW src, DCM mode);
+
+/* 走査線の区間を s から d へ転送する。**判定は一切しない**（dp_run と同じ
+ * 約束）。sx0 が dx0 に対応する。境界ビット数と有効ビット数が同じときだけ
+ * 使える。back は同じビットマップで重なるときの走査の向き。 */
+IMPORT void dp_copy_run(CONST DEnv *s, W sx0, W sy, CONST DEnv *d, W dx0,
+                        W dx1, W dy, Bool back);
+
 /* 相対 → 絶対 / 絶対 → 相対。 */
 #define DP_ABS_X(e, x) ((x) - (e)->bmp.bounds.c.left)
 #define DP_ABS_Y(e, y) ((y) - (e)->bmp.bounds.c.top)

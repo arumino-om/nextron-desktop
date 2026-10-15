@@ -801,6 +801,61 @@ LOCAL UW dpt_get(W x, W y)
 	return row[x] & 0x00FFFFFFU;
 }
 
+/* ビットマップ全体の控え。**走査線単位の高速経路と 1 点ずつ描く経路が
+ * 同じ絵を出すか**を突き合わせるのに使う。速さのために入れた近道が絵を
+ * 変えていないことは、同じパターン・同じモードで塗り比べるしか確かめ
+ * ようがない。全面を見るのは、区間がはみ出す誤りを捕まえるためである。 */
+LOCAL UW dpt_ref[DPT_W * DPT_H];
+
+LOCAL void dpt_save(void)
+{
+	W x;
+	W y;
+
+	for (y = 0; y < DPT_H; y++) {
+		for (x = 0; x < DPT_W; x++) {
+			dpt_ref[y * DPT_W + x] = dpt_get(x, y);
+		}
+	}
+}
+
+LOCAL Bool dpt_same(void)
+{
+	W x;
+	W y;
+
+	for (y = 0; y < DPT_H; y++) {
+		for (x = 0; x < DPT_W; x++) {
+			if (dpt_ref[y * DPT_W + x] != dpt_get(x, y)) {
+				return False;
+			}
+		}
+	}
+	return True;
+}
+
+/* 画面の領域が 1 色で埋まっているか。画面は dpt_bmp ではないので
+ * 描画環境を通して読む。 */
+LOCAL Bool scr_solid(GID g, W l, W t, W r, W b, UW val)
+{
+	W x;
+	W y;
+
+	for (y = t; y < b; y++) {
+		for (x = l; x < r; x++) {
+			PNT p;
+			PIXVAL v = 0;
+
+			p.x = (H)x;
+			p.y = (H)y;
+			if (gtst_pnt(g, p, &v) != 0 || (UW)v != val) {
+				return False;
+			}
+		}
+	}
+	return True;
+}
+
 /* 領域が 1 色で埋まっているか。 */
 LOCAL Bool dpt_solid(W l, W t, W r, W b, UW val)
 {
@@ -4161,6 +4216,86 @@ LOCAL void run_proc_tests(void)
 		                EG_NOSPT);
 	});
 
+	BTRON_TEST("塗りは 1 点ずつ描くのと一致する (§2.4.2)", {
+		GID gid = dpt_gid;
+		PAT pat;
+		UB mask[2];
+		RECT r;
+		RLIST rl[2];
+		W i;
+		W pass;
+
+		/* **近道が絵を変えていないかを見る。** 面を塗るときは走査線
+		 * ごとに「パターンを 1 周期だけ解く」「前置長方形で切った区間を
+		 * 求める」をまとめてから一気に書く。1 点ずつ dp_plot を呼ぶ
+		 * 経路 (gfil_pnt) と同じ絵にならなければ、速くなっても意味が無い。
+		 *
+		 * 前置長方形の数を変えて、区間が 1 つ / 2 つ / 3 つに割れる
+		 * 場合をそれぞれ通す。 */
+		mask[0] = 0xC3;
+		mask[1] = 0x3C;
+		pat.spat.kind = PAT_SPAT;
+		pat.spat.hsize = 8;
+		pat.spat.vsize = 2;
+		pat.spat.fgcol = 0x00123456;
+		pat.spat.bgcol = 0x00ABCDEF;
+		pat.spat.mask = mask;
+
+		r.c.left = 5;
+		r.c.top = 3;
+		r.c.right = 53;
+		r.c.bottom = 27;
+
+		for (i = 0; i < 3; i++) {
+			W x;
+			W y;
+
+			rl[0].next = 0;
+			rl[0].comp.c.left = 9;
+			rl[0].comp.c.top = 0;
+			rl[0].comp.c.right = 13;
+			rl[0].comp.c.bottom = DPT_H;
+			rl[1].next = 0;
+			rl[1].comp.c.left = 20;
+			rl[1].comp.c.top = 5;
+			rl[1].comp.c.right = 24;
+			rl[1].comp.c.bottom = 10;
+			if (i == 2) {
+				rl[0].next = &rl[1];
+			}
+
+			for (pass = 0; pass < 2; pass++) {
+				/* 下地を揃える。前置長方形を外してから全面を塗る —
+				 * 掛けたままだとそこだけ前の絵が残り、2 つの経路の
+				 * 出発点がずれる。 */
+				BTRON_CHECK("前置長方形を外す", gset_for(gid, 0) == EG_OK);
+				(void)gfil_rec(gid, dpt_bmp.bounds, (CONST PAT *)WHITE0, 0,
+				               G_STORE);
+				if (i >= 1) {
+					BTRON_CHECK("前置長方形を設定",
+					            gset_for(gid, rl) == EG_OK);
+				}
+				if (pass == 0) {
+					BTRON_CHECK("走査線単位で塗る",
+					            gfil_rec(gid, r, &pat, 0, G_STORE) == EG_OK);
+					dpt_save();
+					continue;
+				}
+				for (y = r.c.top; y < r.c.bottom; y++) {
+					for (x = r.c.left; x < r.c.right; x++) {
+						PNT p;
+
+						p.x = (H)x;
+						p.y = (H)y;
+						(void)gfil_pnt(gid, p, &pat, G_STORE);
+					}
+				}
+				BTRON_CHECK("1 点ずつでも同じ絵になる", dpt_same());
+			}
+		}
+		BTRON_CHECK("前置長方形を外す", gset_for(gid, 0) == EG_OK);
+	});
+
 	BTRON_TEST("直線の描画 (§2.4.1 gdra_lin)", {
 		GID gid = dpt_gid;
 		PNT a;
@@ -4225,6 +4360,34 @@ LOCAL void run_proc_tests(void)
 		            gcop_bmp(gid, &src, gid, &dst, 0, G_STORE) == EG_OK);
 		BTRON_CHECK("写った", dpt_solid(20, 10, 24, 14, DPT_BLACK));
 		BTRON_CHECK("元も残る", dpt_solid(0, 0, 4, 4, DPT_BLACK));
+
+		/* **前置長方形を跨ぐ転送。** 重なったウィンドウの下へ運ぶときに
+		 * 通る。転送も走査線ごとに区間へ割って運ぶので、そこが抜けると
+		 * 手前のウィンドウを上書きしてしまう。 */
+		(void)gfil_rec(gid, dpt_bmp.bounds, (CONST PAT *)WHITE0, 0,
+		               G_STORE);
+		src.c.left = 0;
+		src.c.top = 0;
+		src.c.right = 16;
+		src.c.bottom = 4;
+		(void)gfil_rec(gid, src, (CONST PAT *)BLACK100, 0, G_STORE);
+		rl.next = 0;
+		rl.comp.c.left = 24;
+		rl.comp.c.top = 0;
+		rl.comp.c.right = 28;
+		rl.comp.c.bottom = DPT_H;
+		BTRON_CHECK("前置長方形を設定", gset_for(gid, &rl) == EG_OK);
+		dst.c.left = 20;
+		dst.c.top = 10;
+		dst.c.right = 36;
+		dst.c.bottom = 14;
+		BTRON_CHECK("前置長方形を跨いで転送",
+		            gcop_bmp(gid, &src, gid, &dst, 0, G_STORE) == EG_OK);
+		BTRON_CHECK("手前は白のまま",
+		            dpt_solid(24, 10, 28, 14, DPT_WHITE));
+		BTRON_CHECK("左側は写った", dpt_solid(20, 10, 24, 14, DPT_BLACK));
+		BTRON_CHECK("右側も写った", dpt_solid(28, 10, 36, 14, DPT_BLACK));
+		BTRON_CHECK("前置長方形を外す", gset_for(gid, 0) == EG_OK);
 
 		/* **重なる転送。** 向きを間違えると引き伸ばされる。 */
 		(void)gfil_rec(gid, dpt_bmp.bounds, (CONST PAT *)WHITE0, 0,
@@ -4353,6 +4516,29 @@ LOCAL void run_proc_tests(void)
 		BTRON_CHECK("位置が進んだ",
 		            gget_chp(gid, &x, &y) == EG_OK && x == 8 && y == 15);
 
+		/* **背景が不透明なときの文字枠。** 字形は行の中で色が続く区間を
+		 * まとめて書く。区間が文字枠からはみ出せば隣の桁を消し、足りなければ
+		 * 枠の中に下地が残る。どちらも「文字を書き替えると汚れる」形で出る。 */
+		(void)gfil_rec(gid, dpt_bmp.bounds, (CONST PAT *)BLACK100, 0,
+		               G_STORE);
+		BTRON_CHECK("背景を不透明にする",
+		            gset_chc(gid, 0x00FFFFFF, 0x00808080) == EG_OK);
+		BTRON_CHECK("位置を決める", gset_chp(gid, 8, 31, True) == EG_OK);
+		BTRON_CHECK("描画", gdra_chr(gid, (TC)'A', G_STORE) == 0);
+		BTRON_CHECK("枠の左は残る", dpt_solid(0, 16, 8, 32, DPT_BLACK));
+		BTRON_CHECK("枠の右は残る", dpt_solid(16, 16, 24, 32, DPT_BLACK));
+		BTRON_CHECK("枠の上は残る", dpt_solid(8, 0, 16, 16, DPT_BLACK));
+		inked = 0;
+		for (j = 16; j < 32; j++) {
+			for (i = 8; i < 16; i++) {
+				if (dpt_get(i, j) == DPT_BLACK) {
+					inked++;
+				}
+			}
+		}
+		BTRON_CHECK("枠の中は下地が残らない", inked == 0);
+		(void)gset_chc(gid, 0x00FFFFFF, COL_TRANS);
+
 		/* 文字列。幅は 1 文字ずつの合計。 */
 		BTRON_CHECK("文字列の幅",
 		            gget_stw(gid, str, 2, 0, &w) == 16 && w == 2);
@@ -4455,6 +4641,53 @@ LOCAL void run_proc_tests(void)
 		            clr_msg(MM_ALL, MM_NULL) == ER_OK);
 	});
 
+	BTRON_TEST("画面の塗り潰しの速さ (走査線単位の経路)", {
+		GID sg = gopn_dev(nm_screen, 0);
+		RECT b;
+
+		if (sg >= 1 && gget_bnd(sg, &b) == EG_OK && b.c.right > 0) {
+			UD freq = hal_timer_freq();
+			UD t0;
+			UD t1;
+			W i;
+			W us;
+
+			/* **全画面の塗りが人の目に見える長さになっていないか。**
+			 *
+			 * 1 画素ずつ dp_plot を呼ぶ経路だと、QEMU 上の 800x600 で
+			 * 238ms かかっていた。走査線ごとに判定をまとめた経路では
+			 * 11ms 台である（20 倍）。この差が画面のちらつきの正体で、
+			 * 塗っている途中が走査に追い越されて見えていた。
+			 *
+			 * 写像属性 (Device-nGnRnE ↔ 通常メモリ・キャッシュ無効) の
+			 * 差も測ったが 238ms 対 252ms で**6% しか動かなかった**。
+			 * QEMU では書き込みがどちらもホストのメモリ操作になるので
+			 * 差が出にくい。実機では効くはずだが、**この検査が捕まえて
+			 * いるのは経路の方**である。取り違えないこと。 */
+			t0 = hal_timer_count();
+			for (i = 0; i < 4; i++) {
+				(void)gfil_rec(sg, b, (CONST PAT *)BLACK50, 0, G_STORE);
+			}
+			t1 = hal_timer_count();
+			us = (freq > 0) ? (W)(((t1 - t0) * 1000000UL) / freq / 4) : 0;
+			hal_console_puts("    全画面塗り: ");
+			put_dec(us);
+			hal_console_puts(" us/回 (");
+			put_dec((W)b.c.right);
+			hal_console_puts("x");
+			put_dec((W)b.c.bottom);
+			hal_console_puts(")\n");
+			/* **桁の検査。** 実測 11ms 台に対して 40ms を上限にする。
+			 * 1 画素ずつの経路に戻ると 238ms になるので確実に落ちる。
+			 * 余裕を広く取っているのは、構成によって画面の大きさが
+			 * 変わるためである。 */
+			BTRON_CHECK("走査線単位の経路が効いている", us > 0 && us < 40000);
+			BTRON_CHECK("閉じる", gcls_env(sg) == EG_OK);
+		} else {
+			BTRON_CHECK("画面が無い構成なので飛ばす", True);
+		}
+	});
+
 	/* -------------------------------------------------------------- */
 	/* §2.6 ポインタ制御                                              */
 	/* -------------------------------------------------------------- */
@@ -4554,6 +4787,96 @@ LOCAL void run_proc_tests(void)
 		/* 片付け。以後の検査は標準形状で動かす。 */
 		BTRON_CHECK("標準形状に戻す",
 		            gset_ptr(PS_SELECT, 0, COL_BLACK, COL_WHITE) == EG_OK);
+	});
+
+	BTRON_TEST("ポインタの移動は重なりを汚さない (§2.6.2)", {
+		GID sg = gopn_dev(nm_screen, 0);
+		RECT bnd;
+		RECT bg;
+		PAT pat;
+		UB pm[1];
+		PNT at;
+		W i;
+
+		if (sg >= 1 && gget_bnd(sg, &bnd) == EG_OK && bnd.c.right > 200 &&
+		    bnd.c.bottom > 200) {
+			/* **「消してから描く」はちらつく。** 重なった部分が一瞬だけ
+			 * 下地に戻るためで、ポインタは PD の動きに追いて毎回
+			 * 書き替わるので目に付きやすい。そこで 1 点を 1 回しか
+			 * 書かない形にした。書き込みの回数は外から数えられないが、
+			 * **消し残しと消し過ぎはどちらも絵に出る**ので、重なる移動と
+			 * 斜めの移動で下地が正しく残ることを見る。 */
+			pm[0] = 0x80;
+			pat.spat.kind = PAT_SPAT;
+			pat.spat.hsize = 1;
+			pat.spat.vsize = 1;
+			/* crep = 0 (COL_PIXVAL) なのでピクセル値がそのまま入る。 */
+			pat.spat.fgcol = 0x00123456;
+			pat.spat.bgcol = 0x00123456;
+			pat.spat.mask = pm;
+
+			BTRON_CHECK("非追従にする", gmot_ptr(0) == EG_OK);
+			BTRON_CHECK("強制表示", gdsp_ptr(-1) == 0);
+			/* 下地を作る間はポインタを逃がす。置いたままだと退避した
+			 * 下地が古くなる。 */
+			at.x = (H)(bnd.c.right - 1);
+			at.y = (H)(bnd.c.bottom - 1);
+			BTRON_CHECK("端へ寄せる", gmov_ptr(at) == 0);
+			bg.c.left = 96;
+			bg.c.top = 96;
+			bg.c.right = 128;
+			bg.c.bottom = 128;
+			BTRON_CHECK("下地を塗る",
+			            gfil_rec(sg, bg, &pat, 0, G_STORE) == EG_OK);
+
+			/* 8x8 を全部前景色で埋めたイメージ。重なりが見分けやすい。 */
+			ptr_img.hotpt.x = 0;
+			ptr_img.hotpt.y = 0;
+			ptr_img.size.h = 8;
+			ptr_img.size.v = 8;
+			for (i = 0; i < P_SIZE; i++) {
+				ptr_img.data[i] = 0xFF;
+				ptr_img.mask[i] = 0xFF;
+			}
+			BTRON_CHECK("塗り潰しイメージを設定",
+			            gset_ptr(-1, &ptr_img, COL_BLACK, COL_WHITE) ==
+			                EG_OK);
+			at.x = 100;
+			at.y = 100;
+			BTRON_CHECK("置く", gmov_ptr(at) == 0);
+			BTRON_CHECK("全部前景色（黒 = 0）",
+			            scr_solid(sg, 100, 100, 108, 108, 0));
+
+			/* 横へ 4 ずらす。幅 8 なので半分が重なる。 */
+			at.x = 104;
+			BTRON_CHECK("重なるように動かす", gmov_ptr(at) == 0);
+			BTRON_CHECK("抜けた所は下地に戻る",
+			            scr_solid(sg, 100, 100, 104, 108, 0x00123456));
+			BTRON_CHECK("新しい位置は前景色",
+			            scr_solid(sg, 104, 100, 112, 108, 0));
+
+			/* 斜めへ戻す。退避を入れ替える順を間違えると消し残る。 */
+			at.x = 100;
+			at.y = 104;
+			BTRON_CHECK("斜めに動かす", gmov_ptr(at) == 0);
+			BTRON_CHECK("上に抜けた所は下地に戻る",
+			            scr_solid(sg, 104, 100, 112, 104, 0x00123456));
+			BTRON_CHECK("右に抜けた所も下地に戻る",
+			            scr_solid(sg, 108, 104, 112, 108, 0x00123456));
+			BTRON_CHECK("新しい位置は前景色",
+			            scr_solid(sg, 100, 104, 108, 112, 0));
+			BTRON_CHECK("消すと全部下地に戻る",
+			            gdsp_ptr(0) == 1 &&
+			                scr_solid(sg, 96, 96, 128, 128, 0x00123456));
+
+			BTRON_CHECK("標準形状に戻す",
+			            gset_ptr(PS_SELECT, 0, COL_BLACK, COL_WHITE) ==
+			                EG_OK);
+			BTRON_CHECK("追従に戻す", gmot_ptr(1) == EG_OK);
+			BTRON_CHECK("閉じる", gcls_env(sg) == EG_OK);
+		} else if (sg >= 1) {
+			BTRON_CHECK("閉じる", gcls_env(sg) == EG_OK);
+		}
 	});
 
 	BTRON_TEST("ポインタは下地を壊さない (§2.6.2)", {

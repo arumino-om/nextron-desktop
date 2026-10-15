@@ -44,7 +44,10 @@
 /* MAIR_EL1 のインデックス */
 #define MAIR_NORMAL 0 /* Normal, Inner/Outer Write-Back non-transient */
 #define MAIR_DEVICE 1 /* Device-nGnRnE */
-#define MAIR_VALUE ((0xFFULL << (8 * MAIR_NORMAL)) | (0x00ULL << (8 * MAIR_DEVICE)))
+#define MAIR_NC 2     /* Normal, Inner/Outer Non-cacheable（フレームバッファ） */
+#define MAIR_VALUE                                                         \
+	((0xFFULL << (8 * MAIR_NORMAL)) | (0x00ULL << (8 * MAIR_DEVICE)) |     \
+	 (0x44ULL << (8 * MAIR_NC)))
 
 #define T0SZ 17ULL /* §3.2-2 */
 #define T1SZ 17ULL
@@ -137,6 +140,12 @@ LOCAL UD attr_to_desc(UW attr)
 	if (attr & BTRON_PG_DEVICE) {
 		d |= D_ATTRIDX(MAIR_DEVICE);
 		/* デバイスメモリは投機実行させない */
+		d |= D_PXN | D_UXN;
+	} else if (attr & BTRON_PG_NOCACHE) {
+		/* **通常メモリ・キャッシュ無効。** フレームバッファ用。
+		 * デバイスメモリと違って書き込みをまとめてよい。
+		 * どれだけ効くかは vmem.h の注記を読むこと。 */
+		d |= D_ATTRIDX(MAIR_NC) | D_SH_INNER;
 		d |= D_PXN | D_UXN;
 	} else {
 		d |= D_ATTRIDX(MAIR_NORMAL) | D_SH_INNER;
@@ -369,7 +378,7 @@ EXPORT Bool hal_vm_enabled(void)
 	return vm_on;
 }
 
-EXPORT UD hal_vm_map_device(UD pa, UD size)
+LOCAL UD map_alias(UD pa, UD size, UW attr)
 {
 	UD ps = (UD)hal_page_size();
 	UD start = pa & ~(ps - 1);
@@ -385,7 +394,7 @@ EXPORT UD hal_vm_map_device(UD pa, UD size)
 		return BTRON_MMIO_BASE + pa;
 	}
 	if (hal_vm_map(&kernel_space, va, start, end - start,
-	               BTRON_PG_READ | BTRON_PG_WRITE | BTRON_PG_DEVICE) != 0) {
+	               BTRON_PG_READ | BTRON_PG_WRITE | attr) != 0) {
 		return 0;
 	}
 	__asm__ volatile(
@@ -394,6 +403,16 @@ EXPORT UD hal_vm_map_device(UD pa, UD size)
 	    "dsb ish\n"
 	    "isb\n" ::: "memory");
 	return BTRON_MMIO_BASE + pa;
+}
+
+EXPORT UD hal_vm_map_device(UD pa, UD size)
+{
+	return map_alias(pa, size, BTRON_PG_DEVICE);
+}
+
+EXPORT UD hal_vm_map_framebuf(UD pa, UD size)
+{
+	return map_alias(pa, size, BTRON_PG_NOCACHE);
 }
 
 /* ------------------------------------------------------------------ */

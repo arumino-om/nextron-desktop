@@ -121,6 +121,7 @@ LOCAL void status(WID wid, PNT p, UW stat)
 	GID g = wget_gid(wid);
 	TC buf[80];
 	W n = 0;
+	W w;
 	RECT fr;
 	RECT box;
 
@@ -151,10 +152,38 @@ LOCAL void status(WID wid, PNT p, UW stat)
 	}
 	buf[n] = TNULL;
 
+	/* **消してから書くと、消えている間が見える。** 状態行は PD を
+	 * 動かすたびに書き替わるので、そこがちらつきとして目に付く。
+	 * 文字の背景を不透明にすれば文字のセルは背景ごと 1 回で書き替わる
+	 * ので、白で消すのは**文字が覆わない余りだけ**にする。 */
+	w = (n > 0) ? gget_stw(g, buf, n, 0, 0) : 0;
+	if (w > 0) {
+		RECT s;
+
+		(void)gset_chc(g, COL_BLACK, COL_WHITE);
+		(void)gdra_stp(g, (W)(box.c.left + 2), (W)(box.c.top + 15), buf,
+		               n, G_STORE);
+		/* 文字の左の 2 画素 */
+		s = box;
+		s.c.right = (H)(box.c.left + 2);
+		(void)gfil_rec(g, s, (CONST PAT *)WHITE0, 0, G_STORE);
+		/* 文字列より右の余り */
+		s = box;
+		s.c.left = (H)(box.c.left + 2 + w);
+		if (s.c.left < s.c.right) {
+			(void)gfil_rec(g, s, (CONST PAT *)WHITE0, 0, G_STORE);
+		}
+		/* 文字枠（高さ 16）より下の余り */
+		s = box;
+		s.c.left = (H)(box.c.left + 2);
+		s.c.right = (H)(box.c.left + 2 + w);
+		s.c.top = (H)(box.c.top + 16);
+		if (s.c.top < s.c.bottom && s.c.left < s.c.right) {
+			(void)gfil_rec(g, s, (CONST PAT *)WHITE0, 0, G_STORE);
+		}
+		return;
+	}
 	(void)gfil_rec(g, box, (CONST PAT *)WHITE0, 0, G_STORE);
-	(void)gset_chc(g, COL_BLACK, COL_TRANS);
-	(void)gdra_stp(g, (W)(box.c.left + 2), (W)(box.c.top + 15), buf, n,
-	               G_STORE);
 }
 
 /* 作業領域に中身を描く。 */
