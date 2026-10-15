@@ -7094,6 +7094,56 @@ LOCAL void run_proc_tests(void)
 		}
 	});
 
+	BTRON_TEST("裏のウィンドウの枠も描き直される (§3.1.2.3)", {
+		if (!win_up) {
+			BTRON_CHECK("画面が無い構成なので飛ばす", True);
+		} else {
+			GID sg = gopn_dev(nm_screen, 0);
+			WDSTAT s2;
+			RECT nr;
+			W l;
+			W t;
+
+			/* **枠を描くのはマネージャである。** 持ち主に再表示を
+			 * 頼んでも描き直されるのは作業領域だけなので、裏の
+			 * ウィンドウの枠は誰も描かない。重なったウィンドウを
+			 * 動かすと、裏の枠が消えたままになっていた。
+			 *
+			 * 入力不可状態のタイトルバーは**白一色**で、机の 50% 柄
+			 * とは見分けられる。そこを隠してから出して確かめる。 */
+			if (sg >= 1 && wget_sts(win_w2, &s2, 0) >= 0) {
+				/* タイトルバーの中で、文字にも四隅のハンドルにも
+				 * 掛からない所を見る。 */
+				l = s2.r.c.left + 60;
+				t = s2.r.c.top + 4;
+
+				/* 手前の win_w1 を**大きさごと指定して**重ねる。
+				 * 動かすだけだと win_w1 の大きさに依ってしまう。 */
+				BTRON_CHECK("手前にする", wswi_wnd(win_w1, 0) == EX_OK);
+				nr.c.left = (H)(s2.r.c.left - 10);
+				nr.c.top = (H)(s2.r.c.top - 10);
+				nr.c.right = (H)(s2.r.c.left + 120);
+				nr.c.bottom = (H)(s2.r.c.top + 60);
+				BTRON_CHECK("重ねる", wrsz_wnd(win_w1, &nr) == 1);
+				BTRON_CHECK("隠れた",
+				            !scr_solid(sg, l, t, l + 20, t + 10,
+				                       0x00FFFFFFU));
+
+				/* **本番。** 手前をどかすと裏の枠が出てこなければ
+				 * ならない。出てこなければ机の柄のままになる。 */
+				nr.c.left = 400;
+				nr.c.top = 330;
+				BTRON_CHECK("どかす", wmov_wnd(win_w1, &nr) == 1);
+				BTRON_CHECK("裏のタイトルバーが戻る",
+				            scr_solid(sg, l, t, l + 20, t + 10,
+				                      0x00FFFFFFU));
+				BTRON_CHECK("閉じる", gcls_env(sg) == EG_OK);
+			} else if (sg >= 1) {
+				BTRON_CHECK("閉じる", gcls_env(sg) == EG_OK);
+			}
+		}
+	});
+
 	BTRON_TEST("ポインタの状態は全プロセスで 1 つ (dp.h PtrShared)", {
 		if (!win_up) {
 			BTRON_CHECK("画面が無い構成なので飛ばす", True);

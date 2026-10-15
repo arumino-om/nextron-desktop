@@ -560,45 +560,73 @@ LOCAL void redraw(WID wid)
 	draw_work(wid, 0);
 }
 
-/* 消えた領域を背景（画面）で埋め、下のウィンドウに再表示要求を出す。
+/* ウィンドウが退いて現れた領域を直す。
+ *
+ * やることは 3 つ —— 何も無い所を机の柄で埋める / 現れたウィンドウの
+ * **枠をマネージャが描き直す** / 中身は持ち主に頼む。
  *
  * `keep` に長方形を渡すと、そこは塗らない。移動・変形のときに**新しい
  * 位置**を渡すためにある。元の場所と新しい場所は普通ぶつかるので、
- * 全部を背景で塗ってから描き直すと、重なりが一瞬デスクトップ柄に
+ * 全部を机で塗ってから描き直すと、重なりが一瞬デスクトップ柄に
  * 見える。ドラッグ中はこれが毎回起きるのでちらつきとして目に付く。
  * 前置長方形リストはまさにこういう「塗ってはいけない区画」を表す
  * 仕掛けなので（仕様 §2.2.4）、それに任せる。 */
 LOCAL void expose(CONST RECT *area, CONST RECT *keep)
 {
+	RLIST rl[DP_MAX_FORE];
 	W z[W_MAX_WND];
 	W nz;
+	W nfore = 0;
 	W i;
 
 	if (screen_gid < 1 || rect_empty(area)) {
 		return;
 	}
-	if (keep != 0 && !rect_empty(keep)) {
-		RLIST rl;
-
-		rl.next = 0;
-		rl.comp = *keep;
-		(void)gset_for(screen_gid, &rl);
-	} else {
-		(void)gset_for(screen_gid, 0);
-	}
-	hide_ptr();
-	(void)gfil_rec(screen_gid, *area, (CONST PAT *)BLACK50, 0, G_STORE);
-	show_ptr();
-	(void)gset_for(screen_gid, 0);
-
 	nz = zsort(z);
-	for (i = 0; i < nz; i++) {
+	hide_ptr();
+
+	/* **机を塗るのは本当に何も無い所だけ。** 下にウィンドウがある所まで
+	 * 机で塗ってから描き直すと、そこが一度消えてから戻ることになる。
+	 * 塗ってはいけない区画は前置長方形リストで表す（仕様 §2.2.4）。 */
+	if (keep != 0 && !rect_empty(keep)) {
+		rl[nfore++].comp = *keep;
+	}
+	for (i = 0; i < nz && nfore < DP_MAX_FORE; i++) {
 		RECT hit = rect_isect(area, &wnd[z[i]].frame);
 
-		if (!rect_empty(&hit)) {
-			(void)wsv_req_dsp(z[i]);
+		if (rect_empty(&hit) || !visible(z[i])) {
+			continue;
 		}
+		rl[nfore++].comp = wnd[z[i]].frame;
 	}
+	/* 入り切らなかった分は机で塗られるが、この後すぐ描き直すので
+	 * 絵は合う（一瞬ちらつくだけ）。 */
+	for (i = 0; i < nfore; i++) {
+		rl[i].next = (i + 1 < nfore) ? &rl[i + 1] : 0;
+	}
+	(void)gset_for(screen_gid, (nfore > 0) ? &rl[0] : 0);
+	(void)gfil_rec(screen_gid, *area, (CONST PAT *)BLACK50, 0, G_STORE);
+	(void)gset_for(screen_gid, 0);
+
+	/* **枠を描くのはマネージャの仕事である。**
+	 *
+	 * 持ち主に再表示を頼んでも、描き直されるのは作業領域だけで、
+	 * 枠・タイトル・スクロールバーは誰も描かない。重なったウィンドウを
+	 * 拡大縮小すると、その裏のウィンドウの枠が消えたままになっていた。
+	 *
+	 * **奥から手前へ**描く。手前のものが後から上書きする。
+	 * 作業領域も背景で塗っておく —— そうしないと、動いたウィンドウの
+	 * 古い画素が持ち主の描き直しまで残る。 */
+	for (i = nz - 1; i >= 0; i--) {
+		RECT hit = rect_isect(area, &wnd[z[i]].frame);
+
+		if (rect_empty(&hit) || !visible(z[i])) {
+			continue;
+		}
+		redraw(z[i]);
+		(void)wsv_req_dsp(z[i]);
+	}
+	show_ptr();
 }
 
 /* ------------------------------------------------------------------ */
