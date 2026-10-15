@@ -396,6 +396,26 @@ EXPORT WERR acp_por(ID id, UW acpptn, W *rdv, VP msg, TMOUT tmo)
 /* 返答                                                                */
 /* ------------------------------------------------------------------ */
 
+EXPORT W rdv_caller(W rdv)
+{
+	UD state = hal_int_disable();
+	RDVCB *e = get_rdv(rdv);
+	W pid = 0;
+
+	/* **呼出側のプロセス ID を、呼出側に言わせずに知る。**
+	 *
+	 * 外殻のサーバは「誰からの要求か」で権限を判断する（例: ウィンドウの
+	 * 管理プロセスでなければ変更できない）。要求の中に入れさせると
+	 * 偽れてしまうので、ランデブの記録から引く。
+	 *
+	 * **BTRON3 の API ではない。** 外殻サーバのための内部の口。 */
+	if (e != 0 && e->caller != 0) {
+		pid = prc_task_owner(e->caller->tskid);
+	}
+	hal_int_restore(state);
+	return pid;
+}
+
 EXPORT ERR rpl_rdv(W rdv, VP msg, W rmsz)
 {
 	UD state;

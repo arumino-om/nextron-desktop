@@ -143,4 +143,11 @@ IMPORT ERR fwd_por(ID id, UW calptn, W rdv, VP msg, W cmsz);
 /* ランデブ返答。相手に返答してランデブを終了する。rmsz は 1..maxrmsz。 */
 IMPORT ERR rpl_rdv(W rdv, VP msg, W rmsz);
 
+/* 成立しているランデブの**呼出側のプロセス ID**。
+ *
+ * **BTRON3 の API ではない。** 外殻のサーバが「誰からの要求か」で権限を
+ * 判断するのに要る。要求の中に入れさせると偽れるので、ランデブの記録から
+ * 引けるようにしてある。 */
+IMPORT W rdv_caller(W rdv);
+
 #endif /* __BTRON_TASKCOMM_H__ */

@@ -48,6 +48,25 @@
 #include <btron/proc.h>
 #include <btron/window.h>
 
+/* エラーコードを 10 進で出す。原因を黙らせないため。 */
+LOCAL void put_err(W v)
+{
+	B buf[12];
+	W i = 0;
+	UW u = (v < 0) ? (UW)(-v) : (UW)v;
+
+	if (v < 0) {
+		hal_console_putc('-');
+	}
+	do {
+		buf[i++] = (B)('0' + (u % 10U));
+		u /= 10U;
+	} while (u > 0 && i < (W)sizeof(buf));
+	while (i > 0) {
+		hal_console_putc(buf[--i]);
+	}
+}
+
 /* 書いた点の記録。作業領域の相対座標で持つ。 */
 #define DEMO_MAX_DOT 512
 LOCAL PNT dot[DEMO_MAX_DOT];
@@ -263,7 +282,12 @@ LOCAL void drag(WEVENT *evt)
 /* 本体                                                                */
 /* ------------------------------------------------------------------ */
 
-EXPORT void win_demo_hold(void)
+/* デモ本体。**プロセスのメインタスクとして走る。**
+ *
+ * 外殻はプロセスである（詳細 E22）。ウィンドウマネージャをサーバに
+ * した時点で、それを立てる側もプロセスでなければならなくなった
+ * （ポートもグローバル名もタスクも、プロセスに属するものだから）。 */
+LOCAL W demo_main(MESSAGE *msg)
 {
 	CONST TC t1[] = {(TC)'B', (TC)'T', (TC)'R', (TC)'O', (TC)'N', (TC)'3',
 	                 TNULL};
@@ -289,9 +313,12 @@ EXPORT void win_demo_hold(void)
 	WID w1;
 	WID w2;
 	WEVENT ev;
+	Bool win_ok;
 	PNT last;
 	UW last_stat = 0;
 	Bool drawing = False;
+
+	(void)msg;
 
 	/* **画面の持ち主をコンソールから取り上げる。**
 	 * これをしないと、以後の出力が窓の上に流れてくる。 */
@@ -317,7 +344,20 @@ EXPORT void win_demo_hold(void)
 		}
 	}
 
-	if (win_init() != EX_OK) {
+	{
+		ERR wer = win_init();
+
+		if (wer != EX_OK) {
+			/* **黙って止まらない。** 画面に机だけが出て「なぜ窓が
+			 * 無いのか」が分からない、という状態を作らない。 */
+			hal_console_tee(0);
+			hal_console_puts("  ウィンドウマネージャを立てられません (");
+			put_err(wer);
+			hal_console_puts(")\n");
+		}
+		win_ok = (wer == EX_OK);
+	}
+	if (!win_ok) {
 		/* 画面が無い構成。電源を落とさずに止まるだけにする
 		 * （HOLD の印は「落とすな」という指示なので従う）。 */
 		for (;;) {
@@ -479,5 +519,27 @@ EXPORT void win_demo_hold(void)
 			(void)gdsp_ptr(1);
 		}
 		(void)dly_tsk(10);
+	}
+}
+
+EXPORT void win_demo_hold(void)
+{
+	CONST TC name[] = {(TC)'D', (TC)'E', (TC)'M', (TC)'O', TNULL};
+	WERR pid;
+
+	/* **デモをプロセスとして起こす。**
+	 *
+	 * ウィンドウマネージャをサーバにした時点で、それを立てる側も
+	 * プロセスでなければならなくなった。ポートもグローバル名も
+	 * サブタスクも、プロセスに属するものだからである。
+	 * 検査タスクはプロセスに属していないので、ここで 1 つ作る。 */
+	pid = prc_create(demo_main, 2, name, 0);
+	if (pid < 1) {
+		hal_console_puts("  デモのプロセスを作れません\n");
+	}
+	/* 親は待つだけ。HOLD の印は「電源を落とすな」という指示なので、
+	 * 戻らずに居続ける。 */
+	for (;;) {
+		(void)dly_tsk(1000);
 	}
 }

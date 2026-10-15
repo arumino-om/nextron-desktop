@@ -26,6 +26,7 @@
 #include <btron/manager.h>
 #include <btron/system.h>
 #include <btron/window.h>
+#include <btron/winmsg.h>
 #include <btron/screen.h>
 #include <btron/test.h>
 
@@ -447,6 +448,39 @@ LOCAL void t_drag(INT stacd, VP exinf)
 	(void)dly_tsk(40);
 	evt_pd_button(False, False); /* EV_BUTUP */
 	tk_ext_tsk();
+}
+
+/* 別プロセスからウィンドウを開く。
+ *
+ * **要求元の見分けを確かめるのに、別のプロセスが要る。**
+ * サーバが要求元を `prc_self()` で決めていると、サーバ自身のプロセスが
+ * 持ち主になってしまう。検査タスクと同じプロセスから呼んでいる限り
+ * 区別がつかない（逆検査で素通りした）。 */
+LOCAL WID wpc_wid;
+LOCAL W wpc_waiter;
+
+LOCAL W w_other_main(MESSAGE *msg)
+{
+	RECT r;
+	MESSAGE m;
+
+	(void)msg;
+	r.c.left = 300;
+	r.c.top = 300;
+	r.c.right = 420;
+	r.c.bottom = 390;
+	wpc_wid = wopn_wnd(WA_NORMAL, 0, &r, 0, 0, 0, 0, 0);
+	/* 親へ知らせる。 */
+	m.msg_type = MS_TYPE0;
+	m.msg_size = 4;
+	m.msg_body.ANYMSG.msg_str[0] = (UB)'W';
+	m.msg_body.ANYMSG.msg_str[1] = 0;
+	m.msg_body.ANYMSG.msg_str[2] = 0;
+	m.msg_body.ANYMSG.msg_str[3] = 0;
+	(void)snd_msg(wpc_waiter, &m, 0);
+	/* 親が検べ終わるまで生きている。 */
+	(void)slp_tsk(TMO_FEVR);
+	return 0;
 }
 
 LOCAL void t_fwd_server(INT stacd, VP exinf)
@@ -6640,6 +6674,145 @@ LOCAL void run_proc_tests(void)
 				                nr.c.bottom - nr.c.top == 120);
 			}
 			(void)clr_evt(EM_ALL, EM_NULL);
+		}
+	});
+
+	BTRON_TEST("ウィンドウマネージャはサーバである (詳細 E22)", {
+		if (!win_up) {
+			BTRON_CHECK("画面が無い構成なので飛ばす", True);
+		} else {
+			WinMsg wm;
+			WinEnv env;
+			WERR por;
+			W i;
+
+			/* **グローバル名で見つかること。** これが外殻サーバの
+			 * 作法（詳細 E1）で、利用側はこれだけを頼りに話しかける。 */
+			por = mgr_lookup(MGR_WINDOW);
+			BTRON_CHECK("名前で見つかる", por >= 1);
+
+			/* 利用側のスタブを通さず、要求を直に投げてみる。
+			 * **これが通れば、本当にランデブで話している。** */
+			if (por >= 1) {
+				for (i = 0; i < 4; i++) {
+					wm.a[i] = 0;
+				}
+				wm.func = WF_get_act;
+				wm.result = 0;
+				wm.inlen = 0;
+				wm.outlen = 0;
+				BTRON_CHECK("直に要求を投げられる",
+				            cal_por((ID)por, MGR_PTN, (VP)&wm,
+				                    (W)sizeof(WinMsg), T_FOREVER) >= 0);
+				BTRON_CHECK("入力受付状態が返る",
+				            wm.result == wget_act(0));
+				/* 知らない要求番号は断られる。 */
+				wm.func = 9999;
+				wm.inlen = 0;
+				(void)cal_por((ID)por, MGR_PTN, (VP)&wm,
+				              (W)sizeof(WinMsg), T_FOREVER);
+				BTRON_CHECK("知らない要求は断る", wm.result == EX_NOSPT);
+			}
+
+			/* 描画環境の情報。**利用側はこれで自分の GID を組み立てる。**
+			 * サーバの GID をもらっても、別のアドレス空間では使えない。 */
+			wm.func = WF_get_env;
+			wm.a[0] = win_w2;
+			wm.inlen = 0;
+			wm.outlen = 0;
+			BTRON_CHECK("環境の情報を引ける",
+			            cal_por((ID)por, MGR_PTN, (VP)&wm,
+			                    (W)sizeof(WinMsg), T_FOREVER) >= 0 &&
+			                wm.result == EX_OK);
+			{
+				CONST UB *src = wm.data;
+				UB *dst = (UB *)(VP)&env;
+
+				for (i = 0; i < (W)sizeof(WinEnv); i++) {
+					dst[i] = src[i];
+				}
+			}
+			BTRON_CHECK("世代番号が入っている", env.gen > 0);
+			{
+				WDSTAT st;
+
+				BTRON_CHECK("作業領域が合っている",
+				            wget_sts(win_w2, &st, 0) >= 0 &&
+				                env.work.c.right - env.work.c.left ==
+				                    st.wr.c.right - st.wr.c.left);
+			}
+
+			/* **GID は呼んだプロセスのもの。** サーバの描画環境 ID を
+			 * そのまま返していないことを確かめる。 */
+			{
+				GID g = wget_gid(win_w2);
+
+				BTRON_CHECK("描画環境が取れる", g >= 1);
+				BTRON_CHECK("自分の環境として使える",
+				            gget_bnd(g, &env.work) == EG_OK);
+			}
+		}
+	});
+
+	BTRON_TEST("持ち主でないプロセスは変えられない (§3.1.4)", {
+		if (!win_up) {
+			BTRON_CHECK("画面が無い構成なので飛ばす", True);
+		} else {
+			W pid;
+			MESSAGE r;
+			RECT nr;
+
+			wpc_wid = 0;
+			wpc_waiter = prc_self();
+			(void)clr_msg(MM_ALL, MM_NULL);
+			pid = prc_create(w_other_main, 2, nm_wnd1, 0);
+			BTRON_CHECK("別プロセスを起こす", pid > 0);
+			if (pid > 0) {
+				/* **待ち切りにしない。** 向こうが知らせられないまま
+				 * 止まったとき、検査が落ちるのではなく永久に待って
+				 * しまう（逆検査で踏んだ落とし穴と同じ形）。 */
+				{
+					W k;
+					W got = ER_NONE;
+
+					for (k = 0; k < 200; k++) {
+						got = rcv_msg(MSGMASK(MS_TYPE0), &r,
+						              (W)sizeof(r), NOWAIT);
+						if (got >= 0) {
+							break;
+						}
+						(void)dly_tsk(5);
+					}
+					BTRON_CHECK("知らせが届く", got >= 0);
+				}
+				BTRON_CHECK("向こうでウィンドウが開いた", wpc_wid >= 1);
+				/* **要求元はランデブの記録から引く。**
+				 * 呼出側に名乗らせると偽れるし、サーバ自身の
+				 * プロセスで代用すると持ち主が全部同じになる。 */
+				{
+					WDSTAT st;
+
+					BTRON_CHECK("持ち主は向こうのプロセス",
+					            wget_sts(wpc_wid, &st, 0) >= 0 &&
+					                st.pid == pid);
+				}
+				nr.c.left = 100;
+				nr.c.top = 100;
+				nr.c.right = 220;
+				nr.c.bottom = 190;
+				/* 仕様「管理プロセスでない場合は、EX_WPRC」 */
+				BTRON_CHECK("こちらからは動かせない",
+				            wmov_wnd(wpc_wid, &nr) == EX_WPRC);
+				BTRON_CHECK("こちらからは閉じられない",
+				            wcls_wnd(wpc_wid, CLR) == EX_WPRC);
+				/* 向こうが終わればウィンドウも片付く（仕様）。 */
+				BTRON_CHECK("向こうを終わらせる",
+				            ter_prc(pid, 0, TERM_NRM) == ER_OK);
+				(void)dly_tsk(20);
+				BTRON_CHECK("ウィンドウも消えた",
+				            wget_sts(wpc_wid, 0, 0) == EX_WID);
+			}
+			(void)clr_msg(MM_ALL, MM_NULL);
 		}
 	});
 

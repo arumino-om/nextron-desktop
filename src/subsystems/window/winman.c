@@ -31,7 +31,7 @@
  * イベントの配送
  * ------------------------------------------------------------------------
  *
- * `wget_evt` が核のイベント管理 (§1.7) からイベントを取り、
+ * `wsv_get_evt` が核のイベント管理 (§1.7) からイベントを取り、
  *
  *   - PD のボタンが入力受付状態でないウィンドウの上で押された
  *       → そのウィンドウへ入力受付状態を移し、呼び出し側へは EV_SWITCH
@@ -45,6 +45,9 @@
 #include <btron/message.h>
 #include <btron/proc.h>
 #include <btron/window.h>
+#include <btron/winmsg.h>
+
+#include "winsrv.h"
 
 /* 枠の寸法。仕様は WDDISP.frame で指定できるとしているが、既定値は
  * 「ウィンドウマネージャにより適当な値が規定されている」。 */
@@ -84,7 +87,7 @@ typedef struct Window {
 	RECT wrk;
 	Bool redisp;    /* 再表示要求 */
 	RECT redisp_r;  /* 再表示すべき領域（相対座標） */
-	Bool in_disp;   /* wsta_dsp 〜 wend_dsp の間 */
+	Bool in_disp;   /* wsv_sta_dsp 〜 wsv_end_dsp の間 */
 	Bool panel;     /* パネルウィンドウか */
 } Window;
 
@@ -94,7 +97,7 @@ LOCAL Window wnd[W_MAX_WND + 1];
 LOCAL W order[W_MAX_WND];
 LOCAL W norder;
 
-/* 画面デバイス名。win_init と wsta_drg が使う。 */
+/* 画面デバイス名。win_init と wsv_sta_drg が使う。 */
 LOCAL CONST TC nm_screen[] = {(TC)'S', (TC)'C', (TC)'R', (TC)'E', (TC)'E',
                               (TC)'N', TNULL};
 
@@ -113,6 +116,23 @@ LOCAL Bool win_on;
 /* ------------------------------------------------------------------ */
 /* 補助                                                                */
 /* ------------------------------------------------------------------ */
+
+/* 要求元のプロセス ID。
+ *
+ * **`prc_self()` ではサーバ自身が返ってしまう。** サーバはランデブの
+ * 記録から呼出側を引いてここに置く（`rdv_caller`）。サーバを通さずに
+ * 直接呼ばれた場合（カーネル内の検査など）は 0 のままなので、
+ * そのときは自分のプロセスを答える。 */
+EXPORT W win_req_pid;
+
+LOCAL W req_pid(void)
+{
+	return (win_req_pid != 0) ? win_req_pid : prc_self();
+}
+
+/* 前後関係や位置が変わるたびに進む。利用側はこれを見て、
+ * 自分の描画環境を組み直すかどうかを決める。 */
+LOCAL W env_gen = 1;
 
 LOCAL Window *get(WID wid)
 {
@@ -250,6 +270,9 @@ LOCAL void refresh_fore(void)
 {
 	W i;
 
+	/* 前後関係が変わった。利用側の描画環境は組み直しが要る。 */
+	env_gen++;
+
 	for (i = 1; i <= W_MAX_WND; i++) {
 		if (wnd[i].used) {
 			setup_gid(i);
@@ -258,7 +281,7 @@ LOCAL void refresh_fore(void)
 }
 
 /* ------------------------------------------------------------------ */
-/* 枠の計算 (§3.1.3 / wcnv_rec)                                        */
+/* 枠の計算 (§3.1.3 / wsv_cnv_rec)                                        */
 /* ------------------------------------------------------------------ */
 
 /* 外枠の各辺の厚み。属性で変わる。 */
@@ -297,7 +320,7 @@ LOCAL void insets(UW attr, W *l, W *t, W *r, W *b)
 	}
 }
 
-EXPORT ERR wcnv_rec(UW attr, RECT *r, UW opt)
+EXPORT ERR wsv_cnv_rec(UW attr, RECT *r, UW opt)
 {
 	W l;
 	W t;
@@ -426,7 +449,7 @@ LOCAL void draw_frame(WID wid)
 	}
 
 	/* 四隅のハンドル。**掴める場所が見えていなければ掴めない。**
-	 * wfnd_wnd が返す領域と同じ大きさで描く。 */
+	 * wsv_fnd_wnd が返す領域と同じ大きさで描く。 */
 	if ((w->attr & WA_SIZE) != 0) {
 		RECT h[4];
 		W i;
@@ -455,7 +478,7 @@ LOCAL void draw_frame(WID wid)
 		RECT bb;
 		RECT lb;
 
-		if (wget_bar(wid, &rb, &bb, &lb) == EX_OK) {
+		if (wsv_get_bar(wid, &rb, &bb, &lb) == EX_OK) {
 			RECT s[3];
 			W i;
 
@@ -468,7 +491,7 @@ LOCAL void draw_frame(WID wid)
 				if (rect_empty(&a)) {
 					continue;
 				}
-				/* wget_bar は相対座標で返すので絶対へ戻す */
+				/* wsv_get_bar は相対座標で返すので絶対へ戻す */
 				a.c.left = (H)(a.c.left + w->work.c.left);
 				a.c.right = (H)(a.c.right + w->work.c.left);
 				a.c.top = (H)(a.c.top + w->work.c.top);
@@ -530,7 +553,7 @@ LOCAL void expose(CONST RECT *area)
 		RECT hit = rect_isect(area, &wnd[z[i]].frame);
 
 		if (!rect_empty(&hit)) {
-			(void)wreq_dsp(z[i]);
+			(void)wsv_req_dsp(z[i]);
 		}
 	}
 }
@@ -605,7 +628,7 @@ LOCAL void activate(WID wid)
 
 		for (i = nz - 1; i >= 0; i--) {
 			redraw(z[i]);
-			(void)wreq_dsp(z[i]);
+			(void)wsv_req_dsp(z[i]);
 		}
 	}
 }
@@ -661,7 +684,7 @@ LOCAL WID open_common(UW attr, UW par, RECT *r, CONST RECT *org, W pict,
 	Window *w;
 	RECT frame;
 	RECT scr;
-	W me = prc_self();
+	W me = req_pid();
 	W i;
 
 	if (r == 0) {
@@ -673,7 +696,7 @@ LOCAL WID open_common(UW attr, UW par, RECT *r, CONST RECT *org, W pict,
 	/* 指定座標系を外枠に直す。 */
 	frame = *r;
 	if ((attr & WA_WORK) != 0) {
-		(void)wcnv_rec(attr, &frame, WA_WORK);
+		(void)wsv_cnv_rec(attr, &frame, WA_WORK);
 	} else if ((attr & WA_FRAME) != 0) {
 		/* すでに外枠座標 */
 	} else {
@@ -800,7 +823,7 @@ LOCAL WID open_common(UW attr, UW par, RECT *r, CONST RECT *org, W pict,
 	return wid;
 }
 
-EXPORT WID wopn_wnd(UW attr, UW par, RECT *r, CONST RECT *org, W pict,
+EXPORT WID wsv_opn_wnd(UW attr, UW par, RECT *r, CONST RECT *org, W pict,
                     CONST TC *tit, CONST PAT *bgpat, CONST WDDISP *atr)
 {
 	/* 仕様「WA_FRONT = 0 の時のみ有効」なので、前面ウィンドウに
@@ -811,7 +834,7 @@ EXPORT WID wopn_wnd(UW attr, UW par, RECT *r, CONST RECT *org, W pict,
 	return open_common(attr, par, r, org, pict, tit, bgpat, atr, False);
 }
 
-EXPORT WID wopn_pwd(CONST RECT *r)
+EXPORT WID wsv_opn_pwd(CONST RECT *r)
 {
 	RECT rr;
 
@@ -823,11 +846,11 @@ EXPORT WID wopn_pwd(CONST RECT *r)
 	return open_common(WA_TITL, 0, &rr, 0, 0, 0, 0, 0, True);
 }
 
-EXPORT ERR wcls_wnd(WID wid, W opt)
+EXPORT ERR wsv_cls_wnd(WID wid, W opt)
 {
 	Window *w = get(wid);
 	RECT gone;
-	W me = prc_self();
+	W me = req_pid();
 	W i;
 
 	if (w == 0) {
@@ -837,10 +860,10 @@ EXPORT ERR wcls_wnd(WID wid, W opt)
 		return EX_WPRC;
 	}
 	/* 仕様「ドラッグ描画対象のウィンドウが削除された場合…自動的に
-	 * wend_drg() の処理が行なわれる」。**残すと解放済みのウィンドウを
+	 * wsv_end_drg() の処理が行なわれる」。**残すと解放済みのウィンドウを
 	 * 指したまま影を描き続ける。** */
 	if (drag_wid == wid) {
-		(void)wend_drg();
+		(void)wsv_end_drg();
 	}
 	gone = w->frame;
 	if (w->gid >= 1) {
@@ -899,7 +922,7 @@ EXPORT ERR wcls_wnd(WID wid, W opt)
 /* 情報の取得と設定                                                    */
 /* ------------------------------------------------------------------ */
 
-EXPORT GID wget_gid(WID wid)
+EXPORT GID wsv_get_gid(WID wid)
 {
 	Window *w = get(wid);
 
@@ -909,7 +932,42 @@ EXPORT GID wget_gid(WID wid)
 	return w->gid;
 }
 
-EXPORT W wget_sts(WID wid, WDSTAT *stat, WDDISP *atr)
+EXPORT W wsv_get_env(WID wid, WinEnv *env)
+{
+	Window *w = get(wid);
+	W z[W_MAX_WND];
+	W nz;
+	W me = -1;
+	W i;
+
+	if (w == 0) {
+		return EX_WID;
+	}
+	if (env == 0) {
+		return EX_ADR;
+	}
+	env->gen = env_gen;
+	env->work = w->work;
+	env->nfore = 0;
+	/* 自分より手前にあるウィンドウの外枠を並べる。
+	 * **絶対座標のまま返す。** 利用側が自分の座標系に直す。 */
+	nz = zsort(z);
+	for (i = 0; i < nz; i++) {
+		if (z[i] == wid) {
+			me = i;
+			break;
+		}
+	}
+	if (me > 0) {
+		for (i = 0; i < me && env->nfore < WIN_MAX_ENVFORE; i++) {
+			env->fore[env->nfore] = wnd[z[i]].frame;
+			env->nfore++;
+		}
+	}
+	return EX_OK;
+}
+
+EXPORT W wsv_get_sts(WID wid, WDSTAT *stat, WDDISP *atr)
 {
 	Window *w = get(wid);
 
@@ -934,7 +992,7 @@ EXPORT W wget_sts(WID wid, WDSTAT *stat, WDDISP *atr)
 	return (class_of(wid) <= WC_ACTMAIN) ? 1 : 0;
 }
 
-EXPORT W wget_tit(WID wid, W *pict, TC *title)
+EXPORT W wsv_get_tit(WID wid, W *pict, TC *title)
 {
 	Window *w = get(wid);
 	W n = 0;
@@ -958,7 +1016,7 @@ EXPORT W wget_tit(WID wid, W *pict, TC *title)
 	return n;
 }
 
-EXPORT ERR wset_tit(WID wid, W pict, CONST TC *title, W mode)
+EXPORT ERR wsv_set_tit(WID wid, W pict, CONST TC *title, W mode)
 {
 	Window *w = get(wid);
 	W i;
@@ -967,7 +1025,7 @@ EXPORT ERR wset_tit(WID wid, W pict, CONST TC *title, W mode)
 	if (w == 0) {
 		return EX_WID;
 	}
-	if (w->pid != prc_self()) {
+	if (w->pid != req_pid()) {
 		return EX_WPRC;
 	}
 	w->pict = pict;
@@ -982,14 +1040,14 @@ EXPORT ERR wset_tit(WID wid, W pict, CONST TC *title, W mode)
 	return EX_OK;
 }
 
-EXPORT ERR wset_bgp(WID wid, CONST PAT *pat)
+EXPORT ERR wsv_set_bgp(WID wid, CONST PAT *pat)
 {
 	Window *w = get(wid);
 
 	if (w == 0) {
 		return EX_WID;
 	}
-	if (w->pid != prc_self()) {
+	if (w->pid != req_pid()) {
 		return EX_WPRC;
 	}
 	if (pat == 0) {
@@ -1001,7 +1059,7 @@ EXPORT ERR wset_bgp(WID wid, CONST PAT *pat)
 	return EX_OK;
 }
 
-EXPORT W wget_bgp(WID wid, PAT *pat, W size)
+EXPORT W wsv_get_bgp(WID wid, PAT *pat, W size)
 {
 	Window *w = get(wid);
 
@@ -1017,7 +1075,7 @@ EXPORT W wget_bgp(WID wid, PAT *pat, W size)
 	return (W)sizeof(PAT);
 }
 
-EXPORT ERR wget_dat(WID wid, W *dat)
+EXPORT ERR wsv_get_dat(WID wid, W *dat)
 {
 	Window *w = get(wid);
 
@@ -1031,7 +1089,7 @@ EXPORT ERR wget_dat(WID wid, W *dat)
 	return EX_OK;
 }
 
-EXPORT ERR wset_dat(WID wid, W dat)
+EXPORT ERR wsv_set_dat(WID wid, W dat)
 {
 	Window *w = get(wid);
 
@@ -1042,7 +1100,7 @@ EXPORT ERR wset_dat(WID wid, W dat)
 	return EX_OK;
 }
 
-EXPORT ERR wget_wrk(WID wid, RECT *r)
+EXPORT ERR wsv_get_wrk(WID wid, RECT *r)
 {
 	Window *w = get(wid);
 
@@ -1056,7 +1114,7 @@ EXPORT ERR wget_wrk(WID wid, RECT *r)
 	return EX_OK;
 }
 
-EXPORT ERR wset_wrk(WID wid, CONST RECT *r)
+EXPORT ERR wsv_set_wrk(WID wid, CONST RECT *r)
 {
 	Window *w = get(wid);
 
@@ -1070,7 +1128,7 @@ EXPORT ERR wset_wrk(WID wid, CONST RECT *r)
 	return EX_OK;
 }
 
-EXPORT ERR wget_org(WID wid, W *parent, RECT *org)
+EXPORT ERR wsv_get_org(WID wid, W *parent, RECT *org)
 {
 	Window *w = get(wid);
 
@@ -1086,7 +1144,7 @@ EXPORT ERR wget_org(WID wid, W *parent, RECT *org)
 	return EX_OK;
 }
 
-EXPORT ERR wset_org(WID wid, W parent, CONST RECT *org)
+EXPORT ERR wsv_set_org(WID wid, W parent, CONST RECT *org)
 {
 	Window *w = get(wid);
 
@@ -1100,7 +1158,7 @@ EXPORT ERR wset_org(WID wid, W parent, CONST RECT *org)
 	return EX_OK;
 }
 
-EXPORT ERR wget_bar(WID wid, RECT *rbar, RECT *bbar, RECT *lbar)
+EXPORT ERR wsv_get_bar(WID wid, RECT *rbar, RECT *bbar, RECT *lbar)
 {
 	Window *w = get(wid);
 	W ww;
@@ -1146,7 +1204,7 @@ LOCAL W move_resize(WID wid, RECT *newr, Bool keep_size)
 	if (w == 0) {
 		return EX_WID;
 	}
-	if (w->pid != prc_self()) {
+	if (w->pid != req_pid()) {
 		return EX_WPRC;
 	}
 	if (newr == 0) {
@@ -1184,33 +1242,33 @@ LOCAL W move_resize(WID wid, RECT *newr, Bool keep_size)
 	redraw(wid);
 	/* 仕様「対象ウィンドウへの再表示要求イベントは発行されないが、
 	 * 再表示領域は設定されるため、関数値が "1" の場合は、
-	 * wsta_dsp() 〜 wend_dsp() による再表示を行なう必要がある」。
+	 * wsv_sta_dsp() 〜 wsv_end_dsp() による再表示を行なう必要がある」。
 	 * **だから戻り値が 1 でなければならない。** 0 を返すと、
 	 * 呼び出し側は描き直さず、中身が消えたままになる。 */
-	(void)wreq_dsp(wid);
+	(void)wsv_req_dsp(wid);
 	/* 仕様「最終的な新しいウィンドウの外枠が newr で指定した領域に
 	 * 絶対座標値で格納される」。入出力である。 */
 	*newr = w->frame;
 	return 1;
 }
 
-EXPORT W wmov_wnd(WID wid, RECT *newr)
+EXPORT W wsv_mov_wnd(WID wid, RECT *newr)
 {
 	return move_resize(wid, newr, True);
 }
 
-EXPORT W wrsz_wnd(WID wid, RECT *newr)
+EXPORT W wsv_rsz_wnd(WID wid, RECT *newr)
 {
 	return move_resize(wid, newr, False);
 }
 
-EXPORT W wchg_wnd(WID wid, RECT *r, W mode)
+EXPORT W wsv_chg_wnd(WID wid, RECT *r, W mode)
 {
 	(void)mode;
 	return move_resize(wid, r, False);
 }
 
-EXPORT W wscr_wnd(WID wid, CONST RECT *r, W dh, W dv, W mode)
+EXPORT W wsv_scr_wnd(WID wid, CONST RECT *r, W dh, W dv, W mode)
 {
 	Window *w = get(wid);
 	RECT area;
@@ -1234,7 +1292,7 @@ EXPORT W wscr_wnd(WID wid, CONST RECT *r, W dh, W dv, W mode)
 	                0, w->has_bgpat ? &w->bgpat : (CONST PAT *)WHITE0);
 }
 
-EXPORT ERR wera_wnd(WID wid, CONST RECT *r)
+EXPORT ERR wsv_era_wnd(WID wid, CONST RECT *r)
 {
 	Window *w = get(wid);
 
@@ -1249,7 +1307,7 @@ EXPORT ERR wera_wnd(WID wid, CONST RECT *r)
 /* 再表示                                                              */
 /* ------------------------------------------------------------------ */
 
-EXPORT ERR wreq_dsp(WID wid)
+EXPORT ERR wsv_req_dsp(WID wid)
 {
 	Window *w = get(wid);
 
@@ -1266,7 +1324,7 @@ EXPORT ERR wreq_dsp(WID wid)
 	return EX_OK;
 }
 
-EXPORT W wchk_dsp(WID wid)
+EXPORT W wsv_chk_dsp(WID wid)
 {
 	Window *w = get(wid);
 
@@ -1276,7 +1334,7 @@ EXPORT W wchk_dsp(WID wid)
 	return w->redisp ? 1 : 0;
 }
 
-EXPORT W wsta_dsp(WID wid, RECT *r, RLIST *rlst)
+EXPORT W wsv_sta_dsp(WID wid, RECT *r, RLIST *rlst)
 {
 	Window *w = get(wid);
 
@@ -1299,7 +1357,7 @@ EXPORT W wsta_dsp(WID wid, RECT *r, RLIST *rlst)
 	return 1;
 }
 
-EXPORT W wend_dsp(WID wid)
+EXPORT W wsv_end_dsp(WID wid)
 {
 	Window *w = get(wid);
 
@@ -1315,7 +1373,7 @@ EXPORT W wend_dsp(WID wid)
 /* 入力受付状態とイベント                                              */
 /* ------------------------------------------------------------------ */
 
-EXPORT ERR wswi_wnd(WID wid, CONST WEVENT *evt)
+EXPORT ERR wsv_swi_wnd(WID wid, CONST WEVENT *evt)
 {
 	Window *w = get(wid);
 
@@ -1331,7 +1389,7 @@ EXPORT ERR wswi_wnd(WID wid, CONST WEVENT *evt)
 	return EX_OK;
 }
 
-EXPORT WID wget_act(W *pid)
+EXPORT WID wsv_get_act(W *pid)
 {
 	if (pid != 0) {
 		*pid = (active >= 1) ? wnd[active].pid : 0;
@@ -1339,7 +1397,7 @@ EXPORT WID wget_act(W *pid)
 	return active;
 }
 
-EXPORT W wfnd_wnd(CONST PNT *gpos, PNT *lpos, W *wid)
+EXPORT W wsv_fnd_wnd(CONST PNT *gpos, PNT *lpos, W *wid)
 {
 	W z[W_MAX_WND];
 	W nz;
@@ -1427,9 +1485,9 @@ EXPORT W wfnd_wnd(CONST PNT *gpos, PNT *lpos, W *wid)
 	return -1; /* どのウィンドウにも当たらない */
 }
 
-EXPORT W wlst_wnd(WID wid, W size, W *wids)
+EXPORT W wsv_lst_wnd(WID wid, W size, W *wids)
 {
-	W me = prc_self();
+	W me = req_pid();
 	W n = 0;
 	W z[W_MAX_WND];
 	W nz = zsort(z);
@@ -1448,14 +1506,14 @@ EXPORT W wlst_wnd(WID wid, W size, W *wids)
 	return n;
 }
 
-EXPORT W wget_evt(WEVENT *evt, W mode)
+EXPORT W wsv_get_evt(WEVENT *evt, W mode)
 {
 	EVENT ev;
 	W t;
 	W pos_code;
 	W hit = 0;
 	PNT lpos;
-	W me = prc_self();
+	W me = req_pid();
 
 	if (evt == 0) {
 		return EX_ADR;
@@ -1478,7 +1536,7 @@ EXPORT W wget_evt(WEVENT *evt, W mode)
 				 * 分かる。 */
 				W nw = 0;
 				PNT nl;
-				W nc = wfnd_wnd(&ev.pos, &nl, &nw);
+				W nc = wsv_fnd_wnd(&ev.pos, &nl, &nw);
 
 				evt->s.type = EV_NULL;
 				evt->s.time = ev.time;
@@ -1515,7 +1573,7 @@ EXPORT W wget_evt(WEVENT *evt, W mode)
 		evt->e = ev;
 		return t;
 	}
-	pos_code = wfnd_wnd(&ev.pos, &lpos, &hit);
+	pos_code = wsv_fnd_wnd(&ev.pos, &lpos, &hit);
 	if (pos_code < 0 || hit == 0) {
 		evt->e = ev;
 		return t; /* どのウィンドウでもない場所 */
@@ -1535,10 +1593,10 @@ EXPORT W wget_evt(WEVENT *evt, W mode)
 	 *   - 入力受付状態のウィンドウを押したら、枠の上でも EV_BUTDWN
 	 *     （EV_BUTDWN の説明「対応するウィンドウが現在入力受付状態の
 	 *     主ウィンドウまたは従属ウィンドウである場合に得られる」）。
-	 *     どこを押したかは wfnd_wnd で引ける
+	 *     どこを押したかは wsv_fnd_wnd で引ける
 	 *   - cmd は W_SWITCH ではなく**押した位置の位置コード**。W_SWITCH は
 	 *     アプリからの要求やパネルのクローズによる切換のときの値
-	 *   - 切換は**マネージャが行う**。アプリが wswi_wnd を呼ぶのではない
+	 *   - 切換は**マネージャが行う**。アプリが wsv_swi_wnd を呼ぶのではない
 	 */
 	if (t == EV_BUTDWN && class_of(hit) > WC_ACTMAIN) {
 		Window *hw = get(hit);
@@ -1570,7 +1628,7 @@ EXPORT W wget_evt(WEVENT *evt, W mode)
 /* ドラッグ (§3.1.2.5 / §3.1.4)                                        */
 /* ------------------------------------------------------------------ */
 
-EXPORT GID wsta_drg(WID wid, W lock)
+EXPORT GID wsv_sta_drg(WID wid, W lock)
 {
 	Window *w = get(wid);
 	GID g;
@@ -1590,7 +1648,7 @@ EXPORT GID wsta_drg(WID wid, W lock)
 	if (class_of(wid) > WC_ACTMAIN) {
 		return EX_WND;
 	}
-	if (w->pid != prc_self()) {
+	if (w->pid != req_pid()) {
 		/* 仕様の解説は EX_WPRC、エラーコード一覧は EX_ADR と食い違って
 		 * いる。解説の方を採る（一覧は転記の崩れと見た）。 */
 		return EX_WPRC;
@@ -1637,19 +1695,19 @@ EXPORT GID wsta_drg(WID wid, W lock)
 
 	drag_wid = wid;
 	drag_gid = g;
-	drag_pid = prc_self();
+	drag_pid = req_pid();
 	drag_lock = (lock != 0);
 	drag_org.x = w->work.c.left;
 	drag_org.y = w->work.c.top;
 	return g;
 }
 
-EXPORT ERR wend_drg(void)
+EXPORT ERR wsv_end_drg(void)
 {
 	if (drag_wid == 0) {
 		return EX_OK; /* 仕様「行なわれていなかった場合は何もしない」 */
 	}
-	if (drag_pid != prc_self()) {
+	if (drag_pid != req_pid()) {
 		return EX_DRAG;
 	}
 	if (drag_gid >= 1) {
@@ -1662,7 +1720,7 @@ EXPORT ERR wend_drg(void)
 	return EX_OK;
 }
 
-EXPORT W wget_drg(PNT *pos, WEVENT *evt)
+EXPORT W wsv_get_drg(PNT *pos, WEVENT *evt)
 {
 	EVENT ev;
 	PNT p;
@@ -1762,7 +1820,7 @@ LOCAL W constrain(UW stat, W dx, W dy, W cur)
 	}
 }
 
-EXPORT W wmov_drg(WEVENT *evt, RECT *newr)
+EXPORT W wsv_mov_drg(WEVENT *evt, RECT *newr)
 {
 	WID wid = 0;
 	W code = drag_event(evt, &wid);
@@ -1789,7 +1847,7 @@ EXPORT W wmov_drg(WEVENT *evt, RECT *newr)
 	if (w == 0) {
 		return EX_WID;
 	}
-	g = wsta_drg(wid, 1);
+	g = wsv_sta_drg(wid, 1);
 	if (g < 1) {
 		return g;
 	}
@@ -1811,14 +1869,14 @@ EXPORT W wmov_drg(WEVENT *evt, RECT *newr)
 	base.c.top = (H)(w->frame.c.top - drag_org.y);
 	base.c.right = (H)(w->frame.c.right - drag_org.x);
 	base.c.bottom = (H)(w->frame.c.bottom - drag_org.y);
-	(void)wget_drg(&start, 0);
+	(void)wsv_get_drg(&start, 0);
 	cur = base;
 	prev = base;
 
 	for (;;) {
 		PNT p;
 		WEVENT we;
-		W t = wget_drg(&p, &we);
+		W t = wsv_get_drg(&p, &we);
 		W dx;
 		W dy;
 
@@ -1870,7 +1928,7 @@ EXPORT W wmov_drg(WEVENT *evt, RECT *newr)
 		shadow(g, &prev);
 	}
 	(void)gdsp_ptr(1);
-	(void)wend_drg();
+	(void)wsv_end_drg();
 	(void)gset_ptr(saved.style, 0, saved.fgcol, saved.bgcol);
 
 	/* 影の位置へ動かす。絶対座標に戻す。 */
@@ -1881,7 +1939,7 @@ EXPORT W wmov_drg(WEVENT *evt, RECT *newr)
 		nf.c.top = (H)(prev.c.top + drag_org.y);
 		nf.c.right = (H)(prev.c.right + drag_org.x);
 		nf.c.bottom = (H)(prev.c.bottom + drag_org.y);
-		r = wmov_wnd(wid, &nf);
+		r = wsv_mov_wnd(wid, &nf);
 		if (r >= 0 && newr != 0) {
 			*newr = nf;
 		}
@@ -1889,7 +1947,7 @@ EXPORT W wmov_drg(WEVENT *evt, RECT *newr)
 	return r;
 }
 
-EXPORT W wrsz_drg(WEVENT *evt, CONST RECT *limit, RECT *newr)
+EXPORT W wsv_rsz_drg(WEVENT *evt, CONST RECT *limit, RECT *newr)
 {
 	WID wid = 0;
 	W code = drag_event(evt, &wid);
@@ -1942,7 +2000,7 @@ EXPORT W wrsz_drg(WEVENT *evt, CONST RECT *limit, RECT *newr)
 			maxh = 0x7FFF;
 		}
 	}
-	g = wsta_drg(wid, 1);
+	g = wsv_sta_drg(wid, 1);
 	if (g < 1) {
 		return g;
 	}
@@ -1959,14 +2017,14 @@ EXPORT W wrsz_drg(WEVENT *evt, CONST RECT *limit, RECT *newr)
 	base.c.top = (H)(w->frame.c.top - drag_org.y);
 	base.c.right = (H)(w->frame.c.right - drag_org.x);
 	base.c.bottom = (H)(w->frame.c.bottom - drag_org.y);
-	(void)wget_drg(&start, 0);
+	(void)wsv_get_drg(&start, 0);
 	cur = base;
 	prev = base;
 
 	for (;;) {
 		PNT p;
 		WEVENT we;
-		W t = wget_drg(&p, &we);
+		W t = wsv_get_drg(&p, &we);
 		W dx;
 		W dy;
 		W wdt;
@@ -2061,7 +2119,7 @@ EXPORT W wrsz_drg(WEVENT *evt, CONST RECT *limit, RECT *newr)
 		shadow(g, &prev);
 	}
 	(void)gdsp_ptr(1);
-	(void)wend_drg();
+	(void)wsv_end_drg();
 	(void)gset_ptr(saved.style, 0, saved.fgcol, saved.bgcol);
 
 	{
@@ -2071,7 +2129,7 @@ EXPORT W wrsz_drg(WEVENT *evt, CONST RECT *limit, RECT *newr)
 		nf.c.top = (H)(prev.c.top + drag_org.y);
 		nf.c.right = (H)(prev.c.right + drag_org.x);
 		nf.c.bottom = (H)(prev.c.bottom + drag_org.y);
-		r = wrsz_wnd(wid, &nf);
+		r = wsv_rsz_wnd(wid, &nf);
 		if (r >= 0 && newr != 0) {
 			*newr = nf;
 		}
@@ -2079,7 +2137,7 @@ EXPORT W wrsz_drg(WEVENT *evt, CONST RECT *limit, RECT *newr)
 	return r;
 }
 
-EXPORT W wsnd_evt(CONST WEVENT *evt)
+EXPORT W wsv_snd_evt(CONST WEVENT *evt)
 {
 	EVENT ev;
 
@@ -2121,12 +2179,16 @@ EXPORT ERR win_init(void)
 	 * ウィンドウマネージャが立つ時点でボタンとキーを受け付ける。 */
 	(void)chg_emk(EM_BUTDWN | EM_BUTUP | EM_KEYDWN | EM_KEYUP |
 	              EM_AUTKEY | EM_DEVICE);
-	return EX_OK;
+	/* **サーバを立てる。** 以後、仕様の `w*` 関数はすべて利用側の
+	 * スタブ (src/lib/appl/window/wincli.c) からランデブでここへ来る。 */
+	return winsrv_start();
 }
 
 EXPORT void win_finish(void)
 {
 	W i;
+
+	winsrv_stop();
 
 	if (drag_gid >= 1) {
 		(void)gcls_env(drag_gid);
@@ -2160,8 +2222,8 @@ EXPORT void win_release_process(W pid)
 	if (pid < 1) {
 		return;
 	}
-	/* 仕様「wsta_drg() を実行したプロセスが終了した場合は、自動的に
-	 * wend_drg() の処理が行なわれる」。 */
+	/* 仕様「wsv_sta_drg() を実行したプロセスが終了した場合は、自動的に
+	 * wsv_end_drg() の処理が行なわれる」。 */
 	if (drag_wid != 0 && drag_pid == pid) {
 		if (drag_gid >= 1) {
 			(void)gcls_env(drag_gid);
@@ -2171,10 +2233,20 @@ EXPORT void win_release_process(W pid)
 		drag_pid = 0;
 		drag_lock = False;
 	}
-	for (i = 1; i <= W_MAX_WND; i++) {
-		if (wnd[i].used && wnd[i].pid == pid) {
-			(void)wcls_wnd(i, CLR);
+	/* **そのプロセスの代理として閉じる。**
+	 * `wsv_cls_wnd` は管理プロセスでなければ断る（仕様 EX_WPRC）ので、
+	 * 要求元を一時的に差し替える。差し替えないと、終わったプロセスの
+	 * ウィンドウが誰にも閉じられずに残る。 */
+	{
+		W saved = win_req_pid;
+
+		win_req_pid = pid;
+		for (i = 1; i <= W_MAX_WND; i++) {
+			if (wnd[i].used && wnd[i].pid == pid) {
+				(void)wsv_cls_wnd(i, CLR);
+			}
 		}
+		win_req_pid = saved;
 	}
 }
 

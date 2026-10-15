@@ -249,9 +249,11 @@ if(BTRON_ARCH STREQUAL "arm64")
     src/subsystems/mgr/manager.c
     src/subsystems/font/fontman.c
     src/subsystems/window/winman.c
+    src/subsystems/window/winsrv.c
     src/subsystems/window/demo.c
     src/lib/appl/font/fontcli.c
     src/lib/appl/mgr/mgrcli.c
+    src/lib/appl/window/wincli.c
     src/lib/dp/pixel.c
     src/lib/dp/env.c
     src/lib/dp/draw.c

@@ -323,6 +323,14 @@ def screenshot_run(args) -> int:
             if proc.poll() is None:
                 proc.kill()
             proc.wait()
+            # **ゲストのシリアル出力も出す。** 画面を撮っているときこそ
+            # 「なぜそう描かれたのか」を知りたい。捨てると、絵を見て
+            # 当てずっぽうを言うしかなくなる。
+            if proc.stdout is not None:
+                out = proc.stdout.read()
+                if out:
+                    sys.stdout.write(out)
+                    sys.stdout.flush()
     print(f"\n画面 {n} 枚を {outdir} に保存しました。", file=sys.stderr)
     return 0 if n > 0 else 1
 
