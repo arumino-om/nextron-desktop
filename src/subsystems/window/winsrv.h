@@ -64,7 +64,13 @@ IMPORT W wsv_rsz_drg(WEVENT *evt, CONST RECT *limit, RECT *newr);
 IMPORT W wsv_get_env(WID wid, WinEnv *env);
 
 /* サーバを立てる。`win_init` から呼ぶ。 */
-IMPORT ERR winsrv_start(void);
+/* 口（ポートとグローバル名）を開く。 */
+IMPORT ERR winsrv_open(void);
+
+/* 要求を配り続ける。戻るのはポートが消えたときだけ。
+ * **ユーザランドのサーバではこれが MAIN になる。** */
+IMPORT ERR winsrv_loop(void);
+
 IMPORT void winsrv_stop(void);
 
 #endif /* __BTRON_WINSRV_H__ */

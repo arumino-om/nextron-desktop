@@ -41,23 +41,23 @@ LOCAL W wcall(WinMsg *m)
 {
 	W try;
 
-	/* **ポートは覚えるが、固執しない。**
+	/* **ポートは覚えない。毎回グローバル名から引く。**
 	 *
-	 * サーバが立て直されるとポート ID は変わる。覚えたままだと
-	 * 1 回目が黙って失敗し、2 回目以降だけ通るという、原因の見えない
-	 * 壊れ方をする（実際に窓が 1 枚だけ出なくなった）。
-	 * 失敗したら引き直して、もう 1 度だけ試す。 */
+	 * サーバが立て直されるとポート ID は変わる。しかも ID は使い回され
+	 * るので、覚えたままだと**別のサーバのポートに話しかけてしまう**。
+	 * 誰も受け付けていない番号なら永久に待つし、別のサーバが受け付けて
+	 * しまえばでたらめな答えが返る。どちらも原因が見えない。
+	 *
+	 * 引き直しは `get_nam` 1 回（システムコール 1 回）なので、
+	 * ウィンドウ操作の頻度では問題にならない。 */
 	for (try = 0; try < 2; try++) {
 		ERR er;
+		WERR p = mgr_lookup(MGR_WINDOW);
 
-		if (win_por < 1) {
-			WERR p = mgr_lookup(MGR_WINDOW);
-
-			if (p < 1) {
-				return EX_NOSPT; /* ウィンドウマネージャが立っていない */
-			}
-			win_por = (ID)p;
+		if (p < 1) {
+			return EX_NOSPT; /* ウィンドウマネージャが立っていない */
 		}
+		win_por = (ID)p;
 		m->result = EX_OK;
 		/* **`mgr_call` は使えない。** あちらは `MgrMsg` の大きさで
 		 * 送るので、`WinMsg` の data 部が切り落とされる。ランデブを
@@ -227,6 +227,15 @@ LOCAL void drop_env(WID wid)
 /* ------------------------------------------------------------------ */
 /* 仕様の関数 (§3.1)                                                   */
 /* ------------------------------------------------------------------ */
+
+/* 開いているウィンドウの数。**BTRON3 の API ではない。** 検証用。 */
+EXPORT W win_count(void)
+{
+	WinMsg m;
+
+	wmsg_init(&m, WF_count);
+	return wcall(&m);
+}
 
 EXPORT ERR wcnv_rec(UW attr, RECT *r, UW opt)
 {
@@ -719,22 +728,88 @@ EXPORT W wsnd_evt(CONST WEVENT *evt)
 	return wcall(&m);
 }
 
+/* ドラッグ「影」を描くための環境。これも**呼んだプロセスのもの**。 */
+LOCAL GID cli_drag;
+
 EXPORT GID wsta_drg(WID wid, W lock)
 {
 	WinMsg m;
+	WinEnv env;
+	RECT bnd;
+	RECT scr;
+	RLIST rl[WIN_MAX_ENVFORE];
+	W res;
+	W i;
 
 	wmsg_init(&m, WF_sta_drg);
 	m.a[0] = wid;
 	m.a[1] = lock;
-	return wcall(&m);
+	res = wcall(&m);
+	if (res < 0) {
+		return res;
+	}
+	/* サーバが返す GID は**サーバの中でしか意味を持たない**ので捨てる。
+	 * こちらで同じ約束の環境を組む（仕様 §3.1.2.5）。
+	 *
+	 *   フレーム長方形   画面全体
+	 *   表示長方形       元のウィンドウの作業領域
+	 *   前置長方形リスト 元のウィンドウと同じ
+	 *   座標系           元のウィンドウと同じ */
+	if (get_env(wid, &env) < 0) {
+		return EX_WID;
+	}
+	if (cli_screen < 1) {
+		cli_screen = gopn_dev(nm_screen, 0);
+		if (cli_screen < 1) {
+			return EX_NOSPT;
+		}
+	}
+	if (cli_drag < 1) {
+		cli_drag = gnew_env(cli_screen);
+		if (cli_drag < 1) {
+			return EX_NOSPC;
+		}
+	}
+	(void)gget_bnd(cli_drag, &bnd);
+	(void)gmov_bnd(cli_drag, -env.work.c.left - bnd.c.left,
+	               -env.work.c.top - bnd.c.top);
+	(void)gget_bnd(cli_drag, &scr);
+	(void)gset_fra(cli_drag, scr);
+	{
+		RECT rel;
+
+		rel.c.left = 0;
+		rel.c.top = 0;
+		rel.c.right = (H)(env.work.c.right - env.work.c.left);
+		rel.c.bottom = (H)(env.work.c.bottom - env.work.c.top);
+		(void)gset_vis(cli_drag, rel);
+	}
+	for (i = 0; i < env.nfore && i < WIN_MAX_ENVFORE; i++) {
+		RECT f = env.fore[i];
+
+		f.c.left = (H)(f.c.left - env.work.c.left);
+		f.c.right = (H)(f.c.right - env.work.c.left);
+		f.c.top = (H)(f.c.top - env.work.c.top);
+		f.c.bottom = (H)(f.c.bottom - env.work.c.top);
+		rl[i].comp = f;
+		rl[i].next = (i + 1 < env.nfore) ? &rl[i + 1] : 0;
+	}
+	(void)gset_for(cli_drag, (env.nfore > 0) ? &rl[0] : 0);
+	return cli_drag;
 }
 
 EXPORT ERR wend_drg(void)
 {
 	WinMsg m;
+	W res;
 
 	wmsg_init(&m, WF_end_drg);
-	return wcall(&m);
+	res = wcall(&m);
+	if (cli_drag >= 1) {
+		(void)gcls_env(cli_drag);
+		cli_drag = 0;
+	}
+	return res;
 }
 
 EXPORT W wget_drg(PNT *pos, WEVENT *evt)

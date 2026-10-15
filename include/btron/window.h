@@ -338,13 +338,24 @@ IMPORT ERR wcnv_rec(UW attr, RECT *r, UW opt);
 /* ------------------------------------------------------------------ */
 
 /* ウィンドウマネージャを立てる。画面の描画環境を押さえる。 */
+/* ウィンドウマネージャ（ユーザ特権のプロセス）を起こす。
+ * 戻り値はそのプロセス ID。既に立っていれば 0。
+ * **BTRON3 の API ではない。** */
+IMPORT WERR win_launch(void);
+
+/* 開いているウィンドウの数。検証用。 */
+IMPORT W win_count(void);
+
+/* **以下はサーバ側の口。** ユーザランドのウィンドウマネージャ
+ * （src/user/winman_main.c）だけが呼ぶ。利用側は `win_count` だけ使う。 */
 IMPORT ERR win_init(void);
 IMPORT void win_finish(void);
 
 /* プロセス終了時にそのプロセスのウィンドウを閉じる。 */
+/* 持ち主が終わったウィンドウの片付けは、サーバが自分で見る
+ * （winsrv.c の `sweep_dead`）。カーネルからは呼ばない。 */
 IMPORT void win_release_process(W pid);
 
-IMPORT W win_count(void); /* 検証用 */
 
 /* 画面を手で見るための常駐デモ。**仕様ではない。**
  * ESP に `\BTRON\HOLD` があるときだけ、起動時検査の後に呼ばれる。

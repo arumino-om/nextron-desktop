@@ -759,6 +759,7 @@ LOCAL CONST TC nm_wnd2[] = {(TC)'W', (TC)'N', (TC)'D', (TC)'2', TNULL};
 
 LOCAL W dev_child_dd; /* 子プロセスが開いたデバイスディスクリプタ */
 LOCAL Bool win_up;    /* ウィンドウマネージャが立っているか */
+LOCAL W wm_pid;       /* そのプロセス ID */
 LOCAL WID win_w1;
 LOCAL WID win_w2;
 
@@ -6171,7 +6172,11 @@ LOCAL void run_proc_tests(void)
 		W pid = 0;
 		MESSAGE m;
 
-		if (win_init() != EX_OK) {
+		/* **ウィンドウマネージャはユーザ特権のプロセス**（詳細 E22）。
+		 * 起こして、名前が出るまで待つ。以後の `w*` はすべて
+		 * 利用側のスタブからランデブでそこへ届く。 */
+		wm_pid = win_launch();
+		if (wm_pid < 0) {
 			BTRON_CHECK("画面が無い構成なので飛ばす", True);
 		} else {
 			win_up = True;
@@ -6691,6 +6696,18 @@ LOCAL void run_proc_tests(void)
 			por = mgr_lookup(MGR_WINDOW);
 			BTRON_CHECK("名前で見つかる", por >= 1);
 
+			/* **別のプロセスで動いていること。**
+			 * 同じプロセスの中の関数呼び出しに戻っていたら、
+			 * 詳細 E22 の「1 プロセス 1 サーバ」になっていない。 */
+			BTRON_CHECK("別のプロセスで動いている",
+			            wm_pid > 0 && wm_pid != prc_self());
+			{
+				P_STATE ps;
+
+				BTRON_CHECK("そのプロセスは生きている",
+				            prc_sts(wm_pid, &ps, 0) == wm_pid);
+			}
+
 			/* 利用側のスタブを通さず、要求を直に投げてみる。
 			 * **これが通れば、本当にランデブで話している。** */
 			if (por >= 1) {
@@ -6883,7 +6900,38 @@ LOCAL void run_proc_tests(void)
 			BTRON_CHECK("閉じる", wcls_wnd(win_w2, CLR) == EX_OK);
 			BTRON_CHECK("無くなった", win_count() == 0);
 			BTRON_CHECK("入力受付状態も無い", wget_act(0) == 0);
-			win_finish();
+			/* **サーバは立て直せる。**
+			 *
+			 * 終わらせてから起こし直し、また使えることを確かめる。
+			 * ポート ID は使い回されるので、利用側が番号を覚えたまま
+			 * だと別のサーバに話しかけてしまう（実際それで窓が
+			 * 開かなくなった）。グローバル名から引き直していれば通る。 */
+			if (wm_pid > 0) {
+				BTRON_CHECK("終わらせる",
+				            ter_prc(wm_pid, 0, TERM_NRM) == ER_OK);
+				(void)dly_tsk(20);
+				BTRON_CHECK("名前も消えた",
+				            mgr_lookup(MGR_WINDOW) == ER_NOEXS);
+				wm_pid = win_launch();
+				BTRON_CHECK("立て直せる", wm_pid > 0);
+				if (wm_pid > 0) {
+					RECT rr;
+					WID w;
+
+					rr.c.left = 30;
+					rr.c.top = 30;
+					rr.c.right = 200;
+					rr.c.bottom = 140;
+					w = wopn_wnd(WA_NORMAL, 0, &rr, 0, 0, 0, 0, 0);
+					BTRON_CHECK("また窓が開ける", w >= 1);
+					if (w >= 1) {
+						BTRON_CHECK("閉じる",
+						            wcls_wnd(w, CLR) == EX_OK);
+					}
+					(void)ter_prc(wm_pid, 0, TERM_NRM);
+					(void)dly_tsk(20);
+				}
+			}
 			win_up = False;
 			(void)clr_msg(MM_ALL, MM_NULL);
 			(void)clr_evt(EM_ALL, EM_NULL);

@@ -85,6 +85,7 @@
 #define WF_mov_drg 35
 #define WF_rsz_drg 36
 #define WF_get_env 37
+#define WF_count 38 /* 検証用。開いているウィンドウの数 */
 
 /* 利用側が描画環境を組み立てるのに要る情報。 */
 #define WIN_MAX_ENVFORE 8

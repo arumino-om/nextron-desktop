@@ -440,6 +440,9 @@ EXPORT D btron_syscall_entry(UD a0, UD a1, UD a2, UD a3, UD a4, UD a5, UD num)
 		}
 		return get_nam((CONST TC *)(CONST VP)a0, (W *)(VP)a1);
 
+	case SYS_rdv_caller:
+		return rdv_caller(A(0));
+
 	/* --- 本OS 固有: 画面の貸し出し --- */
 	case SYS_lend_screen: {
 		CONST Screen *sc = screen();

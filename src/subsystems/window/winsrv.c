@@ -29,10 +29,10 @@
 #include <btron/gname.h>
 #include <btron/manager.h>
 #include <btron/proc.h>
+#include <btron/syscall.h>
 #include <btron/taskcomm.h>
 
 LOCAL ID win_por;
-LOCAL ID win_tid;
 
 /* data から取り出す / data へ詰める小道具。
  * **境界を越えないことをここで一度だけ確かめる。** */
@@ -408,6 +408,9 @@ LOCAL void dispatch(WinMsg *m)
 		(void)put(m, 0, &nr, SZ(RECT));
 		break;
 	}
+	case WF_count:
+		m->result = win_count();
+		break;
 	case WF_get_env: {
 		WinEnv env;
 
@@ -425,12 +428,44 @@ LOCAL void dispatch(WinMsg *m)
 /* サーバ本体                                                          */
 /* ------------------------------------------------------------------ */
 
-LOCAL void win_server(W arg)
+/* 持ち主が居なくなったウィンドウを片付ける。
+ *
+ * **カーネルから教えてもらえない。** サーバがユーザランドのプロセスに
+ * なった以上、プロセス終了をカーネルが直接知らせる口は無い。
+ * 要求が来るたびに持ち主の生死を見て、居なければ閉じる。
+ * ウィンドウは高々 16 枚なので、毎回見ても安い。 */
+LOCAL void sweep_dead(void)
+{
+	W i;
+	W saved = win_req_pid;
+
+	for (i = 1; i <= W_MAX_WND; i++) {
+		WDSTAT st;
+
+		if (wsv_get_sts(i, &st, 0) < 0) {
+			continue;
+		}
+		if (st.pid < 1) {
+			continue;
+		}
+		if (prc_sts(st.pid, 0, 0) != ER_NOPRC) {
+			continue;
+		}
+		/* そのプロセスの代理として閉じる。 */
+		win_req_pid = st.pid;
+		(void)wsv_cls_wnd(i, CLR);
+	}
+	win_req_pid = saved;
+}
+
+EXPORT ERR winsrv_loop(void)
 {
 	WinMsg m;
 	W rdv = 0;
 
-	(void)arg;
+	if (win_por < 1) {
+		return EX_NOSPT;
+	}
 	for (;;) {
 		WERR n = acp_por(win_por, MGR_PTN, &rdv, (VP)&m, T_FOREVER);
 
@@ -443,23 +478,25 @@ LOCAL void win_server(W arg)
 		/* **誰からの要求かはランデブの記録から引く。**
 		 * 要求の中に入れさせると偽れる。 */
 		win_req_pid = rdv_caller(rdv);
+		/* **配る前に掃く。** 後にすると、持ち主が死んだ直後の
+		 * 1 回目の問い合わせに古い答えを返してしまう。 */
+		sweep_dead();
 		m.result = EX_OK;
 		dispatch(&m);
 		win_req_pid = 0;
 		(void)rpl_rdv(rdv, (VP)&m, (W)sizeof(WinMsg));
 	}
-	ext_tsk();
+	return EX_OK;
 }
 
-EXPORT ERR winsrv_start(void)
+EXPORT ERR winsrv_open(void)
 {
 	TC key[N_NAMELEN];
 	WERR por;
-	WERR tid;
 	ERR er;
 
 	if (win_por >= 1) {
-		return EX_OK; /* 既に立っている */
+		return EX_OK; /* 既に開いている */
 	}
 	/* 要求と返答は同じ構造体なので同じ大きさ。 */
 	por = cre_por((W)sizeof(WinMsg), (W)sizeof(WinMsg), DELEXIT);
@@ -473,16 +510,6 @@ EXPORT ERR winsrv_start(void)
 		return er;
 	}
 	win_por = por;
-	/* **サーバは要求を出す側より高い優先度にする。**
-	 * 同じだと、要求を出したタスクが走り続けてサーバが動かない。 */
-	tid = cre_tsk(win_server, 1, 0);
-	if (tid < 1) {
-		(void)del_nam(key);
-		(void)del_por(por);
-		win_por = 0;
-		return (ERR)tid;
-	}
-	win_tid = (ID)tid;
 	return EX_OK;
 }
 
@@ -497,5 +524,4 @@ EXPORT void winsrv_stop(void)
 	(void)del_nam(key);
 	(void)del_por(win_por); /* 待っているサーバは ER_DLT で抜ける */
 	win_por = 0;
-	win_tid = 0;
 }

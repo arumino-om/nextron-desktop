@@ -345,9 +345,9 @@ LOCAL W demo_main(MESSAGE *msg)
 	}
 
 	{
-		ERR wer = win_init();
+		WERR wer = win_launch();
 
-		if (wer != EX_OK) {
+		if (wer < 0) {
 			/* **黙って止まらない。** 画面に机だけが出て「なぜ窓が
 			 * 無いのか」が分からない、という状態を作らない。 */
 			hal_console_tee(0);
@@ -355,7 +355,7 @@ LOCAL W demo_main(MESSAGE *msg)
 			put_err(wer);
 			hal_console_puts(")\n");
 		}
-		win_ok = (wer == EX_OK);
+		win_ok = (wer >= 0);
 	}
 	if (!win_ok) {
 		/* 画面が無い構成。電源を落とさずに止まるだけにする

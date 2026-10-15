@@ -1239,6 +1239,25 @@ LOCAL W move_resize(WID wid, RECT *newr, Bool keep_size)
 	setup_gid(wid);
 	/* 元の場所を消して、動いた先を描く。 */
 	expose(&old);
+	/* **下にあったウィンドウにも再表示を頼む。**
+	 * 動いた先だけを描き直しても、元居た場所に現れたウィンドウの
+	 * 中身は誰も描かない。マネージャは隠れた中身を保存していないので
+	 * （仕様 §3.1.2.3）、持ち主に描き直してもらうしかない。 */
+	{
+		W j;
+
+		for (j = 1; j <= W_MAX_WND; j++) {
+			if (j == wid || !wnd[j].used || !visible(j)) {
+				continue;
+			}
+			RECT a = rect_isect(&wnd[j].frame, &old);
+			RECT b = rect_isect(&wnd[j].frame, &frame);
+
+			if (!rect_empty(&a) || !rect_empty(&b)) {
+				(void)wsv_req_dsp(j);
+			}
+		}
+	}
 	redraw(wid);
 	/* 仕様「対象ウィンドウへの再表示要求イベントは発行されないが、
 	 * 再表示領域は設定されるため、関数値が "1" の場合は、
@@ -2179,9 +2198,10 @@ EXPORT ERR win_init(void)
 	 * ウィンドウマネージャが立つ時点でボタンとキーを受け付ける。 */
 	(void)chg_emk(EM_BUTDWN | EM_BUTUP | EM_KEYDWN | EM_KEYUP |
 	              EM_AUTKEY | EM_DEVICE);
-	/* **サーバを立てる。** 以後、仕様の `w*` 関数はすべて利用側の
-	 * スタブ (src/lib/appl/window/wincli.c) からランデブでここへ来る。 */
-	return winsrv_start();
+	/* **口を開く。** 以後、仕様の `w*` 関数はすべて利用側の
+	 * スタブ (src/lib/appl/window/wincli.c) からランデブでここへ来る。
+	 * 配るのは `winsrv_loop`（ユーザランドのサーバでは MAIN がそれ）。 */
+	return winsrv_open();
 }
 
 EXPORT void win_finish(void)

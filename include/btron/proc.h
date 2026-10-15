@@ -286,6 +286,12 @@ IMPORT Bool prc_user(W pid, P_USER *buff);
 /* --- 実行プログラムレコードの読み込み (src/kernel/periph/exec.c) ---
  *
  * 形式は include/btron/objfmt.h。`cre_prc` だけが使う。 */
+/* 埋め込んだ実行プログラムレコードからプロセスを起こす。
+ * **BTRON3 の API ではない。** 外殻のサーバはファイルシステムより先に
+ * 起きていなければならないので、ファイルを通さない口を開けておく。 */
+IMPORT WERR prc_create_obj(CONST UB *obj, W size, W pri, CONST TC *name,
+                           CONST MESSAGE *msg);
+
 IMPORT ERR exec_load(W pid, AddrSpace *as, CONST UB *obj, W size, UD *entry,
                      UD *user_sp);
 IMPORT void exec_release_process(W pid);

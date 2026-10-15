@@ -127,6 +127,7 @@ add_custom_command(
 # --------------------------------------------------------------------------
 set(BTRON_USER_OBJ "${CMAKE_CURRENT_BINARY_DIR}/user_hello.c")
 set(BTRON_SHELL_OBJ "${CMAKE_CURRENT_BINARY_DIR}/user_shell.c")
+set(BTRON_WM_OBJ "${CMAKE_CURRENT_BINARY_DIR}/user_winman.c")
 
 # ユーザプログラムを 1 つ組み立てる。
 #   name    実行ファイル名
@@ -167,6 +168,22 @@ if(BTRON_ARCH STREQUAL "arm64")
   # **ユーザプログラムに結合する**。描画はシステムコールではない。
   btron_add_user(btron-user-shell btron_user_shell "${BTRON_SHELL_OBJ}"
     SRCS src/user/shell.c
+         src/lib/sys/screen.c
+         src/lib/dp/pixel.c
+         src/lib/dp/env.c
+         src/lib/dp/draw.c
+         src/lib/dp/bitmap.c
+         src/lib/dp/text.c
+         src/lib/dp/pointer.c
+         src/lib/appl/font/fontcli.c
+         src/lib/appl/mgr/mgrcli.c)
+
+  # **ウィンドウマネージャ本体。** 詳細 E22「1 プロセス 1 サーバ」。
+  # カーネルには入らない。利用側 (wincli.c) だけがカーネルに残る。
+  btron_add_user(btron-user-winman btron_user_winman "${BTRON_WM_OBJ}"
+    SRCS src/user/winman_main.c
+         src/subsystems/window/winman.c
+         src/subsystems/window/winsrv.c
          src/lib/sys/screen.c
          src/lib/dp/pixel.c
          src/lib/dp/env.c
@@ -232,6 +249,7 @@ if(BTRON_ARCH STREQUAL "arm64")
     src/kernel/core/syscall.c
     "${BTRON_USER_OBJ}"
     "${BTRON_SHELL_OBJ}"
+    "${BTRON_WM_OBJ}"
     src/kernel/core/selftest.c
     src/kernel/boot/bootinfo.c
     src/kernel/boot/machdesc.c
@@ -248,12 +266,11 @@ if(BTRON_ARCH STREQUAL "arm64")
     src/kernel/mm/kheap.c
     src/subsystems/mgr/manager.c
     src/subsystems/font/fontman.c
-    src/subsystems/window/winman.c
-    src/subsystems/window/winsrv.c
     src/subsystems/window/demo.c
     src/lib/appl/font/fontcli.c
     src/lib/appl/mgr/mgrcli.c
     src/lib/appl/window/wincli.c
+    src/subsystems/window/winboot.c
     src/lib/dp/pixel.c
     src/lib/dp/env.c
     src/lib/dp/draw.c
@@ -418,6 +435,8 @@ if(TARGET btron-kernel)
               # 画面のある構成でしか確かめられない。
               --expect "[外殻] 画面を借りました"
               --expect "[外殻] 画素を読み返して確かめました"
+              # **ウィンドウマネージャ自身がユーザ特権で動いていること。**
+              --expect "[WM] ユーザ特権で起動しました"
               --deny   "[ FAIL ]"
               --deny   "ローダ異常終了"
               "${BTRON_DISK_IMAGE}")

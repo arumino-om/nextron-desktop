@@ -701,6 +701,18 @@ EXPORT WERR prc_create(PRCMAIN entry, W pri, CONST TC *name,
 	return create_common(entry, 0, 0, pri, name, msg);
 }
 
+EXPORT WERR prc_create_obj(CONST UB *obj, W size, W pri, CONST TC *name,
+                           CONST MESSAGE *msg)
+{
+	/* **BTRON3 の API ではない。**
+	 *
+	 * 仕様の `cre_prc` は実身から読む。だが外殻のサーバは
+	 * **ファイルシステムが立つより先に**起きていなければならない
+	 * （画面が無ければ何も見えない）。埋め込んだ実行プログラム
+	 * レコードから直接起こす口をここに開けておく。 */
+	return create_common(0, obj, size, pri, name, msg);
+}
+
 /* ------------------------------------------------------------------ */
 /* cre_prc (§1.1.6)                                                    */
 /*                                                                     */
@@ -915,8 +927,10 @@ LOCAL void teardown(W pid, W code, W msgtype, Bool self)
 	/* 開いたままのデバイスを閉じる (§1.8.4)。 */
 	dev_release_process(pid);
 
-	/* 残っているウィンドウを閉じる（外殻 §3.1）。 */
-	win_release_process(pid);
+	/* **ウィンドウの片付けはここではしない。**
+	 * ウィンドウマネージャはユーザランドのプロセス（詳細 E22）なので、
+	 * カーネルから直接その表を触れない。サーバが要求を処理するたびに
+	 * 持ち主の生死を見て片付ける（winsrv.c の `sweep_dead`）。 */
 
 	/* §1.5 のメモリブロックを返す。**アドレス空間を壊す前に呼ぶ。**
 	 * ローカルメモリの物理ページはプロセスのページテーブルを辿らないと

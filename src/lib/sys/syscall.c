@@ -300,6 +300,11 @@ EXPORT ERR get_nam(CONST TC *name, W *data)
 	return (ERR)S2(SYS_get_nam, name, data);
 }
 
+EXPORT W rdv_caller(W rdv)
+{
+	return (W)S1(SYS_rdv_caller, (UW)rdv);
+}
+
 /* --- 本OS 固有: 画面の貸し出し --- */
 
 EXPORT D btron_sys_lend_screen(Screen *out)
