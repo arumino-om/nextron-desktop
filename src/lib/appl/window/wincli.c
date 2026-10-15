@@ -124,6 +124,8 @@ typedef struct CliEnv {
 	WID wid;
 	GID gid;
 	W gen; /* 組み立てたときのサーバの世代 */
+	UD buf; /* 組み立てたときの裏画面。変わったら開き直す */
+	BMP bmp;
 } CliEnv;
 
 LOCAL CliEnv cenv[W_MAX_WND + 1];
@@ -145,19 +147,48 @@ LOCAL W get_env(WID wid, WinEnv *env)
 	return r;
 }
 
-/* サーバからもらった情報で描画環境を組み立てる。 */
+/* サーバからもらった情報で描画環境を組み立てる。
+ *
+ * **描画先はウィンドウごとの裏画面**（詳細 E2）。共有メモリなので
+ * 番地をそのまま受け取れる。相対 (0,0) が作業領域の左上に来るように
+ * 座標系をずらす —— ビットマップの列 0 は外枠の左端なので、
+ * bounds.left = -(work.left - frame.left) になる。 */
+LOCAL Bool open_env(CliEnv *c, CONST WinEnv *env)
+{
+	if (env->buf == 0) {
+		return False;
+	}
+	c->bmp.planes = 1;
+	c->bmp.pixbits = (UH)env->pixbits;
+	c->bmp.rowbytes = (UH)env->rowbytes;
+	c->bmp.bounds.c.left = 0;
+	c->bmp.bounds.c.top = 0;
+	c->bmp.bounds.c.right = (H)env->bufw;
+	c->bmp.bounds.c.bottom = (H)env->bufh;
+	c->bmp.baseaddr[0] = (UB *)(VP)env->buf;
+	if (c->gid >= 1) {
+		(void)gcls_env(c->gid);
+		c->gid = 0;
+	}
+	/* 画面と同じデバイスを指定する。カラー情報が揃っていないと、
+	 * 同じ COLOR が画面と裏画面で違う画素値になる。 */
+	c->gid = gopn_mem(nm_screen, &c->bmp, 0);
+	if (c->gid < 1) {
+		return False;
+	}
+	c->buf = env->buf;
+	return True;
+}
+
 LOCAL void setup_env(CliEnv *c, CONST WinEnv *env)
 {
 	RECT bnd;
 	RECT rel;
-	RLIST rl[WIN_MAX_ENVFORE];
-	W i;
+	W dx = env->work.c.left - env->frame.c.left;
+	W dy = env->work.c.top - env->frame.c.top;
 
-	/* 相対座標の原点を作業領域の左上に合わせる（winman の setup_gid と
-	 * 同じ計算を、こちら側で行う）。 */
 	(void)gget_bnd(c->gid, &bnd);
-	(void)gmov_bnd(c->gid, -env->work.c.left - bnd.c.left,
-	               -env->work.c.top - bnd.c.top);
+	(void)gmov_bnd(c->gid, -dx - bnd.c.left, -dy - bnd.c.top);
 	rel.c.left = 0;
 	rel.c.top = 0;
 	rel.c.right = (H)(env->work.c.right - env->work.c.left);
@@ -165,17 +196,9 @@ LOCAL void setup_env(CliEnv *c, CONST WinEnv *env)
 	(void)gset_fra(c->gid, rel);
 	(void)gset_vis(c->gid, rel);
 
-	for (i = 0; i < env->nfore && i < WIN_MAX_ENVFORE; i++) {
-		RECT f = env->fore[i];
-
-		f.c.left = (H)(f.c.left - env->work.c.left);
-		f.c.right = (H)(f.c.right - env->work.c.left);
-		f.c.top = (H)(f.c.top - env->work.c.top);
-		f.c.bottom = (H)(f.c.bottom - env->work.c.top);
-		rl[i].comp = f;
-		rl[i].next = (i + 1 < env->nfore) ? &rl[i + 1] : 0;
-	}
-	(void)gset_for(c->gid, (env->nfore > 0) ? &rl[0] : 0);
+	/* **前置長方形リストは空。** 自分のビットマップに手前も奥も無い。
+	 * サーバも空を返してくる（詳細 E2）。 */
+	(void)gset_for(c->gid, 0);
 	c->gen = env->gen;
 }
 
@@ -192,22 +215,22 @@ EXPORT GID wget_gid(WID wid)
 	}
 	c = &cenv[wid];
 	if (!c->used) {
-		if (cli_screen < 1) {
-			cli_screen = gopn_dev(nm_screen, 0);
-			if (cli_screen < 1) {
-				return EX_NOSPT;
-			}
-		}
-		c->gid = gnew_env(cli_screen);
-		if (c->gid < 1) {
-			return EX_NOSPC;
-		}
+		c->gid = 0;
+		c->buf = 0;
 		c->used = True;
 		c->wid = wid;
 		c->gen = 0;
 	}
-	/* **世代が変わっていたら組み直す。** 前後関係が変わったのに
-	 * 前置長方形リストが古いままだと、手前のウィンドウを消してしまう。 */
+	/* **裏画面が取り直されていたら開き直す。** 変形すると番地が変わる。
+	 * 古い番地へ描き続けると、解放済みの共有メモリを踏む。 */
+	if (c->gid < 1 || c->buf != env.buf) {
+		if (!open_env(c, &env)) {
+			c->used = False;
+			return EX_NOSPT;
+		}
+		c->gen = 0;
+	}
+	/* 世代が変わっていたら座標系を組み直す（移動・変形）。 */
 	if (c->gen != env.gen) {
 		setup_env(c, &env);
 	}
@@ -218,9 +241,12 @@ EXPORT GID wget_gid(WID wid)
 LOCAL void drop_env(WID wid)
 {
 	if (wid >= 1 && wid <= W_MAX_WND && cenv[wid].used) {
-		(void)gcls_env(cenv[wid].gid);
+		if (cenv[wid].gid >= 1) {
+			(void)gcls_env(cenv[wid].gid);
+		}
 		cenv[wid].used = False;
 		cenv[wid].gid = 0;
+		cenv[wid].buf = 0;
 	}
 }
 

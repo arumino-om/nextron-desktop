@@ -62,11 +62,58 @@ LOCAL void say(CONST B *s)
 	(void)wri_dev(dd, 0, s, n, 0, 0);
 }
 
+/* 場面を描く。**ポインタが動いた跡を直すのにも使う**ので、何度呼んでも
+ * 同じ絵になるようにしてある（クリッピングを掛けて呼べば一部だけ直る）。
+ * ここはウィンドウマネージャの居ない単体の外殻なので、画面を持っている
+ * 自分が合成する側になる（詳細 E2）。 */
+LOCAL void scene(GID g, CONST RECT *b, CONST RECT *r)
+{
+	W i;
+
+	/* 机の上。 */
+	(void)gfil_rec(g, *b, (CONST PAT *)BLACK50, 0, G_STORE);
+
+	/* 枠と中身。 */
+	(void)gfil_rec(g, *r, (CONST PAT *)WHITE0, 0, G_STORE);
+	(void)gfra_rec(g, *r, LATTR_MAKE(LN_SOLID, 2), (CONST PAT *)BLACK100, 0,
+	               G_STORE);
+
+	/* 文字。字形はフォントマネージャの共有メモリから引く。
+	 * **サーバの置き場を 1 度引くだけで、文字ごとの IPC は無い。** */
+	(void)gset_chc(g, COL_BLACK, COL_TRANS);
+	(void)gdra_stp(g, (W)(r->c.left + 20), (W)(r->c.top + 40), msg1, 64,
+	               G_STORE);
+	(void)gdra_stp(g, (W)(r->c.left + 20), (W)(r->c.top + 70), msg2, 64,
+	               G_STORE);
+
+	/* 塗り分けの見本。 */
+	{
+		CONST PAT *pats[5];
+
+		pats[0] = (CONST PAT *)BLACK12;
+		pats[1] = (CONST PAT *)BLACK25;
+		pats[2] = (CONST PAT *)BLACK50;
+		pats[3] = (CONST PAT *)BLACK75;
+		pats[4] = (CONST PAT *)BLACK100;
+		for (i = 0; i < 5; i++) {
+			RECT s;
+
+			s.c.left = (H)(r->c.left + 20 + i * 30);
+			s.c.top = (H)(r->c.top + 100);
+			s.c.right = (H)(s.c.left + 26);
+			s.c.bottom = (H)(s.c.top + 30);
+			(void)gfil_rec(g, s, pats[i], 0, G_STORE);
+		}
+	}
+}
+
 EXPORT W MAIN(MESSAGE *msg)
 {
 	GID g;
 	RECT b;
 	RECT r;
+	RECT was;  /* 前のコマでポインタが居た所 */
+	Bool had;
 	W i;
 
 	(void)msg;
@@ -91,45 +138,13 @@ EXPORT W MAIN(MESSAGE *msg)
 		return -1;
 	}
 
-	/* 2. 机の上を塗る。**ここから先はシステムコールを呼んでいない。** */
-	(void)gfil_rec(g, b, (CONST PAT *)BLACK50, 0, G_STORE);
-
-	/* 3. 枠と中身。 */
+	/* 2〜5. 机・枠・文字・見本をまとめて描く。
+	 * **ここから先はシステムコールを呼んでいない。** */
 	r.c.left = (H)(b.c.left + 40);
 	r.c.top = (H)(b.c.top + 40);
 	r.c.right = (H)(r.c.left + 520);
 	r.c.bottom = (H)(r.c.top + 180);
-	(void)gfil_rec(g, r, (CONST PAT *)WHITE0, 0, G_STORE);
-	(void)gfra_rec(g, r, LATTR_MAKE(LN_SOLID, 2), (CONST PAT *)BLACK100, 0,
-	               G_STORE);
-
-	/* 4. 文字。字形はフォントマネージャの共有メモリから引く。
-	 *    **サーバの置き場を 1 度引くだけで、文字ごとの IPC は無い。** */
-	(void)gset_chc(g, COL_BLACK, COL_TRANS);
-	(void)gdra_stp(g, (W)(r.c.left + 20), (W)(r.c.top + 40), msg1, 64,
-	               G_STORE);
-	(void)gdra_stp(g, (W)(r.c.left + 20), (W)(r.c.top + 70), msg2, 64,
-	               G_STORE);
-
-	/* 5. 塗り分けの見本。 */
-	{
-		CONST PAT *pats[5];
-
-		pats[0] = (CONST PAT *)BLACK12;
-		pats[1] = (CONST PAT *)BLACK25;
-		pats[2] = (CONST PAT *)BLACK50;
-		pats[3] = (CONST PAT *)BLACK75;
-		pats[4] = (CONST PAT *)BLACK100;
-		for (i = 0; i < 5; i++) {
-			RECT s;
-
-			s.c.left = (H)(r.c.left + 20 + i * 30);
-			s.c.top = (H)(r.c.top + 100);
-			s.c.right = (H)(s.c.left + 26);
-			s.c.bottom = (H)(s.c.top + 30);
-			(void)gfil_rec(g, s, pats[i], 0, G_STORE);
-		}
-	}
+	scene(g, &b, &r);
 
 	/* 6. 描けたことを画素で確かめる。
 	 *    **目で見るだけでは検査にならない**ので、読み返す。 */
@@ -151,12 +166,46 @@ EXPORT W MAIN(MESSAGE *msg)
 	/* 7. ポインタを出し、入力を少し待つ。 */
 	(void)chg_emk(EM_ALL);
 	(void)gini_ptr();
+	had = False;
 	/* 1.2 秒ほど回す。**画面を撮るのに要る長さ**でもある
 	 * （tools/run_qemu.py --screenshot は変化したコマだけを残す）。 */
 	for (i = 0; i < 60; i++) {
 		EVENT ev;
 
+		RECT now;
+		Bool has;
+
 		gptr_follow();
+		/* **画面を持っている者が合成する**（詳細 E2）。
+		 * ポインタが居た所と行った所だけ場面を描き直してから重ねる。
+		 * 退避も書き戻しも要らない。 */
+		has = (gptr_rect(&now) != 0) ? True : False;
+		if (had || has) {
+			GRGN cl;
+
+			cl.ns = 0;
+			cl.r = had ? was : now;
+			if (had && has) {
+				if (now.c.left < cl.r.c.left) {
+					cl.r.c.left = now.c.left;
+				}
+				if (now.c.top < cl.r.c.top) {
+					cl.r.c.top = now.c.top;
+				}
+				if (now.c.right > cl.r.c.right) {
+					cl.r.c.right = now.c.right;
+				}
+				if (now.c.bottom > cl.r.c.bottom) {
+					cl.r.c.bottom = now.c.bottom;
+				}
+			}
+			(void)gset_clp(g, &cl);
+			scene(g, &b, &r);
+			(void)gset_clp(g, 0);
+			gptr_paint(0);
+		}
+		was = now;
+		had = has;
 		if (get_evt(EM_ALL, &ev, CLR) == EV_KEYDWN) {
 			say("  [外殻] キーを受け取りました\n");
 		}

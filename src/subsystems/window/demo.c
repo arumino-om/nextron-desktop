@@ -22,22 +22,21 @@
  * **実際に触れる**ようになった。
  *
  * ------------------------------------------------------------------------
- * ポインタを消してから描く
+ * ポインタを気にしなくてよくなった
  * ------------------------------------------------------------------------
  *
- * ポインタは画面に直接描かれ、下にあった絵を退避して持っている (§2.6)。
- * その上から窓を描くと、ポインタを消したときに**古い絵が戻ってしまう**。
- * だから描画は必ず `gdsp_ptr(0)` … `gdsp_ptr(1)` で囲む。仕様が
- * 消去要求数をカウンタにしているのは、この囲みが入れ子になるからである。
+ * 描画先は**自分のウィンドウの裏画面**（詳細 E2）なので、ポインタに
+ * 触れようがない。直描きの頃は `gdsp_ptr(0)` … `gdsp_ptr(1)` で囲む
+ * 必要があったが、もう要らない。囲みを忘れたときに出る書き残しも
+ * 起きない。
  *
  * ------------------------------------------------------------------------
  * 隠れた部分は自分で描き直す
  * ------------------------------------------------------------------------
  *
- * ウィンドウマネージャは隠れた中身を保存しない（仕様 §3.1.2.3 の再表示
- * 処理がそれを前提にしている）。だから書いた点は配列に覚えておき、
- * 前後が入れ替わったら描き直す。**これが BTRON の再表示モデルそのもの**で、
- * 本来は `W_REDISP` を受けてアプリが描き直す。
+ * 書いた点は配列に覚えておき、変形されたら描き直す。重なりで隠れた分は
+ * 裏画面に残っているので描き直さなくてよいが、**変形すると裏画面を
+ * 取り直す**ので中身は失われる。そこは仕様どおり再表示要求で描き直す。
  */
 
 #include <btron/dp.h>
@@ -275,7 +274,6 @@ LOCAL Bool redisplay(WID wid, CONST TC *line1, CONST TC *line2, Bool dots)
 	if (wid < 1 || wchk_dsp(wid) <= 0) {
 		return False;
 	}
-	(void)gdsp_ptr(0);
 	if (wsta_dsp(wid, &r, 0) > 0) {
 		paint(wid, line1, line2);
 		if (dots) {
@@ -283,7 +281,6 @@ LOCAL Bool redisplay(WID wid, CONST TC *line1, CONST TC *line2, Bool dots)
 		}
 	}
 	(void)wend_dsp(wid);
-	(void)gdsp_ptr(1);
 	return True;
 }
 
@@ -413,14 +410,12 @@ LOCAL W demo_main(MESSAGE *msg)
 		paint(w2, m1, m2);
 	}
 
-	/* ポインタを出す。**窓を描き終えてから。**先に出すと、窓の描画が
-	 * 退避した下地を無効にしてしまう。 */
+	/* ポインタを初期状態にする。**出す順を気にしなくてよい** ——
+	 * 画面に重ねるのはマネージャで、窓は裏画面に描かれる（詳細 E2）。 */
 	(void)gini_ptr();
 	(void)get_pdp(&last);
 	if (w1 >= 1) {
-		(void)gdsp_ptr(0);
 		status(w1, last, 0);
-		(void)gdsp_ptr(1);
 	}
 
 	for (;;) {
@@ -520,7 +515,6 @@ LOCAL W demo_main(MESSAGE *msg)
 
 		/* ポインタを PD に追従させる。**ここが「システムが動かす」の
 		 * 実体。**割込みから画面を書くのは避けたいので、主ループが呼ぶ。 */
-		gptr_follow();
 
 		(void)get_pdp(&now);
 		if (now.x != last.x || now.y != last.y) {
@@ -536,17 +530,13 @@ LOCAL W demo_main(MESSAGE *msg)
 
 			if (code == W_WORK && hit == w2 && ndot < DEMO_MAX_DOT) {
 				dot[ndot++] = lp;
-				(void)gdsp_ptr(0);
-				draw_dot(wget_gid(w2), lp);
-				(void)gdsp_ptr(1);
-			}
+							draw_dot(wget_gid(w2), lp);
+						}
 		}
 
 		if (need_status && w1 >= 1) {
-			(void)gdsp_ptr(0);
-			status(w1, last, last_stat);
-			(void)gdsp_ptr(1);
-		}
+					status(w1, last, last_stat);
+				}
 		(void)dly_tsk(10);
 	}
 }

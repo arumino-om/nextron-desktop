@@ -4789,7 +4789,7 @@ LOCAL void run_proc_tests(void)
 		            gset_ptr(PS_SELECT, 0, COL_BLACK, COL_WHITE) == EG_OK);
 	});
 
-	BTRON_TEST("ポインタの移動は重なりを汚さない (§2.6.2)", {
+	BTRON_TEST("ポインタは下地を退避しない (§2.6.2 / 詳細 E2)", {
 		GID sg = gopn_dev(nm_screen, 0);
 		RECT bnd;
 		RECT bg;
@@ -4800,12 +4800,13 @@ LOCAL void run_proc_tests(void)
 
 		if (sg >= 1 && gget_bnd(sg, &bnd) == EG_OK && bnd.c.right > 200 &&
 		    bnd.c.bottom > 200) {
-			/* **「消してから描く」はちらつく。** 重なった部分が一瞬だけ
-			 * 下地に戻るためで、ポインタは PD の動きに追いて毎回
-			 * 書き替わるので目に付きやすい。そこで 1 点を 1 回しか
-			 * 書かない形にした。書き込みの回数は外から数えられないが、
-			 * **消し残しと消し過ぎはどちらも絵に出る**ので、重なる移動と
-			 * 斜めの移動で下地が正しく残ることを見る。 */
+			/* **ポインタは一番上のレイヤである**（詳細 E2）。
+			 * 下地を退避して書き戻すのではなく、合成する側が下地を
+			 * 作り直してから重ねる。ここでは検査が合成する側を演じる
+			 * —— 机を塗る → `gptr_paint` で重ねる、の順である。
+			 *
+			 * 退避が無いので「消し残し」も「消し過ぎ」も原理的に
+			 * 起きない。確かめるのは**重ねたものが正しいか**だけ。 */
 			pm[0] = 0x80;
 			pat.spat.kind = PAT_SPAT;
 			pat.spat.hsize = 1;
@@ -4814,20 +4815,13 @@ LOCAL void run_proc_tests(void)
 			pat.spat.fgcol = 0x00123456;
 			pat.spat.bgcol = 0x00123456;
 			pat.spat.mask = pm;
-
-			BTRON_CHECK("非追従にする", gmot_ptr(0) == EG_OK);
-			BTRON_CHECK("強制表示", gdsp_ptr(-1) == 0);
-			/* 下地を作る間はポインタを逃がす。置いたままだと退避した
-			 * 下地が古くなる。 */
-			at.x = (H)(bnd.c.right - 1);
-			at.y = (H)(bnd.c.bottom - 1);
-			BTRON_CHECK("端へ寄せる", gmov_ptr(at) == 0);
 			bg.c.left = 96;
 			bg.c.top = 96;
 			bg.c.right = 128;
 			bg.c.bottom = 128;
-			BTRON_CHECK("下地を塗る",
-			            gfil_rec(sg, bg, &pat, 0, G_STORE) == EG_OK);
+
+			BTRON_CHECK("非追従にする", gmot_ptr(0) == EG_OK);
+			BTRON_CHECK("強制表示", gdsp_ptr(-1) == 0);
 
 			/* 8x8 を全部前景色で埋めたイメージ。重なりが見分けやすい。 */
 			ptr_img.hotpt.x = 0;
@@ -4841,33 +4835,36 @@ LOCAL void run_proc_tests(void)
 			BTRON_CHECK("塗り潰しイメージを設定",
 			            gset_ptr(-1, &ptr_img, COL_BLACK, COL_WHITE) ==
 			                EG_OK);
+
 			at.x = 100;
 			at.y = 100;
 			BTRON_CHECK("置く", gmov_ptr(at) == 0);
-			BTRON_CHECK("全部前景色（黒 = 0）",
+			BTRON_CHECK("下地を塗る",
+			            gfil_rec(sg, bg, &pat, 0, G_STORE) == EG_OK);
+			gptr_paint(0);
+			BTRON_CHECK("重なった（黒 = 0）",
 			            scr_solid(sg, 100, 100, 108, 108, 0));
 
-			/* 横へ 4 ずらす。幅 8 なので半分が重なる。 */
+			/* 動かす。**合成し直すと前の場所は下地に戻る** —— 退避を
+			 * 書き戻しているのではなく、机を塗り直しているだけである。 */
 			at.x = 104;
-			BTRON_CHECK("重なるように動かす", gmov_ptr(at) == 0);
-			BTRON_CHECK("抜けた所は下地に戻る",
-			            scr_solid(sg, 100, 100, 104, 108, 0x00123456));
-			BTRON_CHECK("新しい位置は前景色",
-			            scr_solid(sg, 104, 100, 112, 108, 0));
-
-			/* 斜めへ戻す。退避を入れ替える順を間違えると消し残る。 */
-			at.x = 100;
 			at.y = 104;
-			BTRON_CHECK("斜めに動かす", gmov_ptr(at) == 0);
-			BTRON_CHECK("上に抜けた所は下地に戻る",
-			            scr_solid(sg, 104, 100, 112, 104, 0x00123456));
-			BTRON_CHECK("右に抜けた所も下地に戻る",
-			            scr_solid(sg, 108, 104, 112, 108, 0x00123456));
-			BTRON_CHECK("新しい位置は前景色",
-			            scr_solid(sg, 100, 104, 108, 112, 0));
-			BTRON_CHECK("消すと全部下地に戻る",
-			            gdsp_ptr(0) == 1 &&
-			                scr_solid(sg, 96, 96, 128, 128, 0x00123456));
+			BTRON_CHECK("動かす", gmov_ptr(at) == 0);
+			BTRON_CHECK("下地を作り直す",
+			            gfil_rec(sg, bg, &pat, 0, G_STORE) == EG_OK);
+			gptr_paint(0);
+			BTRON_CHECK("前の場所は下地",
+			            scr_solid(sg, 100, 100, 104, 108, 0x00123456));
+			BTRON_CHECK("新しい場所は前景色",
+			            scr_solid(sg, 104, 104, 112, 112, 0));
+
+			/* 消すと重ねない。下地はそのまま残る。 */
+			BTRON_CHECK("消す", gdsp_ptr(0) == 1);
+			BTRON_CHECK("下地を作り直す",
+			            gfil_rec(sg, bg, &pat, 0, G_STORE) == EG_OK);
+			gptr_paint(0);
+			BTRON_CHECK("消えている",
+			            scr_solid(sg, 96, 96, 128, 128, 0x00123456));
 
 			BTRON_CHECK("標準形状に戻す",
 			            gset_ptr(PS_SELECT, 0, COL_BLACK, COL_WHITE) ==
@@ -4879,7 +4876,7 @@ LOCAL void run_proc_tests(void)
 		}
 	});
 
-	BTRON_TEST("ポインタは下地を壊さない (§2.6.2)", {
+	BTRON_TEST("ポインタの 4 通りの重ね方 (§2.6.2)", {
 		GID sg = gopn_dev(nm_screen, 0);
 		RECT bnd;
 		PIXVAL mark = 0x00123456;
@@ -4902,7 +4899,10 @@ LOCAL void run_proc_tests(void)
 			 *   (100,100)  data=1 mask=1 → 前景色
 			 *   (102,101)  data=0 mask=1 → 背景色（自動の縁取り）
 			 *   (115,100)  data=0 mask=0 → 透明（下地のまま）
-			 * になる。3 通りすべてを 1 度に確かめられる。 */
+			 * になる。3 通りすべてを 1 度に確かめられる。
+			 *
+			 * **重ねるのは `gptr_paint`**（詳細 E2）。本来は合成する側
+			 * が呼ぶが、ここでは検査がその役を演じる。 */
 			at.x = 100;
 			at.y = 100;
 			pfg.x = 100;
@@ -4914,21 +4914,12 @@ LOCAL void run_proc_tests(void)
 
 			BTRON_CHECK("非追従にする", gmot_ptr(0) == EG_OK);
 			BTRON_CHECK("強制表示", gdsp_ptr(-1) == 0);
-			/* いったん画面の外へ逃がしてから下地を作る。
-			 * 置いたままだと退避した下地が古くなる。 */
-			{
-				PNT far;
-
-				far.x = (H)(bnd.c.right - 1);
-				far.y = (H)(bnd.c.bottom - 1);
-				BTRON_CHECK("端へ寄せる", gmov_ptr(far) == 0);
-			}
+			BTRON_CHECK("そこへ動かす", gmov_ptr(at) == 0);
 			BTRON_CHECK("下地を置く",
 			            gdra_pnt(sg, pfg, mark, G_STORE) == EG_OK &&
 			                gdra_pnt(sg, pbg, mark, G_STORE) == EG_OK &&
 			                gdra_pnt(sg, ptr, mark, G_STORE) == EG_OK);
-
-			BTRON_CHECK("そこへ動かす", gmov_ptr(at) == 0);
+			gptr_paint(0);
 			BTRON_CHECK("先端は前景色（黒 = 0）",
 			            gtst_pnt(sg, pfg, &v) == 0 && v == 0);
 			BTRON_CHECK("縁は背景色（白）",
@@ -4937,15 +4928,20 @@ LOCAL void run_proc_tests(void)
 			BTRON_CHECK("透明な所は下地のまま",
 			            gtst_pnt(sg, ptr, &v) == 0 && v == mark);
 
-			/* **ここが save-under の検査。**消したら元に戻ること。 */
+			/* 消すと重ねない（下地を作り直した状態がそのまま残る）。 */
 			BTRON_CHECK("消す", gdsp_ptr(0) == 1);
-			BTRON_CHECK("先端が戻った",
+			BTRON_CHECK("下地を作り直す",
+			            gdra_pnt(sg, pfg, mark, G_STORE) == EG_OK &&
+			                gdra_pnt(sg, pbg, mark, G_STORE) == EG_OK);
+			gptr_paint(0);
+			BTRON_CHECK("先端は下地",
 			            gtst_pnt(sg, pfg, &v) == 0 && v == mark);
-			BTRON_CHECK("縁が戻った",
+			BTRON_CHECK("縁も下地",
 			            gtst_pnt(sg, pbg, &v) == 0 && v == mark);
 
 			/* data=1 mask=0 は反転 (XOR)。標準形状には現れないので
-			 * アプリ定義イメージで確かめる。 */
+			 * アプリ定義イメージで確かめる。**反転するのは合成し直した
+			 * 下地**なので、退避が要らない。 */
 			ptr_img.hotpt.x = 0;
 			ptr_img.hotpt.y = 0;
 			ptr_img.size.h = 8;
@@ -4958,12 +4954,12 @@ LOCAL void run_proc_tests(void)
 			            gset_ptr(-1, &ptr_img, COL_BLACK, COL_WHITE) ==
 			                EG_OK);
 			BTRON_CHECK("出す", gdsp_ptr(-1) == 0);
+			BTRON_CHECK("下地を作り直す",
+			            gdra_pnt(sg, pfg, mark, G_STORE) == EG_OK);
+			gptr_paint(0);
 			BTRON_CHECK("下地が反転した",
 			            gtst_pnt(sg, pfg, &v) == 0 &&
 			                (UW)v == ((UW)mark ^ 0x00FFFFFFU));
-			BTRON_CHECK("消すと戻る",
-			            gdsp_ptr(0) == 1 &&
-			                gtst_pnt(sg, pfg, &v) == 0 && v == mark);
 
 			BTRON_CHECK("標準形状に戻す",
 			            gset_ptr(PS_SELECT, 0, COL_BLACK, COL_WHITE) ==
@@ -4978,12 +4974,10 @@ LOCAL void run_proc_tests(void)
 			}
 			BTRON_CHECK("追従に戻す", gmot_ptr(1) == EG_OK);
 			BTRON_CHECK("閉じる", gcls_env(sg) == EG_OK);
+		} else if (sg >= 1) {
+			BTRON_CHECK("閉じる", gcls_env(sg) == EG_OK);
 		}
 	});
-
-	/* -------------------------------------------------------------- */
-	/* §1.7 イベント管理                                              */
-	/* -------------------------------------------------------------- */
 
 	BTRON_TEST("起動時はイベント管理が動いていない (§1.7.2)", {
 		EVENT ev;
@@ -6861,18 +6855,30 @@ LOCAL void run_proc_tests(void)
 			 * EX_DRAG のエラー」。**同じプロセスでも二重には始めない。** */
 			BTRON_CHECK("二重には始められない",
 			            wsta_drg(win_w1, 1) == EX_DRAG);
-			/* 座標系は元のウィンドウと同じ（仕様 §3.1.2.5）。 */
+			/* 座標系は元のウィンドウと同じ（仕様 §3.1.2.5）。
+			 *
+			 * **境界長方形の値を比べてはいけない。** ドラッグ環境は
+			 * 画面を、ウィンドウ環境は自分の裏画面を対象にしているので
+			 * （詳細 E2）、原点の位置が違って当然である。仕様が言って
+			 * いるのは「相対座標が同じ点を指す」こと。相対 (0,0) が
+			 * どちらも作業領域の左上を指していればよい。 */
 			{
-				RECT fr1;
-				RECT fr2;
+				PNT a1;
+				PNT a2;
 
-				BTRON_CHECK("元の窓の境界",
-				            gget_bnd(wget_gid(win_w1), &fr1) == EG_OK);
-				BTRON_CHECK("ドラッグ環境の境界",
-				            gget_bnd(dg, &fr2) == EG_OK);
-				BTRON_CHECK("座標系が一致",
-				            fr1.c.left == fr2.c.left &&
-				                fr1.c.top == fr2.c.top);
+				a1.x = 0;
+				a1.y = 0;
+				a2.x = 0;
+				a2.y = 0;
+				BTRON_CHECK("ドラッグ環境の原点",
+				            gcnv_abs(dg, &a1) == EG_OK);
+				BTRON_CHECK("ウィンドウ環境の原点",
+				            gcnv_abs(wget_gid(win_w1), &a2) == EG_OK);
+				/* 画面で測っても裏画面で測っても、作業領域の左上は
+				 * 外枠の左上から同じだけずれている。 */
+				BTRON_CHECK("相対 (0,0) が同じ点を指す",
+				            a1.x - st.r.c.left == a2.x &&
+				                a1.y - st.r.c.top == a2.y);
 			}
 			/* PD 位置は相対座標で返る。 */
 			{
@@ -7144,54 +7150,57 @@ LOCAL void run_proc_tests(void)
 		}
 	});
 
-	BTRON_TEST("ポインタの状態は全プロセスで 1 つ (dp.h PtrShared)", {
+	BTRON_TEST("ポインタはマネージャが合成する (dp.h PtrShared / 詳細 E2)", {
 		if (!win_up) {
 			BTRON_CHECK("画面が無い構成なので飛ばす", True);
 		} else {
-			GID g = wget_gid(win_w2);
+			GID sg = gopn_dev(nm_screen, 0);
+			WDSTAT s2;
 			PNT at;
-			PNT rel;
+			PNT lp;
 			PIXVAL v = 0;
+			W hit = 0;
 
 			/* **ポインタは画面に 1 つしか無いが、DP はプロセスごとの
 			 * ライブラリである**（詳細 E1）。状態を共有していないと、
-			 * ウィンドウマネージャ（別プロセス）が描く前に消しても
-			 * 本物は消えず、描いた絵の上にポインタの残骸が残る。
-			 * 動かしたときにそれが下地として書き戻され、書き残しになる。
+			 * ここで動かしてもマネージャには見えない。
 			 *
-			 * ここは**別のプロセスに描かせて**、ポインタが生き残って
-			 * いるかを画素で見る。マネージャが消し方を知らなければ
-			 * 塗り潰されるし、状態が共有されていなければ消えない。 */
-			rel.x = 20;
-			rel.y = 20;
-			at = rel;
-			if (g >= 1 && gcnv_abs(g, &at) == EG_OK) {
+			 * 合成するのはマネージャ（別プロセス）なので、**要求を
+			 * 1 つ投げてからでないと画面に出ない**。要求を配り終える
+			 * たびに画面を作り直す仕掛け（`win_flush`）が効いている
+			 * ことも、これで一緒に確かめられる。 */
+			if (sg >= 1 && wget_sts(win_w2, &s2, 0) >= 0) {
+				at.x = (H)(s2.r.c.left + 40);
+				at.y = (H)(s2.r.c.top + 40);
+				BTRON_CHECK("作業領域の中の点",
+				            wfnd_wnd(&at, &lp, &hit) == W_WORK &&
+				                hit == win_w2);
+
 				BTRON_CHECK("非追従にする", gmot_ptr(0) == EG_OK);
 				BTRON_CHECK("標準形状に戻す",
 				            gset_ptr(PS_SELECT, 0, COL_BLACK,
 				                     COL_WHITE) == EG_OK);
 				BTRON_CHECK("強制表示", gdsp_ptr(-1) == 0);
-				/* まず作業領域を白にしておく（下地を決めておく）。 */
-				BTRON_CHECK("下地を作る", wera_wnd(win_w2, 0) == EX_OK);
-				BTRON_CHECK("作業領域の中へ置く", gmov_ptr(at) == 0);
-				/* 選択指の先端は data=1 mask=1 なので前景色（黒 = 0）。 */
-				BTRON_CHECK("先端が出ている",
-				            gtst_pnt(g, rel, &v) == 0 && v == 0);
+				BTRON_CHECK("そこへ置く", gmov_ptr(at) == 0);
 
-				/* **ここからが本番。** 作業領域の塗り潰しを
-				 * マネージャに頼む。描くのは別のプロセスである。 */
-				BTRON_CHECK("別のプロセスに塗らせる",
+				/* 要求を 1 つ投げると、マネージャが画面を作り直す。 */
+				BTRON_CHECK("要求を投げる",
 				            wera_wnd(win_w2, 0) == EX_OK);
-				BTRON_CHECK("塗られても先端は残る",
-				            gtst_pnt(g, rel, &v) == 0 && v == 0);
+				/* 選択指の先端は data=1 mask=1 なので前景色（黒 = 0）。 */
+				BTRON_CHECK("先端が画面に出る",
+				            gtst_pnt(sg, at, &v) == 0 && v == 0);
 
-				/* 消せば下地が出る。**退避が古いままだと、塗る前の
-				 * 絵が書き戻されて食い違う。** */
+				/* 消すと、次の合成で下地（作業領域の白）が出る。 */
 				BTRON_CHECK("消す", gdsp_ptr(0) == 1);
-				BTRON_CHECK("塗った後の下地が出る",
-				            gtst_pnt(g, rel, &v) == 0 &&
+				BTRON_CHECK("要求を投げる",
+				            wera_wnd(win_w2, 0) == EX_OK);
+				BTRON_CHECK("下地が出る",
+				            gtst_pnt(sg, at, &v) == 0 &&
 				                (UW)v == 0x00FFFFFFU);
 				BTRON_CHECK("追従に戻す", gmot_ptr(1) == EG_OK);
+				BTRON_CHECK("閉じる", gcls_env(sg) == EG_OK);
+			} else if (sg >= 1) {
+				BTRON_CHECK("閉じる", gcls_env(sg) == EG_OK);
 			}
 		}
 	});

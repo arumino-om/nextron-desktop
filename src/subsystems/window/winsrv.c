@@ -484,6 +484,10 @@ EXPORT ERR winsrv_loop(void)
 		m.result = EX_OK;
 		dispatch(&m);
 		win_req_pid = 0;
+		/* **配り終えてから画面を作り直す。**
+		 * 利用側は自分の裏画面へ好きなときに描くので、どこが
+		 * 変わったかは分からない。要求のたびに貼り直す（詳細 E2）。 */
+		win_flush();
 		(void)rpl_rdv(rdv, (VP)&m, (W)sizeof(WinMsg));
 	}
 	return EX_OK;

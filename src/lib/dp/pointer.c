@@ -322,12 +322,6 @@ LOCAL DEnv scr;      /* 画面の描画環境。GID は消費しない */
 LOCAL Bool scr_ok;   /* 画面があるか */
 LOCAL Bool env_done; /* scr を組んだか */
 
-/* 移動先の下地を組み立てる器。古い方をまだ使っている間に新しい方を
- * 作るので 2 面必要になる（paint の前書き）。**1 回の paint の中でしか
- * 使わない**ので共有しない。 */
-LOCAL UW nunder[MAX_PTR_SIZE * MAX_PTR_SIZE];
-LOCAL UB nunder_ok[MAX_PTR_SIZE * MAX_PTR_SIZE];
-
 /* --- 全プロセスで 1 つのもの --- */
 
 /* 画面を借りられないとき（検査用の構成など）の器。
@@ -482,156 +476,6 @@ LOCAL Bool on_screen(W ax, W ay)
 	       ay < (W)scr.bmp.bounds.c.bottom;
 }
 
-/* その点をポインタが書き替えるか。data も mask も 0 なら透明で、
- * 下地をそのまま残す（仕様 §2.6.2 の 4 通りのうちの 1 つ）。 */
-LOCAL Bool touches(W x, W y)
-{
-	W n = pst->img.size.v;
-
-	if (x < 0 || y < 0 || x >= n || y >= n) {
-		return False;
-	}
-	if (bit_get(pst->img.data, n, x, y)) {
-		return True;
-	}
-	return bit_get(pst->img.mask, n, x, y);
-}
-
-/* いま出ている位置で (ax, ay) の下地を退避してあるか。あれば値を返す。
- * 形は unpaint を経てからしか差し替わらないので、出ている間は
- * イメージの大きさも変わらない。
- *
- * **ポインタが実際に書き替えた点だけ**が対象である。透明で触っていない
- * 点は画面にそのまま下地が出ているので、退避ではなく画面から読む。
- * 退避は描いた時点の値なので、その後に誰かが描いていれば古い。 */
-LOCAL Bool saved_bg(W ax, W ay, UW *v)
-{
-	W n = pst->img.size.v;
-	W x = ax - pst->drawn_at.x;
-	W y = ay - pst->drawn_at.y;
-	W i;
-
-	if (!pst->drawn || x < 0 || y < 0 || x >= n || y >= n) {
-		return False;
-	}
-	if (!touches(x, y)) {
-		return False;
-	}
-	i = y * MAX_PTR_SIZE + x;
-	if (!pst->under_ok[i]) {
-		return False;
-	}
-	*v = pst->under[i];
-	return True;
-}
-
-/*
- * ポインタを at へ出す。いま出ているなら、そこからの移動として扱う。
- *
- * 「消してから描く」と、重なった部分が一瞬だけ下地に戻る。画面の走査が
- * ちょうどそこに当たるとちらつきとして見えるし、ポインタは PD の動きに
- * 追いて毎回書き替わるので、人の目に付きやすい場所である。そこで
- * **画面の 1 点を 1 回しか書かない**ようにする。
- *
- *   1. 新しい位置の下地を集める。重なりの中は画面から読んでも
- *      ポインタが写っているだけなので、退避してある下地から取る
- *   2. 古い位置のうち、新しい位置で書かない点だけを下地に戻す
- *   3. 新しい位置を書く
- *
- * 1 で新しい下地を別の器に作るのは、2 がまだ古い器を使うからである。
- */
-LOCAL void paint(PNT at)
-{
-	W n = pst->img.size.v;
-	W x;
-	W y;
-
-	for (y = 0; y < n; y++) {
-		for (x = 0; x < n; x++) {
-			W ax = at.x + x;
-			W ay = at.y + y;
-			W i = y * MAX_PTR_SIZE + x;
-
-			nunder_ok[i] = (UB)(on_screen(ax, ay) ? 1 : 0);
-			if (!nunder_ok[i]) {
-				continue;
-			}
-			if (!saved_bg(ax, ay, &nunder[i])) {
-				nunder[i] = dp_pix_get(&scr, ax, ay);
-			}
-		}
-	}
-	if (pst->drawn) {
-		for (y = 0; y < n; y++) {
-			for (x = 0; x < n; x++) {
-				W i = y * MAX_PTR_SIZE + x;
-				W ax = pst->drawn_at.x + x;
-				W ay = pst->drawn_at.y + y;
-
-				if (!pst->under_ok[i] || !touches(x, y)) {
-					continue;
-				}
-				if (touches(ax - at.x, ay - at.y)) {
-					continue; /* この点は 3 で上書きする */
-				}
-				dp_pix_put(&scr, ax, ay, pst->under[i]);
-			}
-		}
-	}
-	for (y = 0; y < n; y++) {
-		for (x = 0; x < n; x++) {
-			W i = y * MAX_PTR_SIZE + x;
-			Bool d = bit_get(pst->img.data, n, x, y);
-			Bool m = bit_get(pst->img.mask, n, x, y);
-			UW v;
-
-			if (!nunder_ok[i] || (!d && !m)) {
-				continue;
-			}
-			if (m) {
-				v = d ? pst->fgpix : pst->bgpix;
-			} else {
-				v = nunder[i] ^ scr.vmask; /* data=1 mask=0 は反転 */
-			}
-			dp_pix_put(&scr, at.x + x, at.y + y, v);
-		}
-	}
-	for (y = 0; y < n; y++) {
-		for (x = 0; x < n; x++) {
-			W i = y * MAX_PTR_SIZE + x;
-
-			pst->under[i] = nunder[i];
-			pst->under_ok[i] = nunder_ok[i];
-		}
-	}
-	pst->drawn_at = at;
-	pst->drawn = True;
-}
-
-/* 退避した下地を書き戻す。消すときだけ使う（移動は paint が済ませる）。 */
-LOCAL void unpaint(void)
-{
-	W n = pst->img.size.v;
-	W y;
-
-	if (!pst->drawn) {
-		return;
-	}
-	for (y = 0; y < n; y++) {
-		W x;
-
-		for (x = 0; x < n; x++) {
-			W i = y * MAX_PTR_SIZE + x;
-
-			if (!pst->under_ok[i] || !touches(x, y)) {
-				continue; /* 触っていないので戻す必要も無い */
-			}
-			dp_pix_put(&scr, pst->drawn_at.x + x, pst->drawn_at.y + y, pst->under[i]);
-		}
-	}
-	pst->drawn = False;
-}
-
 /* ホットポイントを pos に合わせたときのイメージ左上。 */
 LOCAL PNT topleft(PNT pos)
 {
@@ -642,25 +486,13 @@ LOCAL PNT topleft(PNT pos)
 	return p;
 }
 
-/* 表示されているべき状態へ揃える。 */
+/* 変わったことを合成する側へ知らせる。
+ *
+ * **ここでは画面に描かない**（詳細 E2）。下地は合成でいつでも作り直せる
+ * ので、退避も書き戻しも要らない。描くのは `gptr_paint`。 */
 LOCAL void refresh(void)
 {
-	PNT want;
-
-	if (!scr_ok) {
-		return;
-	}
-	if (pst->sts.hidden > 0) {
-		unpaint();
-		return;
-	}
-	want = topleft(pst->sts.pos);
-	if (pst->drawn && want.x == pst->drawn_at.x && want.y == pst->drawn_at.y) {
-		return;
-	}
-	/* paint が古い位置の後始末もする。ここで unpaint を挟むと、
-	 * 重なった部分が一瞬下地に戻ってちらつく。 */
-	paint(want);
+	pst->seq++;
 }
 
 /* ------------------------------------------------------------------ */
@@ -672,7 +504,6 @@ EXPORT ERR gini_ptr(void)
 	PNT p;
 
 	(void)ensure();
-	unpaint();
 	pst->sts.style = PS_SELECT;
 	pst->sts.fgcol = COL_BLACK;
 	pst->sts.bgcol = COL_WHITE;
@@ -764,7 +595,6 @@ EXPORT ERR gset_ptr(PTRSTL style, PTRIMG *im, COLOR fgcol, COLOR bgcol)
 
 	/* ここまで検査が通ってから状態を書き換える。
 	 * 途中で失敗して半端な形状が残ると、画面が壊れたままになる。 */
-	unpaint();
 	pst->sts.style = style;
 	pst->sts.fgcol = fc;
 	pst->sts.bgcol = bc;
@@ -850,4 +680,71 @@ EXPORT void gptr_follow(void)
 	}
 	pst->sts.pos = p;
 	refresh();
+}
+
+EXPORT W gptr_seq(void)
+{
+	(void)ensure();
+	return pst->seq;
+}
+
+EXPORT W gptr_rect(RECT *r)
+{
+	PNT at;
+	W n;
+
+	if (!ensure() || pst->sts.hidden > 0 || r == 0) {
+		return 0;
+	}
+	at = topleft(pst->sts.pos);
+	n = pst->img.size.v;
+	r->c.left = at.x;
+	r->c.top = at.y;
+	r->c.right = (H)(at.x + n);
+	r->c.bottom = (H)(at.y + n);
+	return 1;
+}
+
+EXPORT void gptr_paint(CONST RECT *area)
+{
+	PNT at;
+	W n;
+	W x;
+	W y;
+
+	if (!ensure() || pst->sts.hidden > 0) {
+		return;
+	}
+	at = topleft(pst->sts.pos);
+	n = pst->img.size.v;
+	for (y = 0; y < n; y++) {
+		for (x = 0; x < n; x++) {
+			W ax = at.x + x;
+			W ay = at.y + y;
+			Bool d;
+			Bool m;
+			UW v;
+
+			if (!on_screen(ax, ay)) {
+				continue;
+			}
+			if (area != 0 &&
+			    (ax < area->c.left || ax >= area->c.right ||
+			     ay < area->c.top || ay >= area->c.bottom)) {
+				continue;
+			}
+			d = bit_get(pst->img.data, n, x, y);
+			m = bit_get(pst->img.mask, n, x, y);
+			if (!d && !m) {
+				continue; /* 透明。下地のまま */
+			}
+			if (m) {
+				v = d ? pst->fgpix : pst->bgpix;
+			} else {
+				/* data=1 mask=0 は反転。合成し直した下地を読む。 */
+				v = dp_pix_get(&scr, ax, ay) ^ scr.vmask;
+			}
+			dp_pix_put(&scr, ax, ay, v);
+		}
+	}
 }

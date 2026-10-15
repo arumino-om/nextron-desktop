@@ -578,17 +578,12 @@ typedef struct PointerImage {
 
 typedef struct PointerShared {
 	UW magic;
-	W inited;     /* 初期値を入れたか */
-	PTRSTS sts;   /* §2.6.3 の状態 */
-	PTRIMG img;   /* いまの形 */
-	UW fgpix;     /* 前景色のピクセル値 */
-	UW bgpix;     /* 背景色のピクセル値 */
-	W drawn;      /* いま画面に出ているか */
-	PNT drawn_at; /* 出ている位置（イメージ左上の絶対座標） */
-
-	/* 退避した下地。drawn のときだけ意味を持つ。 */
-	UW under[MAX_PTR_SIZE * MAX_PTR_SIZE];
-	UB under_ok[MAX_PTR_SIZE * MAX_PTR_SIZE]; /* 画面内だったか */
+	W inited;   /* 初期値を入れたか */
+	W seq;      /* 変わるたびに進む。合成する側が見る */
+	PTRSTS sts; /* §2.6.3 の状態 */
+	PTRIMG img; /* いまの形 */
+	UW fgpix;   /* 前景色のピクセル値 */
+	UW bgpix;   /* 背景色のピクセル値 */
 } PtrShared;
 
 /* カーネルが用意する置き場の大きさ。**カーネルは中身を知らなくてよい。**
@@ -628,7 +623,24 @@ IMPORT W gget_ptr(PTRSTS *sts, PTRIMG *img);
  *
  * **誰かが周期的に呼ぶ必要がある。** 割込みハンドラから画面を書くのは
  * 避けたいので、ドライバではなくウィンドウマネージャの主ループが呼ぶ。
- * BTRON の「システムがポインタを動かす」をそこで実現している。 */
+ * BTRON の「システムがポインタを動かす」をそこで実現している。
+ *
+ * **ここは位置を更新するだけで、画面には描かない**（詳細 E2）。
+ * 描くのは合成する側（`gptr_paint`）である。 */
 IMPORT void gptr_follow(void);
+
+/* ポインタが占めている画面上の矩形。出ていなければ 0 を返す。
+ * 合成する側が「動いたからそこを作り直す」判断に使う。 */
+IMPORT W gptr_rect(RECT *r);
+
+/* 変化の通し番号。位置・形・消去要求数が変わると進む。 */
+IMPORT W gptr_seq(void);
+
+/* **ポインタを画面に重ねる。合成する側が最後に呼ぶ。**
+ *
+ * 直描きの頃は下地を退避して、動くときに書き戻していた。合成なら下地は
+ * いつでも作り直せるので、退避も書き戻しも要らない。§2.6.2 の 4 通り
+ * （前景色 / 背景色 / 透明 / 反転）はここで解釈する。 */
+IMPORT void gptr_paint(CONST RECT *area);
 
 #endif /* __BTRON_DP_H__ */

@@ -63,6 +63,11 @@ IMPORT W wsv_rsz_drg(WEVENT *evt, CONST RECT *limit, RECT *newr);
  * **BTRON3 の API ではない。** 詳細は winmsg.h を見ること。 */
 IMPORT W wsv_get_env(WID wid, WinEnv *env);
 
+/* 要求を 1 つ配り終えたあとに画面を作り直す（詳細 E2 の合成）。
+ * **利用側は自分の裏画面へ好きなときに描く**ので、要求を配る側が
+ * 定期的に貼り直すしかない。`winsrv_loop` が呼ぶ。 */
+IMPORT void win_flush(void);
+
 /* サーバを立てる。`win_init` から呼ぶ。 */
 /* 口（ポートとグローバル名）を開く。 */
 IMPORT ERR winsrv_open(void);
