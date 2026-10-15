@@ -7094,6 +7094,58 @@ LOCAL void run_proc_tests(void)
 		}
 	});
 
+	BTRON_TEST("ポインタの状態は全プロセスで 1 つ (dp.h PtrShared)", {
+		if (!win_up) {
+			BTRON_CHECK("画面が無い構成なので飛ばす", True);
+		} else {
+			GID g = wget_gid(win_w2);
+			PNT at;
+			PNT rel;
+			PIXVAL v = 0;
+
+			/* **ポインタは画面に 1 つしか無いが、DP はプロセスごとの
+			 * ライブラリである**（詳細 E1）。状態を共有していないと、
+			 * ウィンドウマネージャ（別プロセス）が描く前に消しても
+			 * 本物は消えず、描いた絵の上にポインタの残骸が残る。
+			 * 動かしたときにそれが下地として書き戻され、書き残しになる。
+			 *
+			 * ここは**別のプロセスに描かせて**、ポインタが生き残って
+			 * いるかを画素で見る。マネージャが消し方を知らなければ
+			 * 塗り潰されるし、状態が共有されていなければ消えない。 */
+			rel.x = 20;
+			rel.y = 20;
+			at = rel;
+			if (g >= 1 && gcnv_abs(g, &at) == EG_OK) {
+				BTRON_CHECK("非追従にする", gmot_ptr(0) == EG_OK);
+				BTRON_CHECK("標準形状に戻す",
+				            gset_ptr(PS_SELECT, 0, COL_BLACK,
+				                     COL_WHITE) == EG_OK);
+				BTRON_CHECK("強制表示", gdsp_ptr(-1) == 0);
+				/* まず作業領域を白にしておく（下地を決めておく）。 */
+				BTRON_CHECK("下地を作る", wera_wnd(win_w2, 0) == EX_OK);
+				BTRON_CHECK("作業領域の中へ置く", gmov_ptr(at) == 0);
+				/* 選択指の先端は data=1 mask=1 なので前景色（黒 = 0）。 */
+				BTRON_CHECK("先端が出ている",
+				            gtst_pnt(g, rel, &v) == 0 && v == 0);
+
+				/* **ここからが本番。** 作業領域の塗り潰しを
+				 * マネージャに頼む。描くのは別のプロセスである。 */
+				BTRON_CHECK("別のプロセスに塗らせる",
+				            wera_wnd(win_w2, 0) == EX_OK);
+				BTRON_CHECK("塗られても先端は残る",
+				            gtst_pnt(g, rel, &v) == 0 && v == 0);
+
+				/* 消せば下地が出る。**退避が古いままだと、塗る前の
+				 * 絵が書き戻されて食い違う。** */
+				BTRON_CHECK("消す", gdsp_ptr(0) == 1);
+				BTRON_CHECK("塗った後の下地が出る",
+				            gtst_pnt(g, rel, &v) == 0 &&
+				                (UW)v == 0x00FFFFFFU);
+				BTRON_CHECK("追従に戻す", gmot_ptr(1) == EG_OK);
+			}
+		}
+	});
+
 	BTRON_TEST("持ち主でないプロセスは変えられない (§3.1.4)", {
 		if (!win_up) {
 			BTRON_CHECK("画面が無い構成なので飛ばす", True);

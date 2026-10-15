@@ -15,13 +15,26 @@
  */
 
 #include <btron/bootinfo.h>
+#include <btron/dp.h>
+#include <btron/hal.h>
 #include <btron/screen.h>
 #include <btron/vmem.h>
 
 LOCAL Screen scr;
 LOCAL Bool ready = False;
 
-EXPORT ERR screen_lend(AddrSpace *as, UD *user_base)
+/* 画面ポインタの共有状態の物理ページ。
+ *
+ * **ポインタは画面に 1 つしか無いのに、ディスプレイプリミティブは
+ * プロセスごとのライブラリである**（詳細 E1）。状態を 1 か所に置いて
+ * 全プロセスに見せないと、プロセスごとに別のポインタができてしまう
+ * （dp.h の `PtrShared` の前書き）。画面の持ち主はカーネルなので
+ * （E24 / 規律 R18）、置き場もカーネルが用意する。
+ *
+ * **中身は見ない。** 大きさだけ知っていればよく、解釈は DP に閉じる。 */
+LOCAL UD ptr_pa;
+
+EXPORT ERR screen_lend(AddrSpace *as, UD *user_base, UD *user_ptr)
 {
 	CONST BootFrameBuffer *fb = &bootinfo()->fb;
 	UD size;
@@ -35,7 +48,7 @@ EXPORT ERR screen_lend(AddrSpace *as, UD *user_base)
 	 *
 	 * **上位半分の別名は残す**（規律 R18）。緊急画面は外殻の協力なしに
 	 * 描けなければならないので、カーネル側の経路を手放せない。 */
-	if (!ready || as == 0 || user_base == 0) {
+	if (!ready || as == 0 || user_base == 0 || user_ptr == 0) {
 		return E_NOEXS;
 	}
 	size = fb->size;
@@ -48,6 +61,18 @@ EXPORT ERR screen_lend(AddrSpace *as, UD *user_base)
 		return E_NOMEM;
 	}
 	*user_base = BTRON_PROC_SCREEN_BASE;
+
+	/* ポインタの共有状態も一緒に貸す。フレームバッファと違って
+	 * **普通のメモリ**なので、キャッシュを効かせたまま張る。 */
+	*user_ptr = 0;
+	if (ptr_pa != 0) {
+		if (hal_vm_map(as, BTRON_PROC_PTR_BASE, ptr_pa, PTR_SHARED_SIZE,
+		               BTRON_PG_READ | BTRON_PG_WRITE |
+		                   BTRON_PG_USER) != 0) {
+			return E_NOMEM;
+		}
+		*user_ptr = BTRON_PROC_PTR_BASE;
+	}
 	return E_OK;
 }
 
@@ -77,6 +102,19 @@ EXPORT ERR screen_init(void)
 	scr.height = fb->height;
 	scr.pitch = fb->pitch;
 	scr.format = fb->format;
+
+	/* ポインタの共有状態。物理ページから取るのは、貸し出すときに
+	 * ページ単位で切り出せなければならないからである（カーネルの
+	 * .bss は境界が揃っていない）。取れなくても画面は使えるので、
+	 * 失敗しても先へ進む —— そのときは DP がプロセスごとの器に
+	 * 落ちる（ちらつきが戻るだけで、落ちはしない）。 */
+	{
+		UD ps = (UD)hal_page_size();
+		UW np = (UW)((PTR_SHARED_SIZE + ps - 1) / ps);
+
+		ptr_pa = pmem_alloc(np);
+		scr.ptr = (ptr_pa != 0) ? BTRON_PA_TO_VA(ptr_pa) : 0;
+	}
 	ready = True;
 	return E_OK;
 }

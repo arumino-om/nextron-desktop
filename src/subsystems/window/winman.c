@@ -399,6 +399,27 @@ LOCAL void screen_fore(WID wid)
 	(void)gset_for(screen_gid, (nfore > 0) ? &rl[0] : 0);
 }
 
+/* 画面に描く間はポインタを消しておく。
+ *
+ * **ポインタの状態は全プロセスで 1 つ**である（dp.h の `PtrShared`）。
+ * だからここで消すと画面に出ている本物が消える。消さずに描くと、
+ * ポインタが退避した下地が古くなり、次に動いたときに**古い絵が
+ * 書き戻されて書き残しになる**。消去要求は数で持たれているので
+ * （§2.6.3）、入れ子になっても構わない。
+ *
+ * 描かない要求まで囲ってはいけない —— `wget_evt` は 10ms ごとに
+ * 来るので、そこで消して出すとポインタが点滅する。だから
+ * `winsrv_loop` ではなく**実際に描く関数の中**で囲む。 */
+LOCAL void hide_ptr(void)
+{
+	(void)gdsp_ptr(0);
+}
+
+LOCAL void show_ptr(void)
+{
+	(void)gdsp_ptr(1);
+}
+
 /* 枠・タイトル・スクロールバーを描く。 */
 LOCAL void draw_frame(WID wid)
 {
@@ -416,6 +437,7 @@ LOCAL void draw_frame(WID wid)
 	act = (class_of(wid) <= WC_ACTMAIN) ? True : False;
 	screen_fore(wid);
 	insets(w->attr, &l, &t, &rr, &b);
+	hide_ptr();
 
 	/* 外枠。入力受付状態なら太く（黒）、そうでなければ薄く（50%）。
 	 * 仕様は表示の見え方を規定していないので、入力受付状態が一目で
@@ -502,6 +524,7 @@ LOCAL void draw_frame(WID wid)
 		}
 	}
 	(void)gset_for(screen_gid, 0);
+	show_ptr();
 }
 
 /* 作業領域を背景パターンで塗る。 */
@@ -523,9 +546,11 @@ LOCAL void draw_work(WID wid, CONST RECT *area)
 	if (rect_empty(&rel)) {
 		return;
 	}
+	hide_ptr();
 	(void)gfil_rec(w->gid, rel,
 	               w->has_bgpat ? &w->bgpat : (CONST PAT *)WHITE0, 0,
 	               G_STORE);
+	show_ptr();
 }
 
 /* ウィンドウ 1 枚を描き直す。 */
@@ -561,7 +586,9 @@ LOCAL void expose(CONST RECT *area, CONST RECT *keep)
 	} else {
 		(void)gset_for(screen_gid, 0);
 	}
+	hide_ptr();
 	(void)gfil_rec(screen_gid, *area, (CONST PAT *)BLACK50, 0, G_STORE);
+	show_ptr();
 	(void)gset_for(screen_gid, 0);
 
 	nz = zsort(z);
@@ -1253,6 +1280,10 @@ LOCAL W move_resize(WID wid, RECT *newr, Bool keep_size)
 	push_order(wid);
 	refresh_fore();
 	setup_gid(wid);
+	/* **ここは何度も描くので、外側でもポインタを消しておく。**
+	 * 消去要求は数なので、内側の消し・出しは入れ子になって効かなく
+	 * なる。囲まないと 1 回の移動でポインタが 3 回点滅する。 */
+	hide_ptr();
 	/* 元の場所を消して、動いた先を描く。新しい位置はこの直後に
 	 * 自分で描くので、背景で塗らせない。 */
 	expose(&old, &frame);
@@ -1276,6 +1307,7 @@ LOCAL W move_resize(WID wid, RECT *newr, Bool keep_size)
 		}
 	}
 	redraw(wid);
+	show_ptr();
 	/* 仕様「対象ウィンドウへの再表示要求イベントは発行されないが、
 	 * 再表示領域は設定されるため、関数値が "1" の場合は、
 	 * wsv_sta_dsp() 〜 wsv_end_dsp() による再表示を行なう必要がある」。
@@ -1324,8 +1356,14 @@ EXPORT W wsv_scr_wnd(WID wid, CONST RECT *r, W dh, W dv, W mode)
 		area.c.right = (H)(w->work.c.right - w->work.c.left);
 		area.c.bottom = (H)(w->work.c.bottom - w->work.c.top);
 	}
-	return gscr_rec(w->gid, area, dh, dv,
-	                0, w->has_bgpat ? &w->bgpat : (CONST PAT *)WHITE0);
+	hide_ptr();
+	{
+		W n = gscr_rec(w->gid, area, dh, dv, 0,
+		               w->has_bgpat ? &w->bgpat : (CONST PAT *)WHITE0);
+
+		show_ptr();
+		return n;
+	}
 }
 
 EXPORT ERR wsv_era_wnd(WID wid, CONST RECT *r)

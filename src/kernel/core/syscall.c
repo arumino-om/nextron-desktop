@@ -447,6 +447,7 @@ EXPORT D btron_syscall_entry(UD a0, UD a1, UD a2, UD a3, UD a4, UD a5, UD num)
 	case SYS_lend_screen: {
 		CONST Screen *sc = screen();
 		UD base = 0;
+		UD pva = 0;
 		Screen *out = (Screen *)(VP)a0;
 		AddrSpace *as = prc_space(prc_self());
 
@@ -456,7 +457,7 @@ EXPORT D btron_syscall_entry(UD a0, UD a1, UD a2, UD a3, UD a4, UD a5, UD num)
 		if (sc == 0 || as == 0) {
 			return ER_NOEXS;
 		}
-		if (screen_lend(as, &base) != 0) {
+		if (screen_lend(as, &base, &pva) != 0) {
 			return ER_NOMEM;
 		}
 		*out = *sc;
@@ -464,6 +465,9 @@ EXPORT D btron_syscall_entry(UD a0, UD a1, UD a2, UD a3, UD a4, UD a5, UD num)
 		 * 上位半分の別名と物理アドレスは教えない。 */
 		out->base = base;
 		out->pa = 0;
+		/* ポインタの共有状態も**このプロセスから見える番地**に直す。
+		 * 同じ物理ページだが仮想アドレスは違う。 */
+		out->ptr = pva;
 		return ER_OK;
 	}
 

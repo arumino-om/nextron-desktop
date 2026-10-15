@@ -30,6 +30,11 @@ typedef struct Screen {
 	UW height;
 	UW pitch;  /* 1 走査線のバイト数。width * 4 とは限らない */
 	UW format; /* BFB_* (bootinfo.h) */
+	/* 画面ポインタの共有状態の置き場（`PtrShared`。dp.h）。0 なら無い。
+	 * **ポインタは画面に 1 つしか無いのに DP はプロセスごとの
+	 * ライブラリ**なので、状態を 1 か所に置いて貸し出す。
+	 * プロセスごとに違う仮想アドレスになる。 */
+	UD ptr;
 } Screen;
 
 /* BootInfo.fb から画面を立てる。起動第 2 段（上位半分）で呼ぶ。
@@ -45,7 +50,7 @@ IMPORT CONST Screen *screen(void);
  * 「画面の貸し出し」で、その写像を実際に行うのがこれ。外殻をユーザ特権で
  * 動かすのに要る。上位半分の別名は残す（規律 R18。緊急画面のため）。 */
 struct AddrSpace;
-IMPORT ERR screen_lend(struct AddrSpace *as, UD *user_base);
+IMPORT ERR screen_lend(struct AddrSpace *as, UD *user_base, UD *user_ptr);
 
 /* 色を作る。画素形式（BGRA / RGBA）の差をここで吸収する。 */
 IMPORT UW screen_rgb(UW r, UW g, UW b);

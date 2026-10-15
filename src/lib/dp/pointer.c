@@ -28,6 +28,7 @@
 #include "dpi.h"
 
 #include <btron/event.h>
+#include <btron/screen.h>
 
 /* ------------------------------------------------------------------ */
 /* 標準形状                                                            */
@@ -315,26 +316,27 @@ LOCAL CONST StdShape *CONST std[PS_STD_COUNT] = {
 /* 状態                                                                */
 /* ------------------------------------------------------------------ */
 
-LOCAL DEnv scr;    /* 画面の描画環境。GID は消費しない */
-LOCAL Bool scr_ok; /* 画面があるか */
-LOCAL Bool inited;
+/* --- プロセスごとに持つもの --- */
 
-LOCAL PTRSTS sts;
-LOCAL PTRIMG img;
-LOCAL UW fgpix;
-LOCAL UW bgpix;
-
-LOCAL Bool drawn;   /* いま画面に出ているか */
-LOCAL PNT drawn_at; /* 出ている位置（イメージ左上の絶対座標） */
-
-/* 退避した下地。drawn のときだけ意味を持つ。 */
-LOCAL UW under[MAX_PTR_SIZE * MAX_PTR_SIZE];
-LOCAL Bool under_ok[MAX_PTR_SIZE * MAX_PTR_SIZE]; /* 画面内だったか */
+LOCAL DEnv scr;      /* 画面の描画環境。GID は消費しない */
+LOCAL Bool scr_ok;   /* 画面があるか */
+LOCAL Bool env_done; /* scr を組んだか */
 
 /* 移動先の下地を組み立てる器。古い方をまだ使っている間に新しい方を
- * 作るので、2 面必要になる（paint の前書き）。 */
+ * 作るので 2 面必要になる（paint の前書き）。**1 回の paint の中でしか
+ * 使わない**ので共有しない。 */
 LOCAL UW nunder[MAX_PTR_SIZE * MAX_PTR_SIZE];
-LOCAL Bool nunder_ok[MAX_PTR_SIZE * MAX_PTR_SIZE];
+LOCAL UB nunder_ok[MAX_PTR_SIZE * MAX_PTR_SIZE];
+
+/* --- 全プロセスで 1 つのもの --- */
+
+/* 画面を借りられないとき（検査用の構成など）の器。
+ * **画面が無ければポインタも 1 つに揃える相手が居ない**ので、
+ * プロセスごとに持っていても害が無い。 */
+LOCAL PtrShared solo;
+
+/* いま見ている置き場。ensure() が決める。 */
+LOCAL PtrShared *pst = &solo;
 
 /* ------------------------------------------------------------------ */
 /* ビットマップの出し入れ                                              */
@@ -378,18 +380,18 @@ LOCAL void load_std(CONST StdShape *sh)
 	W i;
 
 	for (i = 0; i < P_SIZE; i++) {
-		img.data[i] = 0;
-		img.mask[i] = 0;
+		pst->img.data[i] = 0;
+		pst->img.mask[i] = 0;
 	}
-	img.size.h = PTR_N;
-	img.size.v = PTR_N;
-	img.hotpt.x = sh->hotx;
-	img.hotpt.y = sh->hoty;
+	pst->img.size.h = PTR_N;
+	pst->img.size.v = PTR_N;
+	pst->img.hotpt.x = sh->hotx;
+	pst->img.hotpt.y = sh->hoty;
 
 	for (y = 0; y < PTR_N; y++) {
 		for (x = 0; x < PTR_N; x++) {
 			if (sh->row[y][x] == 'X') {
-				bit_set(img.data, PTR_N, x, y, True);
+				bit_set(pst->img.data, PTR_N, x, y, True);
 			}
 		}
 	}
@@ -409,7 +411,7 @@ LOCAL void load_std(CONST StdShape *sh)
 						continue;
 					}
 					if (sh->row[sy][sx] == 'X') {
-						bit_set(img.mask, PTR_N, x, y, True);
+						bit_set(pst->img.mask, PTR_N, x, y, True);
 					}
 				}
 			}
@@ -421,26 +423,53 @@ LOCAL void load_std(CONST StdShape *sh)
 /* 画面への出し入れ                                                    */
 /* ------------------------------------------------------------------ */
 
+/* 共有の置き場を決める。
+ *
+ * **ポインタは画面に 1 つしか無い**ので、画面を借りられたときは
+ * カーネルが貸してくれた置き場を使う（dp.h の `PtrShared` の前書き）。
+ * 画面が無い構成では揃える相手が居ないので自前の器で動く。 */
+LOCAL void bind_shared(void)
+{
+	CONST Screen *s = screen();
+	PtrShared *q;
+
+	if (s == 0 || s->ptr == 0) {
+		return;
+	}
+	q = (PtrShared *)(VP)s->ptr;
+	/* カーネルが渡してくる領域はゼロで始まる。**最初に来たプロセスが
+	 * 印を打つ**ので、印が合わなければまだ誰も使っていない。 */
+	if (q->magic != PTR_SHARED_MAGIC) {
+		q->magic = PTR_SHARED_MAGIC;
+		q->inited = 0;
+	}
+	pst = q;
+}
+
 LOCAL Bool ensure(void)
 {
-	if (!inited) {
-		inited = True;
+	if (!env_done) {
+		env_done = True;
 		scr_ok = dp_screen_env(&scr);
-		sts.style = PS_SELECT;
-		sts.fgcol = COL_BLACK;
-		sts.bgcol = COL_WHITE;
-		sts.motion = 1;
-		sts.hidden = 0;
-		sts.size = PTR_N;
-		sts.pos.x = 0;
-		sts.pos.y = 0;
+		bind_shared();
+	}
+	if (!pst->inited) {
+		pst->inited = 1;
+		pst->sts.style = PS_SELECT;
+		pst->sts.fgcol = COL_BLACK;
+		pst->sts.bgcol = COL_WHITE;
+		pst->sts.motion = 1;
+		pst->sts.hidden = 0;
+		pst->sts.size = PTR_N;
+		pst->sts.pos.x = 0;
+		pst->sts.pos.y = 0;
 		load_std(std[PS_SELECT]);
 		if (scr_ok) {
-			if (!dp_color(&scr, sts.fgcol, &fgpix)) {
-				fgpix = 0;
+			if (!dp_color(&scr, pst->sts.fgcol, &pst->fgpix)) {
+				pst->fgpix = 0;
 			}
-			if (!dp_color(&scr, sts.bgcol, &bgpix)) {
-				bgpix = scr.vmask;
+			if (!dp_color(&scr, pst->sts.bgcol, &pst->bgpix)) {
+				pst->bgpix = scr.vmask;
 			}
 		}
 	}
@@ -457,35 +486,42 @@ LOCAL Bool on_screen(W ax, W ay)
  * 下地をそのまま残す（仕様 §2.6.2 の 4 通りのうちの 1 つ）。 */
 LOCAL Bool touches(W x, W y)
 {
-	W n = img.size.v;
+	W n = pst->img.size.v;
 
 	if (x < 0 || y < 0 || x >= n || y >= n) {
 		return False;
 	}
-	if (bit_get(img.data, n, x, y)) {
+	if (bit_get(pst->img.data, n, x, y)) {
 		return True;
 	}
-	return bit_get(img.mask, n, x, y);
+	return bit_get(pst->img.mask, n, x, y);
 }
 
 /* いま出ている位置で (ax, ay) の下地を退避してあるか。あれば値を返す。
- * img は unpaint を経てからしか差し替わらないので、drawn の間は
- * イメージの大きさも変わらない。 */
+ * 形は unpaint を経てからしか差し替わらないので、出ている間は
+ * イメージの大きさも変わらない。
+ *
+ * **ポインタが実際に書き替えた点だけ**が対象である。透明で触っていない
+ * 点は画面にそのまま下地が出ているので、退避ではなく画面から読む。
+ * 退避は描いた時点の値なので、その後に誰かが描いていれば古い。 */
 LOCAL Bool saved_bg(W ax, W ay, UW *v)
 {
-	W n = img.size.v;
-	W x = ax - drawn_at.x;
-	W y = ay - drawn_at.y;
+	W n = pst->img.size.v;
+	W x = ax - pst->drawn_at.x;
+	W y = ay - pst->drawn_at.y;
 	W i;
 
-	if (!drawn || x < 0 || y < 0 || x >= n || y >= n) {
+	if (!pst->drawn || x < 0 || y < 0 || x >= n || y >= n) {
+		return False;
+	}
+	if (!touches(x, y)) {
 		return False;
 	}
 	i = y * MAX_PTR_SIZE + x;
-	if (!under_ok[i]) {
+	if (!pst->under_ok[i]) {
 		return False;
 	}
-	*v = under[i];
+	*v = pst->under[i];
 	return True;
 }
 
@@ -506,7 +542,7 @@ LOCAL Bool saved_bg(W ax, W ay, UW *v)
  */
 LOCAL void paint(PNT at)
 {
-	W n = img.size.v;
+	W n = pst->img.size.v;
 	W x;
 	W y;
 
@@ -516,7 +552,7 @@ LOCAL void paint(PNT at)
 			W ay = at.y + y;
 			W i = y * MAX_PTR_SIZE + x;
 
-			nunder_ok[i] = on_screen(ax, ay);
+			nunder_ok[i] = (UB)(on_screen(ax, ay) ? 1 : 0);
 			if (!nunder_ok[i]) {
 				continue;
 			}
@@ -525,35 +561,35 @@ LOCAL void paint(PNT at)
 			}
 		}
 	}
-	if (drawn) {
+	if (pst->drawn) {
 		for (y = 0; y < n; y++) {
 			for (x = 0; x < n; x++) {
 				W i = y * MAX_PTR_SIZE + x;
-				W ax = drawn_at.x + x;
-				W ay = drawn_at.y + y;
+				W ax = pst->drawn_at.x + x;
+				W ay = pst->drawn_at.y + y;
 
-				if (!under_ok[i] || !touches(x, y)) {
+				if (!pst->under_ok[i] || !touches(x, y)) {
 					continue;
 				}
 				if (touches(ax - at.x, ay - at.y)) {
 					continue; /* この点は 3 で上書きする */
 				}
-				dp_pix_put(&scr, ax, ay, under[i]);
+				dp_pix_put(&scr, ax, ay, pst->under[i]);
 			}
 		}
 	}
 	for (y = 0; y < n; y++) {
 		for (x = 0; x < n; x++) {
 			W i = y * MAX_PTR_SIZE + x;
-			Bool d = bit_get(img.data, n, x, y);
-			Bool m = bit_get(img.mask, n, x, y);
+			Bool d = bit_get(pst->img.data, n, x, y);
+			Bool m = bit_get(pst->img.mask, n, x, y);
 			UW v;
 
 			if (!nunder_ok[i] || (!d && !m)) {
 				continue;
 			}
 			if (m) {
-				v = d ? fgpix : bgpix;
+				v = d ? pst->fgpix : pst->bgpix;
 			} else {
 				v = nunder[i] ^ scr.vmask; /* data=1 mask=0 は反転 */
 			}
@@ -564,21 +600,21 @@ LOCAL void paint(PNT at)
 		for (x = 0; x < n; x++) {
 			W i = y * MAX_PTR_SIZE + x;
 
-			under[i] = nunder[i];
-			under_ok[i] = nunder_ok[i];
+			pst->under[i] = nunder[i];
+			pst->under_ok[i] = nunder_ok[i];
 		}
 	}
-	drawn_at = at;
-	drawn = True;
+	pst->drawn_at = at;
+	pst->drawn = True;
 }
 
 /* 退避した下地を書き戻す。消すときだけ使う（移動は paint が済ませる）。 */
 LOCAL void unpaint(void)
 {
-	W n = img.size.v;
+	W n = pst->img.size.v;
 	W y;
 
-	if (!drawn) {
+	if (!pst->drawn) {
 		return;
 	}
 	for (y = 0; y < n; y++) {
@@ -587,13 +623,13 @@ LOCAL void unpaint(void)
 		for (x = 0; x < n; x++) {
 			W i = y * MAX_PTR_SIZE + x;
 
-			if (!under_ok[i] || !touches(x, y)) {
+			if (!pst->under_ok[i] || !touches(x, y)) {
 				continue; /* 触っていないので戻す必要も無い */
 			}
-			dp_pix_put(&scr, drawn_at.x + x, drawn_at.y + y, under[i]);
+			dp_pix_put(&scr, pst->drawn_at.x + x, pst->drawn_at.y + y, pst->under[i]);
 		}
 	}
-	drawn = False;
+	pst->drawn = False;
 }
 
 /* ホットポイントを pos に合わせたときのイメージ左上。 */
@@ -601,8 +637,8 @@ LOCAL PNT topleft(PNT pos)
 {
 	PNT p;
 
-	p.x = (H)(pos.x - img.hotpt.x);
-	p.y = (H)(pos.y - img.hotpt.y);
+	p.x = (H)(pos.x - pst->img.hotpt.x);
+	p.y = (H)(pos.y - pst->img.hotpt.y);
 	return p;
 }
 
@@ -614,12 +650,12 @@ LOCAL void refresh(void)
 	if (!scr_ok) {
 		return;
 	}
-	if (sts.hidden > 0) {
+	if (pst->sts.hidden > 0) {
 		unpaint();
 		return;
 	}
-	want = topleft(sts.pos);
-	if (drawn && want.x == drawn_at.x && want.y == drawn_at.y) {
+	want = topleft(pst->sts.pos);
+	if (pst->drawn && want.x == pst->drawn_at.x && want.y == pst->drawn_at.y) {
 		return;
 	}
 	/* paint が古い位置の後始末もする。ここで unpaint を挟むと、
@@ -637,24 +673,24 @@ EXPORT ERR gini_ptr(void)
 
 	(void)ensure();
 	unpaint();
-	sts.style = PS_SELECT;
-	sts.fgcol = COL_BLACK;
-	sts.bgcol = COL_WHITE;
-	sts.motion = 1; /* 追従状態 */
-	sts.hidden = 0; /* 表示状態 */
-	sts.size = PTR_N;
+	pst->sts.style = PS_SELECT;
+	pst->sts.fgcol = COL_BLACK;
+	pst->sts.bgcol = COL_WHITE;
+	pst->sts.motion = 1; /* 追従状態 */
+	pst->sts.hidden = 0; /* 表示状態 */
+	pst->sts.size = PTR_N;
 	load_std(std[PS_SELECT]);
 	if (scr_ok) {
-		if (!dp_color(&scr, sts.fgcol, &fgpix)) {
-			fgpix = 0;
+		if (!dp_color(&scr, pst->sts.fgcol, &pst->fgpix)) {
+			pst->fgpix = 0;
 		}
-		if (!dp_color(&scr, sts.bgcol, &bgpix)) {
-			bgpix = scr.vmask;
+		if (!dp_color(&scr, pst->sts.bgcol, &pst->bgpix)) {
+			pst->bgpix = scr.vmask;
 		}
 	}
 	/* 「現在のポインティングデバイスの位置に表示する」 */
 	if (get_pdp(&p) == ER_OK) {
-		sts.pos = p;
+		pst->sts.pos = p;
 	}
 	refresh();
 	return EG_OK;
@@ -665,18 +701,18 @@ EXPORT ERR gdsp_ptr(W req)
 	(void)ensure();
 	if (req == 0) {
 		/* 消去要求。要求数を +1 して消す。 */
-		sts.hidden++;
+		pst->sts.hidden++;
 	} else if (req > 0) {
 		/* 表示要求。0 でなければ -1 し、0 になったら表示する。 */
-		if (sts.hidden > 0) {
-			sts.hidden--;
+		if (pst->sts.hidden > 0) {
+			pst->sts.hidden--;
 		}
 	} else {
 		/* 強制表示要求。要求数を 0 にして表示する。 */
-		sts.hidden = 0;
+		pst->sts.hidden = 0;
 	}
 	refresh();
-	return sts.hidden;
+	return pst->sts.hidden;
 }
 
 EXPORT ERR gset_ptr(PTRSTL style, PTRIMG *im, COLOR fgcol, COLOR bgcol)
@@ -729,17 +765,17 @@ EXPORT ERR gset_ptr(PTRSTL style, PTRIMG *im, COLOR fgcol, COLOR bgcol)
 	/* ここまで検査が通ってから状態を書き換える。
 	 * 途中で失敗して半端な形状が残ると、画面が壊れたままになる。 */
 	unpaint();
-	sts.style = style;
-	sts.fgcol = fc;
-	sts.bgcol = bc;
-	fgpix = fp;
-	bgpix = bp;
+	pst->sts.style = style;
+	pst->sts.fgcol = fc;
+	pst->sts.bgcol = bc;
+	pst->fgpix = fp;
+	pst->bgpix = bp;
 	if (style >= 0) {
 		load_std(std[style]);
 	} else {
-		img = *im;
+		pst->img = *im;
 	}
-	sts.size = img.size.v;
+	pst->sts.size = pst->img.size.v;
 	refresh();
 	return EG_OK;
 }
@@ -748,7 +784,7 @@ EXPORT ERR gmov_ptr(PNT pos)
 {
 	(void)ensure();
 	/* 仕様「ポインタが追従状態の場合は、何もしない」。戻り値は 1。 */
-	if (sts.motion != 0) {
+	if (pst->sts.motion != 0) {
 		return 1;
 	}
 	if (scr_ok) {
@@ -757,7 +793,7 @@ EXPORT ERR gmov_ptr(PNT pos)
 			return EG_PAR;
 		}
 	}
-	sts.pos = pos;
+	pst->sts.pos = pos;
 	refresh();
 	return 0;
 }
@@ -767,10 +803,10 @@ EXPORT ERR gmot_ptr(W s)
 	Bool want = (s != 0);
 
 	(void)ensure();
-	if (want == (sts.motion != 0)) {
+	if (want == (pst->sts.motion != 0)) {
 		return EG_OK; /* 仕様「既に…の場合は何もしない」 */
 	}
-	sts.motion = want ? 1 : 0;
+	pst->sts.motion = want ? 1 : 0;
 	if (want) {
 		/* 仕様「追従指定を行なった場合は、その時点から追従を始める。
 		 * 従って、表示位置が PD の位置と異なっていた場合は、
@@ -784,12 +820,12 @@ EXPORT W gget_ptr(PTRSTS *s, PTRIMG *im)
 {
 	(void)ensure();
 	if (s != 0) {
-		*s = sts;
+		*s = pst->sts;
 	}
 	if (im != 0) {
-		*im = img;
+		*im = pst->img;
 	}
-	return sts.size;
+	return pst->sts.size;
 }
 
 /* ------------------------------------------------------------------ */
@@ -803,15 +839,15 @@ EXPORT void gptr_follow(void)
 	if (!ensure()) {
 		return;
 	}
-	if (sts.motion == 0) {
+	if (pst->sts.motion == 0) {
 		return;
 	}
 	if (get_pdp(&p) != ER_OK) {
 		return;
 	}
-	if (p.x == sts.pos.x && p.y == sts.pos.y) {
+	if (p.x == pst->sts.pos.x && p.y == pst->sts.pos.y) {
 		return;
 	}
-	sts.pos = p;
+	pst->sts.pos = p;
 	refresh();
 }
