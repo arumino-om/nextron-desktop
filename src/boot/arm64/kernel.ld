@@ -38,6 +38,19 @@ SECTIONS
     .rodata : AT(ADDR(.rodata) - KERNEL_VMA + KERNEL_LMA) {
         *(.rodata .rodata.*)
 
+        /* 検査区分の登録（W0-1。src/kernel/core/tests/testsuite.h）。
+         *
+         * 区分ごとのファイルが自分の記述子へのポインタをここへ置く。
+         * 1 つのファイルに登録表を持たせると、検査を足す作業が必ず
+         * そのファイルを触ることになり、並列に進めたときの衝突点になる。
+         *
+         * .rodata の中に置くのは、独立した出力セクションにすると
+         * どの PT_LOAD にも入らず、ローダが運ばなくなるため。 */
+        . = ALIGN(8);
+        __btron_tests_start = .;
+        KEEP(*(btron_tests))
+        __btron_tests_end = .;
+
         /* C から VMA <-> LMA を換算するための基準。
          *
          * 絶対シンボル (__x = KERNEL_LMA;) にすると、コンパイラがその

@@ -201,8 +201,18 @@ endif()
 # いまのところ arm64 のみ。起動してシリアルに出し、実行時に設計上の
 # 不変条件を検査して終了する。
 # --------------------------------------------------------------------------
+# 検査区分 (W0-1)。
+#
+# **列挙しないのは意図的である。** 区分を足す作業がこのファイルを
+# 触らずに済むようにする（docs/parallel.md のレーン分割の前提）。
+# CONFIGURE_DEPENDS を付けているので、ファイルを足せば ninja が
+# 構成からやり直す。
+file(GLOB BTRON_TEST_SRCS CONFIGURE_DEPENDS
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/kernel/core/tests/*.c")
+
 if(BTRON_ARCH STREQUAL "arm64")
   add_executable(btron-kernel
+    ${BTRON_TEST_SRCS}
     src/boot/arm64/start.S
     src/boot/arm64/boot.c
     src/kernel/hal/arm64/uart.c
