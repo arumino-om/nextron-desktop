@@ -611,6 +611,106 @@ LOCAL void redraw(WID wid)
 LOCAL RECT dmg;
 LOCAL Bool dmg_any;
 
+/* 合成の一時面（画面と同じ大きさ）。
+ *
+ * **画面へ直に組むと、組んでいる途中が見える。** 机を塗る → 窓を奥から
+ * 貼る → ポインタを載せる、の各段階が走査に追い越されて、ちらつきとして
+ * 目に付く（画素を何度書くかの問題ではなく、**途中の状態が見えるか**の
+ * 問題である）。一時面に組んでから 1 回で貼れば、画面の各画素は
+ * 更新ごとに 1 度しか書かれない。
+ *
+ * 取れなければ画面へ直に組む（古い経路）。動くことを優先する。 */
+LOCAL BMP tmp_bmp;
+LOCAL VP tmp_buf;
+LOCAL W tmp_blk;
+LOCAL GID tmp_gid;
+
+LOCAL void tmp_init(void)
+{
+	RECT scr;
+	DEVSPEC sp;
+	UW bw;
+	UW bh;
+	UD need;
+	UD bs;
+	M_STATE ms;
+	VP adr = 0;
+
+	if (tmp_gid >= 1 || screen_gid < 1) {
+		return;
+	}
+	if (gget_bnd(screen_gid, &scr) != EG_OK ||
+	    gget_dsp(screen_gid, &sp) != EG_OK) {
+		return;
+	}
+	bw = (UW)(scr.c.right - scr.c.left);
+	bh = (UW)(scr.c.bottom - scr.c.top);
+	if (bw == 0 || bh == 0) {
+		return;
+	}
+	tmp_bmp.planes = 1;
+	tmp_bmp.pixbits = (UH)sp.pixbits;
+	tmp_bmp.rowbytes = (UH)(bw * 4U);
+	tmp_bmp.bounds.c.left = 0;
+	tmp_bmp.bounds.c.top = 0;
+	tmp_bmp.bounds.c.right = (H)bw;
+	tmp_bmp.bounds.c.bottom = (H)bh;
+	need = (UD)tmp_bmp.rowbytes * bh;
+	bs = (mbk_sts(&ms) == ER_OK && ms.blksz > 0) ? (UD)ms.blksz : 4096U;
+	tmp_blk = (W)((need + bs - 1) / bs);
+	if (get_mbk(&adr, tmp_blk, M_COMMON | M_RESIDENT) != ER_OK || adr == 0) {
+		tmp_blk = 0;
+		return;
+	}
+	tmp_buf = adr;
+	tmp_bmp.baseaddr[0] = (UB *)adr;
+	tmp_gid = gopn_mem(nm_screen, &tmp_bmp, 0);
+	if (tmp_gid < 1) {
+		(void)rel_mbk(tmp_buf);
+		tmp_buf = 0;
+		tmp_blk = 0;
+		tmp_gid = 0;
+	}
+}
+
+/* **利用側が描いた範囲の置き場**（詳細 E2 の宿題だった分）。
+ *
+ * 窓ごとに 1 つ、共有メモリに置く。利用側のディスプレイプリミティブが
+ * `gset_dmg` でここを覚え、裏画面へ描くたびに範囲を積む。マネージャは
+ * 合成したら `any` を 0 に戻す。
+ *
+ * **これが無いと「どこが変わったか」を知る手立てが無く**、要求のたびに
+ * 窓を丸ごと貼り直すことになる。画面いっぱいの転送を毎回やると走査が
+ * 追い越して、目にはちらつきとして見える。 */
+LOCAL DMGREC *cli_dmg;
+
+LOCAL void cli_dmg_init(void)
+{
+	M_STATE ms;
+	VP adr = 0;
+	UD need = (UD)sizeof(DMGREC) * (W_MAX_WND + 1);
+	UD bs;
+	W blk;
+
+	if (cli_dmg != 0) {
+		return;
+	}
+	bs = (mbk_sts(&ms) == ER_OK && ms.blksz > 0) ? (UD)ms.blksz : 4096U;
+	blk = (W)((need + bs - 1) / bs);
+	if (get_mbk(&adr, blk, M_COMMON | M_RESIDENT) != ER_OK || adr == 0) {
+		return; /* 取れなければ記録なしで動く（貼り直しが増えるだけ） */
+	}
+	cli_dmg = (DMGREC *)adr;
+	{
+		W i;
+
+		for (i = 0; i <= W_MAX_WND; i++) {
+			cli_dmg[i].any = 0;
+			cli_dmg[i].seq = 0;
+		}
+	}
+}
+
 LOCAL void damage(CONST RECT *r)
 {
 	if (r == 0 || rect_empty(r)) {
@@ -651,6 +751,7 @@ LOCAL void composite(CONST RECT *area, Bool desk)
 	W z[W_MAX_WND];
 	RECT scr;
 	RECT a;
+	GID dst;
 	W nz;
 	W nfore = 0;
 	W i;
@@ -665,30 +766,37 @@ LOCAL void composite(CONST RECT *area, Bool desk)
 	if (rect_empty(&a)) {
 		return;
 	}
+	tmp_init();
+	/* **組み立て先。** 一時面が取れていればそこへ組み、最後に 1 回で
+	 * 画面へ貼る。取れなければ画面へ直に組む（ちらつくが動く）。 */
+	dst = (tmp_gid >= 1) ? tmp_gid : screen_gid;
 	nz = zsort(z);
 
 	if (desk) {
-		/* 机を塗るのは**ウィンドウが無い所だけ**。ウィンドウの上から
-		 * 塗ってから貼り直すと、同じ点を 2 回書くことになる。 */
-		for (i = 0; i < nz && nfore < DP_MAX_FORE; i++) {
-			RECT hit = rect_isect(&a, &wnd[z[i]].frame);
+		if (dst == screen_gid) {
+			/* 画面へ直に組むときだけは、ウィンドウの上から塗らない
+			 * ようにする（同じ点を 2 回書くと、その分だけ長く
+			 * 途中の状態が見える）。 */
+			for (i = 0; i < nz && nfore < DP_MAX_FORE; i++) {
+				RECT hit = rect_isect(&a, &wnd[z[i]].frame);
 
-			if (rect_empty(&hit) || !visible(z[i])) {
-				continue;
+				if (rect_empty(&hit) || !visible(z[i])) {
+					continue;
+				}
+				rl[nfore++].comp = wnd[z[i]].frame;
 			}
-			rl[nfore++].comp = wnd[z[i]].frame;
+			for (i = 0; i < nfore; i++) {
+				rl[i].next = (i + 1 < nfore) ? &rl[i + 1] : 0;
+			}
+			(void)gset_for(dst, (nfore > 0) ? &rl[0] : 0);
 		}
-		for (i = 0; i < nfore; i++) {
-			rl[i].next = (i + 1 < nfore) ? &rl[i + 1] : 0;
-		}
-		(void)gset_for(screen_gid, (nfore > 0) ? &rl[0] : 0);
-		(void)gfil_rec(screen_gid, a, (CONST PAT *)BLACK50, 0, G_STORE);
-		(void)gset_for(screen_gid, 0);
+		(void)gfil_rec(dst, a, (CONST PAT *)BLACK50, 0, G_STORE);
+		(void)gset_for(dst, 0);
 	}
 
 	/* **奥から手前へ。** 後から貼ったものが上になる。
-	 * bgid は画面の絶対座標で見ているので、転送元と転送先に同じ
-	 * 矩形をそのまま渡せる。 */
+	 * bgid も一時面も画面の絶対座標で見ているので、転送元と転送先に
+	 * 同じ矩形をそのまま渡せる。 */
 	for (i = nz - 1; i >= 0; i--) {
 		Window *w = &wnd[z[i]];
 		RECT hit = rect_isect(&a, &w->frame);
@@ -696,61 +804,84 @@ LOCAL void composite(CONST RECT *area, Bool desk)
 		if (rect_empty(&hit) || !visible(z[i]) || w->bgid < 1) {
 			continue;
 		}
-		(void)gcop_bmp(w->bgid, &hit, screen_gid, &hit, 0, G_STORE);
+		(void)gcop_bmp(w->bgid, &hit, dst, &hit, 0, G_STORE);
 	}
 	/* **ポインタは一番上のレイヤ。** 下地は作り直したばかりなので、
 	 * 退避も書き戻しも要らない（詳細 E2）。 */
-	gptr_paint(&a);
-}
+	gptr_paint_to((dst == screen_gid) ? 0 : dst, &a);
 
-/* すべてのウィンドウの外枠を囲む矩形。 */
-LOCAL RECT all_frames(void)
-{
-	RECT a;
-	Bool any = False;
-	W i;
-
-	a.c.left = 0;
-	a.c.top = 0;
-	a.c.right = 0;
-	a.c.bottom = 0;
-	for (i = 1; i <= W_MAX_WND; i++) {
-		if (!wnd[i].used || !visible(i)) {
-			continue;
-		}
-		if (!any) {
-			a = wnd[i].frame;
-			any = True;
-			continue;
-		}
-		if (wnd[i].frame.c.left < a.c.left) {
-			a.c.left = wnd[i].frame.c.left;
-		}
-		if (wnd[i].frame.c.top < a.c.top) {
-			a.c.top = wnd[i].frame.c.top;
-		}
-		if (wnd[i].frame.c.right > a.c.right) {
-			a.c.right = wnd[i].frame.c.right;
-		}
-		if (wnd[i].frame.c.bottom > a.c.bottom) {
-			a.c.bottom = wnd[i].frame.c.bottom;
-		}
+	if (dst != screen_gid) {
+		/* **ここが画面への唯一の書き込み。** 1 画素 1 回。 */
+		(void)gcop_bmp(dst, &a, screen_gid, &a, 0, G_STORE);
 	}
-	return a;
 }
 
 /*
- * 要求を 1 つ配り終えるたびに画面を作り直す。`winsrv_loop` が呼ぶ。
+ * 要求を 1 つ配り終えるたびに、**変わった所だけ**画面を作り直す。
+ * `winsrv_loop` が呼ぶ。
  *
- * **利用側がどこを描いたかを知る手立てがまだ無い。** アプリは自分の
- * ビットマップへ好きなときに描く（仕様はそれを禁じていない）ので、
- * 損傷の通知が無い以上、要求のたびにウィンドウを貼り直すしかない。
- * 机は変わっていないので触らない。損傷の通知は詳細 E2 の宿題。
+ * 変わった所は 3 つから来る。
+ *
+ *   1. マネージャ自身の操作（移動・変形・前後関係・枠の描き直し）
+ *   2. **利用側が裏画面へ描いた範囲**（cli_dmg。詳細 E2 の宿題だった分）
+ *   3. ポインタの移動（退いた跡と行った先）
+ *
+ * どれも無ければ画面を 1 画素も触らない。
  */
 /* 前回ポインタが占めていた矩形。動いたらそこを作り直す。 */
 LOCAL RECT ptr_was;
 LOCAL Bool ptr_had;
 LOCAL W ptr_seq;
+
+/* 利用側が積んだ損傷を取り込む。取り込んだら消す。 */
+LOCAL void take_client_damage(void)
+{
+	W i;
+
+	if (cli_dmg == 0) {
+		return;
+	}
+	for (i = 1; i <= W_MAX_WND; i++) {
+		RECT r;
+		UW s0;
+		Bool torn;
+
+		if (cli_dmg[i].any == 0) {
+			continue;
+		}
+		/* **受け渡しの競合を閉じる。**
+		 *
+		 * 積む側（別プロセス）と取る側（ここ）は同じ記録を触る。
+		 * 原子的な交換が無いので、「読む → 消す」の間に積まれた分を
+		 * 取りこぼしうる。取りこぼすと画面だけが古いまま残る。
+		 *
+		 * 連番を前後で見て、変わっていたら**窓全体を損傷とみなす**。
+		 * 保守的に広く貼るだけなので、正しさは失われない。
+		 * 1 CPU かつ利用側は要求の間は止まっているので、ここへ
+		 * 落ちるのは稀である。 */
+		s0 = cli_dmg[i].seq;
+		r = cli_dmg[i].r;
+		cli_dmg[i].any = 0;
+		torn = (cli_dmg[i].seq != s0) ? True : False;
+		if (!wnd[i].used || !visible(i)) {
+			continue;
+		}
+		if (torn) {
+			damage(&wnd[i].frame);
+			continue;
+		}
+		/* **座標系を合わせる。** 利用側が積むのは裏画面の中の位置で、
+		 * ビットマップの列 0 は外枠の左上に対応する（setup_gid の
+		 * 「絶対 = 相対 - bounds.left」）。画面の座標に直してから、
+		 * 窓の外枠で切る — 外へはみ出した分を貼ると隣の窓や机を踏む。 */
+		r.c.left = (H)(r.c.left + wnd[i].frame.c.left);
+		r.c.right = (H)(r.c.right + wnd[i].frame.c.left);
+		r.c.top = (H)(r.c.top + wnd[i].frame.c.top);
+		r.c.bottom = (H)(r.c.bottom + wnd[i].frame.c.top);
+		r = rect_isect(&r, &wnd[i].frame);
+		damage(&r);
+	}
+}
 
 EXPORT void win_flush(void)
 {
@@ -760,6 +891,7 @@ EXPORT void win_flush(void)
 	if (screen_gid < 1) {
 		return;
 	}
+	take_client_damage();
 	/* **ポインタを動かすのはマネージャの仕事**（§2.6 / 本OS の gptr_follow）。
 	 * 画面を持っているのはここなので、追従もここで回す。 */
 	gptr_follow();
@@ -782,13 +914,13 @@ EXPORT void win_flush(void)
 	if (dmg_any) {
 		composite(&dmg, True);
 		dmg_any = False;
-		return;
 	}
-	{
-		RECT a = all_frames();
-
-		composite(&a, False);
-	}
+	/* **損傷が無ければ何もしない。**
+	 *
+	 * 以前はここで全ウィンドウを貼り直していた。利用側がどこを描いたか
+	 * 知る手立てが無かったためで、要求のたびに画面いっぱいの転送が
+	 * 走っていた（詳細 E2 の宿題）。利用側が損傷を積むようになったので、
+	 * 変わっていないときは画面を 1 画素も触らない。 */
 }
 
 /* ------------------------------------------------------------------ */
@@ -861,6 +993,10 @@ LOCAL void activate(WID wid)
 
 		for (i = nz - 1; i >= 0; i--) {
 			redraw(z[i]);
+			/* **描き直したら必ず損傷を積む。** 積み忘れると裏画面
+			 * だけが新しくなり、画面は古いままになる。以前は要求の
+			 * たびに全部貼り直していたので表に出なかった。 */
+			damage(&wnd[z[i]].frame);
 			(void)wsv_req_dsp(z[i]);
 		}
 	}
@@ -1047,9 +1183,11 @@ LOCAL WID open_common(UW attr, UW par, RECT *r, CONST RECT *org, W pict,
 	} else {
 		refresh_fore();
 		redraw(wid);
+		damage(&w->frame);
 	}
 	setup_gid(wid);
 	redraw(wid);
+	damage(&w->frame);
 
 	/* 仕様「実行後には、実際に生成されたウィンドウの作業領域の相対座標が
 	 * 格納される (左上は常に ( 0, 0 ) となっている)」 */
@@ -1190,6 +1328,8 @@ EXPORT W wsv_get_env(WID wid, WinEnv *env)
 	env->bufh = w->bmp.bounds.c.bottom;
 	env->rowbytes = (W)w->bmp.rowbytes;
 	env->pixbits = (W)w->bmp.pixbits;
+	cli_dmg_init();
+	env->dmg = (cli_dmg != 0) ? (UD)(VP)&cli_dmg[wid] : 0;
 	return EX_OK;
 }
 
@@ -1263,6 +1403,7 @@ EXPORT ERR wsv_set_tit(WID wid, W pict, CONST TC *title, W mode)
 	}
 	w->title[W_MAX_TITLE] = TNULL;
 	draw_frame(wid);
+	damage(&w->frame);
 	return EX_OK;
 }
 
@@ -1535,6 +1676,7 @@ EXPORT ERR wsv_era_wnd(WID wid, CONST RECT *r)
 		return EX_WID;
 	}
 	draw_work(wid, r);
+	damage(&w->work);
 	return EX_OK;
 }
 

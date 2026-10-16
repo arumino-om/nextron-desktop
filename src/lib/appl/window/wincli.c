@@ -176,6 +176,10 @@ LOCAL Bool open_env(CliEnv *c, CONST WinEnv *env)
 	if (c->gid < 1) {
 		return False;
 	}
+	/* **どこを描いたかをマネージャに知らせる**（詳細 E2 の宿題）。
+	 * これが無いと、マネージャは要求のたびに窓を丸ごと画面へ
+	 * 貼り直すしかなく、走査が追い越してちらつきになる。 */
+	(void)gset_dmg(c->gid, (DMGREC *)(VP)env->dmg);
 	c->buf = env->buf;
 	return True;
 }

@@ -220,6 +220,36 @@ EXPORT Bool dp_in_fore(CONST DEnv *e, W rx, W ry)
 	return False;
 }
 
+EXPORT void dp_mark(CONST DEnv *e, W ax0, W ay0, W ax1, W ay1)
+{
+	DMGREC *d = e->dmg;
+
+	if (d == 0 || ax1 <= ax0 || ay1 <= ay0) {
+		return;
+	}
+	if (d->any == 0) {
+		d->r.c.left = (H)ax0;
+		d->r.c.top = (H)ay0;
+		d->r.c.right = (H)ax1;
+		d->r.c.bottom = (H)ay1;
+		d->any = 1;
+	} else {
+		if (ax0 < d->r.c.left) {
+			d->r.c.left = (H)ax0;
+		}
+		if (ay0 < d->r.c.top) {
+			d->r.c.top = (H)ay0;
+		}
+		if (ax1 > d->r.c.right) {
+			d->r.c.right = (H)ax1;
+		}
+		if (ay1 > d->r.c.bottom) {
+			d->r.c.bottom = (H)ay1;
+		}
+	}
+	d->seq++;
+}
+
 EXPORT void dp_plot(CONST DEnv *e, CONST RECT *clip, W rx, W ry, UW src,
                     DCM mode)
 {
@@ -237,6 +267,7 @@ EXPORT void dp_plot(CONST DEnv *e, CONST RECT *clip, W rx, W ry, UW src,
 	ax = DP_ABS_X(e, rx);
 	ay = DP_ABS_Y(e, ry);
 	dest = dp_pix_get(e, ax, ay);
+	dp_mark(e, ax, ay, ax + 1, ay + 1);
 	if (!dp_maskok(e, mode, dest)) {
 		return;
 	}
@@ -597,11 +628,14 @@ EXPORT Bool dp_next_run(CONST DEnv *e, W ry, W x1, W *x, W *rs, W *re)
 
 EXPORT void dp_run(CONST DEnv *e, CONST PatRow *pr, W rx0, W rx1, W ry)
 {
-	UB *row = row_of(e, DP_ABS_Y(e, ry));
+	W ay = DP_ABS_Y(e, ry);
+	UB *row = row_of(e, ay);
 	W a0 = DP_ABS_X(e, rx0);
 	W a1 = DP_ABS_X(e, rx1);
 	W i = pmod(rx0, pr->period);
 	W a;
+
+	dp_mark(e, a0, ay, a1, ay + 1);
 
 	if (pr->solid) {
 		UW v = pr->pix[0];
@@ -704,12 +738,15 @@ EXPORT void dp_hline(CONST DEnv *e, CONST RECT *clip, W rx0, W rx1, W ry,
 EXPORT void dp_copy_run(CONST DEnv *s, W sx0, W sy, CONST DEnv *d, W dx0,
                         W dx1, W dy, Bool back)
 {
+	W ady = DP_ABS_Y(d, dy);
 	CONST UB *sr = row_of(s, DP_ABS_Y(s, sy));
-	UB *dr = row_of(d, DP_ABS_Y(d, dy));
+	UB *dr = row_of(d, ady);
 	W sa = DP_ABS_X(s, sx0);
 	W da = DP_ABS_X(d, dx0);
 	W n = dx1 - dx0;
 	W i;
+
+	dp_mark(d, da, ady, da + n, ady + 1);
 
 	/* 同じビットマップで区間が重なるときは、読む前に書いてしまわない
 	 * 向きで回す（bitmap.c の前書き）。 */

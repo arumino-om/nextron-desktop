@@ -601,6 +601,18 @@ EXPORT ERR gget_msk(GID gid, PIXVAL *pixv)
 	return EG_OK;
 }
 
+/* 損傷の記録先を登録する（本OS の拡張。dp.h の DMGREC に経緯）。 */
+EXPORT ERR gset_dmg(GID gid, DMGREC *rec)
+{
+	DEnv *e = dp_get(gid);
+
+	if (e == 0) {
+		return EG_PAR;
+	}
+	e->dmg = rec;
+	return EG_OK;
+}
+
 EXPORT ERR gset_clp(GID gid, CONST GRGN *clip)
 {
 	DEnv *e = dp_get(gid);

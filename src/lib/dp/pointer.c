@@ -705,14 +705,25 @@ EXPORT W gptr_rect(RECT *r)
 	return 1;
 }
 
-EXPORT void gptr_paint(CONST RECT *area)
+EXPORT void gptr_paint_to(GID gid, CONST RECT *area)
 {
+	DEnv *dst;
 	PNT at;
 	W n;
 	W x;
 	W y;
 
 	if (!ensure() || pst->sts.hidden > 0) {
+		return;
+	}
+	/* **描き先を選べるようにした理由。**
+	 *
+	 * 合成を画面へ直に書くと、下地を貼ってからポインタを載せるまでの
+	 * 間が見える（走査が追い越す）。一時面へ組んでから 1 回で貼れば
+	 * 画面の各画素は 1 度しか書かれないので、その隙間が無くなる。
+	 * gid が 0 なら従来どおり画面へ描く。 */
+	dst = (gid >= 1) ? dp_get(gid) : &scr;
+	if (dst == 0) {
 		return;
 	}
 	at = topleft(pst->sts.pos);
@@ -742,9 +753,14 @@ EXPORT void gptr_paint(CONST RECT *area)
 				v = d ? pst->fgpix : pst->bgpix;
 			} else {
 				/* data=1 mask=0 は反転。合成し直した下地を読む。 */
-				v = dp_pix_get(&scr, ax, ay) ^ scr.vmask;
+				v = dp_pix_get(dst, ax, ay) ^ dst->vmask;
 			}
-			dp_pix_put(&scr, ax, ay, v);
+			dp_pix_put(dst, ax, ay, v);
 		}
 	}
+}
+
+EXPORT void gptr_paint(CONST RECT *area)
+{
+	gptr_paint_to(0, area);
 }

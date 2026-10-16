@@ -52,6 +52,10 @@ typedef struct DEnv {
 	W chdir;
 	CGAP chgap;
 
+	/* 損傷の記録先（本OS の拡張。dp.h の DMGREC）。
+	 * 0 なら記録しない。窓の裏画面に描くときだけ使う。 */
+	DMGREC *dmg;
+
 	/* 線マスクパターン。既定は実線。 */
 	UB lmask[8];
 	UW lmask_bytes;
@@ -99,6 +103,11 @@ IMPORT ERR dp_pat_check(CONST PAT *pat);
 
 /* 点が前置長方形リストに入っているか。入っていれば描画しない。 */
 IMPORT Bool dp_in_fore(CONST DEnv *e, W rx, W ry);
+
+/* 損傷を記録する。**絶対座標**で、[ax0, ax1) × [ay0, ay1)。
+ * 記録先が無ければ何もしない。**区間ごとに 1 回**呼ぶ（画素ごとに
+ * 呼ぶと走査線の速い経路が台無しになる）。 */
+IMPORT void dp_mark(CONST DEnv *e, W ax0, W ay0, W ax1, W ay1);
 
 /* 1 ピクセル描く。相対座標。クリップと前置長方形とマスクを見る。 */
 IMPORT void dp_plot(CONST DEnv *e, CONST RECT *clip, W rx, W ry, UW src,
