@@ -56,6 +56,19 @@
 #define OBJ_VERSION 1
 #define OBJ_HDRSZ 64
 
+/* レコードタイプ。共有データ仕様 3.2 が実行プログラムレコードに 9 を
+ * 割り当てている。 */
+#define OBJ_REC_PROGRAM 9
+
+/* このビルドの CPU タイプ。レコードのサブタイプに入れる。 */
+#if defined(__aarch64__)
+#define OBJ_CPU_NATIVE 0x80 /* OBJ_CPU_ARM64 */
+#elif defined(__x86_64__)
+#define OBJ_CPU_NATIVE 0x64 /* OBJ_CPU_X86_64 */
+#else
+#error "OBJ_CPU_NATIVE が未定義のアーキテクチャ"
+#endif
+
 /* CPU タイプ（レコードのサブタイプ）。A17 の拡張を含む。 */
 #define OBJ_CPU_TRON32 0x00
 #define OBJ_CPU_68000 0x40

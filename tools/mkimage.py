@@ -6,7 +6,10 @@ docs/design-issues.md 詳細 D8「本OS での方針」:
     ブートローダ  UEFI (x86_64 / arm64 共通)
     区画          GPT。BTRON 区画の GUID を独自定義
 
-いまは ESP だけを作る。BTRON ファイルシステム区画は Phase 3 で足す。
+区画は 2 つ。ESP（ローダとカーネル）と **BTRON 区画**（ファイルシステム）。
+BTRON 区画は**空のまま**置く — 中身の形式はカーネルが知っていて、
+起動列が「未構築なら構築する」ので、ホスト側に同じ形式の実装を
+二重に持たない（規律 R1 と同じ姿勢）。
 
     python3 tools/mkimage.py --arch arm64 \\
         --loader build/arm64/BOOTAA64.EFI \\
@@ -60,7 +63,7 @@ def need(prog: str) -> str:
 
 def build_esp(esp: Path, size_mib: int, boot_name: str,
               loader: Path, kernel: Path, panic_test: bool = False,
-              hold: bool = False) -> None:
+              hold: bool = False, selfboot: bool = False) -> None:
     """FAT の ESP イメージを作り、ローダとカーネルを入れる。"""
     need("mformat")
     need("mcopy")
@@ -89,6 +92,17 @@ def build_esp(esp: Path, size_mib: int, boot_name: str,
         run(["mcopy", "-i", str(esp), str(marker), "::/BTRON/PANICTEST"])
         marker.unlink()
 
+    if selfboot:
+        # 起動時検査の代わりに本来の起動列を通す印 (D8 / startup.c)。
+        # ドライバを登録し、BTRON 区画を接続し（未構築なら構築し）、
+        # ディスク上の実行プログラムから外殻を起こす。
+        marker = esp.with_suffix(".selfboot")
+        marker.write_text("本来の起動列を通す印。これがあると、起動時検査の"
+                          "代わりにディスクからの起動を試します。\n",
+                          encoding="utf-8")
+        run(["mcopy", "-i", str(esp), str(marker), "::/BTRON/SELFBOOT"])
+        marker.unlink()
+
     if hold:
         # 起動時検査が終わっても電源を落とさず、画面を残して居座る印。
         # 手で画面を見るためにある（run_qemu.py --gui）。
@@ -101,24 +115,34 @@ def build_esp(esp: Path, size_mib: int, boot_name: str,
         marker.unlink()
 
 
-def build_disk(out: Path, esp: Path) -> None:
-    """GPT を書いたディスクイメージを作り、ESP を流し込む。"""
+def build_disk(out: Path, esp: Path, fs_size_mib: int) -> None:
+    """GPT を書いたディスクイメージを作り、ESP を流し込む。
+
+    区画 2 (BTRON 区画) は空のまま置く。カーネルの起動列が
+    タイプ GUID でそれを見つけ、未構築なら構築する。
+    """
     sgdisk = need("sgdisk")
 
     esp_size = esp.stat().st_size
+    esp_mib = esp_size // (1024 * 1024)
     # 先頭 1MiB に GPT、末尾 1MiB にバックアップ GPT の余地を残す
-    total = ESP_OFFSET_MIB * 1024 * 1024 + esp_size + 1024 * 1024
+    total = (ESP_OFFSET_MIB + esp_mib + fs_size_mib + 1) * 1024 * 1024
 
     out.parent.mkdir(parents=True, exist_ok=True)
     with out.open("wb") as f:
         f.truncate(total)
 
-    run([sgdisk,
-         "--clear",
-         "--new", f"1:{ESP_OFFSET_MIB}MiB:+{esp_size // (1024 * 1024)}MiB",
-         "--typecode", f"1:{ESP_TYPE}",
-         "--change-name", "1:BTRON ESP",
-         str(out)])
+    argv = [sgdisk,
+            "--clear",
+            "--new", f"1:{ESP_OFFSET_MIB}MiB:+{esp_mib}MiB",
+            "--typecode", f"1:{ESP_TYPE}",
+            "--change-name", "1:BTRON ESP"]
+    if fs_size_mib > 0:
+        argv += ["--new", f"2:0:+{fs_size_mib}MiB",
+                 "--typecode", f"2:{BTRON_FS_TYPE}",
+                 "--change-name", "2:BTRON FS"]
+    argv.append(str(out))
+    run(argv)
 
     data = esp.read_bytes()
     with out.open("r+b") as f:
@@ -134,9 +158,15 @@ def main() -> int:
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--esp-size", type=int, default=48,
                     help="ESP の大きさ (MiB)。FAT32 の下限があるので 33 以上")
+    ap.add_argument("--fs-size", type=int, default=16,
+                    help="BTRON 区画の大きさ (MiB)。0 なら作らない")
     ap.add_argument("--hold", action="store_true",
                     help="検査のあとも電源を落とさず画面を残す印を入れる。"
                          "手で画面を見るときに使う")
+    ap.add_argument("--selfboot", action="store_true",
+                    help="本来の起動列 (D8) を通す印を入れる。ドライバ登録・"
+                         "BTRON 区画の構築と接続・ディスク上の実行プログラム"
+                         "からの起動を行う")
     ap.add_argument("--panic-test", action="store_true",
                     help="緊急画面 (T4-02) の検査用の印を入れる。"
                          "起動時検査のあとにわざと例外を起こすようになる")
@@ -150,16 +180,20 @@ def main() -> int:
 
     esp = args.out.with_suffix(".esp")
     build_esp(esp, args.esp_size, DEFAULT_BOOT_NAME[args.arch], args.loader,
-              args.kernel, args.panic_test, args.hold)
-    build_disk(args.out, esp)
+              args.kernel, args.panic_test, args.hold, args.selfboot)
+    build_disk(args.out, esp, args.fs_size)
 
     print(f"{args.out}  ({args.out.stat().st_size // (1024 * 1024)}MiB)")
     print(f"  /EFI/BOOT/{DEFAULT_BOOT_NAME[args.arch]}  <- {args.loader}")
     print(f"  /BTRON/KERNEL.ELF        <- {args.kernel}")
+    if args.fs_size > 0:
+        print(f"  区画 2: BTRON FS ({args.fs_size}MiB。空。起動列が構築する)")
     if args.panic_test:
         print("  /BTRON/PANICTEST         <- 緊急画面の検査用の印")
     if args.hold:
         print("  /BTRON/HOLD              <- 検査後も画面を残す印")
+    if args.selfboot:
+        print("  /BTRON/SELFBOOT          <- 本来の起動列を通す印")
     return 0
 
 

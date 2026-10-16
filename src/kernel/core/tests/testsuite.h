@@ -43,6 +43,11 @@
  */
 #define TST_PHASE_KERNEL 0
 #define TST_PHASE_PROC 1
+/*   TST_PHASE_SELF    本来の起動列 (D8 / startup.c) を通したあと。
+ *                     ESP に \BTRON\SELFBOOT があるときだけ走る。
+ *                     検査の経路（ファイルシステムが 1 つも接続されて
+ *                     いない状態から始まる）と前提が違うので分けてある */
+#define TST_PHASE_SELF 2
 
 typedef struct {
 	CONST B *name; /* 区分の名前。失敗したときに場所が分かるように出す */

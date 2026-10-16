@@ -19,6 +19,7 @@
 
 #include <btron/bootinfo.h>
 #include <btron/proc.h>
+#include <btron/startup.h>
 #include <btron/test.h>
 #include <btron/window.h>
 
@@ -34,6 +35,15 @@ LOCAL ID proc_test_waiter;
 /* 初期プロセスのメインタスク。形式-A の MAIN()。 */
 LOCAL W p_test_main(MESSAGE *msg)
 {
+	if ((bootinfo()->flags & BI_F_SELFBOOT) != 0) {
+		/* **本来の起動列を通す**（D8 / startup.c）。
+		 * ドライバを登録し、BTRON 区画を接続し（未構築なら構築し）、
+		 * ディスク上の実行プログラムから外殻を起こす。 */
+		(void)sys_startup();
+		tst_run_phase(TST_PHASE_SELF);
+		(void)tk_wup_tsk(proc_test_waiter);
+		return 0;
+	}
 	BTRON_TEST("起動時メッセージ (§1.1.6)", {
 		BTRON_CHECK("空メッセージが渡る", msg != 0);
 		if (msg != 0) {
@@ -85,7 +95,11 @@ LOCAL void test_task(INT stacd, VP exinf)
 
 	(void)stacd;
 	(void)exinf;
-	tst_run_phase(TST_PHASE_KERNEL);
+	/* SELFBOOT の印があるときは中心核の検査を飛ばす。
+	 * 起動列は初期プロセスの中で走らせる（ファイル管理を使う）。 */
+	if ((bootinfo()->flags & BI_F_SELFBOOT) == 0) {
+		tst_run_phase(TST_PHASE_KERNEL);
+	}
 	run_proc_phase();
 	code = btron_test_report();
 

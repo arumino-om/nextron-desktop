@@ -18,6 +18,7 @@
  *         通してある。ブート経路ができ次第 QEMU で確認する。
  */
 
+#include <btron/bootinfo.h>
 #include <btron/hal.h>
 #include <btron/vmem.h>
 
@@ -408,6 +409,21 @@ EXPORT UD hal_vm_map_framebuf(UD pa, UD size)
 /* 未検証。x86_64 のブート経路（UEFI / multiboot）ができてから確認する。 */
 /* ------------------------------------------------------------------ */
 
+/* 物理範囲を直接マップ領域に張る。範囲はページ境界に丸める（arm64 と同じ）。 */
+LOCAL ERR map_direct(UD start, UD end)
+{
+	UD ps = (UD)hal_page_size();
+
+	start &= ~(ps - 1);
+	end = (end + ps - 1) & ~(ps - 1);
+	if (end <= start) {
+		return 0;
+	}
+	return hal_vm_map(&kernel_space, BTRON_PA_TO_VA(start), start, end - start,
+	                  BTRON_PG_READ | BTRON_PG_WRITE | BTRON_PG_EXEC
+	                      | BTRON_PG_GLOBAL);
+}
+
 EXPORT ERR hal_vm_init(void)
 {
 	UD ps = (UD)hal_page_size();
@@ -443,26 +459,36 @@ EXPORT ERR hal_vm_init(void)
 		pml4[i] = (t & E_ADDR_MASK) | E_P | E_RW;
 	}
 
-	/* 物理メモリの直接マップ。ページテーブル自身が置かれている早期プールを
-	 * 必ず含めること。切替後 table_ptr() は直接マップ経由でテーブルを読む。 */
+	/* 物理メモリの直接マップ。
+	 *
+	 * ページテーブル自身が置かれている早期プールを必ず含めること。
+	 * 切替後 table_ptr() は直接マップ経由でテーブルを読む。
+	 *
+	 * **RAM は全部張る**（arm64 側と同じ理由）。物理ページアロケータ
+	 * (mm/page.c) が配ったページをゼロクリアしたり読み書きするのに
+	 * 直接マップ経由で触るので、カーネルと早期プールだけでは足りない。
+	 * ここを狭くしていたために、画面を立てるときのページテーブル確保で
+	 * 「写像が無い」ページフォルトになった（実際に踏んだ）。
+	 * 使えない領域 (MMIO 等) は張らない — 張ると投機実行でデバイスを
+	 * 突っつくことになる。 */
+	if (map_direct(kstart, kstart + ksize) != 0) {
+		return -1;
+	}
+	if (map_direct(pmem_early_base(), pmem_early_limit()) != 0) {
+		return -1;
+	}
 	{
-		UD dm_start = kstart;
-		UD dm_end = pmem_early_limit();
+		UW r;
 
-		if (pmem_early_base() < dm_start) {
-			dm_start = pmem_early_base();
-		}
-		if (kstart + ksize > dm_end) {
-			dm_end = kstart + ksize;
-		}
-		dm_start &= ~(ps - 1);
-		dm_end = (dm_end + ps - 1) & ~(ps - 1);
+		for (r = 0; r < bootinfo_mem_count(); r++) {
+			CONST BootMemRegion *reg = bootinfo_mem(r);
 
-		if (hal_vm_map(&kernel_space, BTRON_PA_TO_VA(dm_start), dm_start,
-		               dm_end - dm_start,
-		               BTRON_PG_READ | BTRON_PG_WRITE | BTRON_PG_EXEC
-		                   | BTRON_PG_GLOBAL) != 0) {
-			return -1;
+			if (reg->type == BMEM_UNUSABLE) {
+				continue;
+			}
+			if (map_direct(reg->base, reg->base + reg->size) != 0) {
+				return -1;
+			}
 		}
 	}
 	/* カーネル本体を上位半分 (BTRON_KERNEL_BASE) に写像する。 */

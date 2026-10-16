@@ -47,7 +47,21 @@ LOCAL CONST DevDriver ser_drv = {
 	ser_write,
 };
 
+LOCAL Bool registered;
+
 EXPORT ERR serdev_register(void)
 {
-	return dev_register(&ser_drv);
+	/* **2 度呼ばれても 1 度しか登録しない。** 起動列 (D8) が登録し、
+	 * 検査も登録を確かめるので、両方から呼ばれる。デバイス管理は
+	 * 同名の二重登録を弾かないので、ここで止める。 */
+	ERR er;
+
+	if (registered) {
+		return ER_OK;
+	}
+	er = dev_register(&ser_drv);
+	if (er == ER_OK) {
+		registered = True;
+	}
+	return er;
 }

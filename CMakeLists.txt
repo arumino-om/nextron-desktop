@@ -93,6 +93,10 @@ include(CTest)
 
 add_library(btron_test STATIC src/lib/std/test.c)
 target_link_libraries(btron_test PUBLIC btron_flags btron_headers)
+if(BTRON_ARCH STREQUAL "x86_64")
+  # カーネルと同じ条件で作る（下のカーネル本体に理由を書いた）。
+  target_compile_options(btron_test PRIVATE -fpie -mno-red-zone)
+endif()
 
 # タスク索引の鮮度 (W0-4)。
 #
@@ -190,6 +194,24 @@ function(btron_add_user name blobname out_c)
     VERBATIM)
 endfunction()
 
+# **x86_64 ではまだユーザプログラムを結合しない。**
+# crt0 とシステムコールのスタブ (src/lib/sys/) が arm64 の命令で書かれて
+# いるため。カーネルは btron_user_* の像を参照する（実身に書いて cre_prc
+# する経路の検査と、外殻の起動）ので、リンクを通すために空の像を置く。
+# 嘘の像を置かないよう大きさは 0 にしてあり、cre_prc は形式不正で断る。
+if(NOT BTRON_ARCH STREQUAL "arm64")
+  set(BTRON_USER_STUB "${CMAKE_CURRENT_BINARY_DIR}/user_stub.c")
+  file(WRITE "${BTRON_USER_STUB}"
+"/* 自動生成 (CMakeLists.txt)。x86_64 ではユーザプログラムをまだ結合しない。\n"
+" * 詳細は docs/tasks/T1-11.md。*/\n"
+"const unsigned char btron_user_hello[1] = {0};\n"
+"const unsigned int btron_user_hello_size = 0;\n"
+"const unsigned char btron_user_shell[1] = {0};\n"
+"const unsigned int btron_user_shell_size = 0;\n"
+"const unsigned char btron_user_winman[1] = {0};\n"
+"const unsigned int btron_user_winman_size = 0;\n")
+endif()
+
 if(BTRON_ARCH STREQUAL "arm64")
   btron_add_user(btron-user-hello btron_user_hello "${BTRON_USER_OBJ}"
     SRCS src/user/hello.c)
@@ -235,31 +257,64 @@ set(BTRON_SRCS_KERNEL_COMMON
   ${BTRON_SRCS_DP})
 
 if(BTRON_ARCH STREQUAL "arm64")
+  set(BTRON_SRCS_USER "${BTRON_USER_OBJ}" "${BTRON_SHELL_OBJ}" "${BTRON_WM_OBJ}")
+else()
+  set(BTRON_SRCS_USER "${BTRON_USER_STUB}")
+endif()
+
+if(DEFINED BTRON_SRCS_START)
   add_executable(btron-kernel
     ${BTRON_SRCS_START}
     ${BTRON_SRCS_HAL}
     ${BTRON_SRCS_KERNEL_COMMON}
-    "${BTRON_USER_OBJ}"
-    "${BTRON_SHELL_OBJ}"
-    "${BTRON_WM_OBJ}"
+    ${BTRON_SRCS_USER}
     "${BTRON_FONT_DATA}")
 
+  if(BTRON_ARCH STREQUAL "x86_64")
+    # **位置独立に作る (-fpie)。理由が 2 つある。**
+    #
+    # ① §3.2-3 の BTRON_KERNEL_BASE は 0xFFFFFF00_00000000 で、x86_64 の
+    #    -mcmodel=kernel が前提とする「上位 2GB (0xFFFFFFFF80000000 以上)」に
+    #    入らない。既定の small モデルはデータ参照を 32bit の符号付き絶対値で
+    #    組むので、リンク時に "R_X86_64_32S out of range" で落ちる
+    # ② large モデルなら届くが、**起動第 1 段が動かなくなる**。large は
+    #    関数呼び出しも movabs + 間接 call にするので、物理アドレスで
+    #    走っている第 1 段が上位半分の番地へ飛んでしまう（CR3 を
+    #    差し替える前なので当然ページフォルトになる。実際に踏んだ）
+    #
+    # -fpie は参照を RIP 相対にするので、**同じ像が物理でも上位半分でも
+    # 動く**。arm64 が adrp/add で自然にそうなっているのと同じ性質を、
+    # x86_64 でも明示的に買う。リンクは位置固定 (-no-pie) のままで、
+    # 再配置はリンク時に解決される。
+    #
+    # -mno-red-zone も要る。割込みハンドラが同じスタックを使うので、
+    # 関数が rsp の下 128 バイトを勝手に使う前提は成り立たない。
+    target_compile_options(btron-kernel PRIVATE -fpie -mno-red-zone)
+    # リンクは位置固定。アドレスはリンカスクリプトが決めるので、
+    # ドライバへ -no-pie を渡す必要はない（渡すと未使用警告になる）。
+  endif()
+
   target_link_libraries(btron-kernel PRIVATE btron_flags btron_headers btron_test)
-  set_target_properties(btron-kernel PROPERTIES OUTPUT_NAME "btron-arm64" SUFFIX ".elf")
+  set_target_properties(btron-kernel PROPERTIES
+    OUTPUT_NAME "btron-${BTRON_ARCH}" SUFFIX ".elf")
 
   set(_ld "${BTRON_KERNEL_LD}")
   target_link_options(btron-kernel PRIVATE
     -Wl,-T,${_ld} -Wl,--build-id=none -static -nostartfiles)
   set_target_properties(btron-kernel PROPERTIES LINK_DEPENDS "${_ld}")
 
-  add_test(NAME boot-arm64
-    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/run_qemu.py"
-            --arch arm64 --timeout 30
-            --expect "BTRON3 準拠 OS"
-            --expect "QEMU -kernel"
-            --expect "中心核は起動しない"
-            --deny   "[ FAIL ]"
-            "$<TARGET_FILE:btron-kernel>")
+  # 直接起動は arm64 だけ。x86_64 で QEMU の -kernel に ELF を渡すと
+  # Linux boot protocol を期待されるので、この経路は作らない。
+  if(BTRON_ARCH STREQUAL "arm64")
+    add_test(NAME boot-arm64
+      COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/run_qemu.py"
+              --arch arm64 --timeout 30
+              --expect "BTRON3 準拠 OS"
+              --expect "QEMU -kernel"
+              --expect "中心核は起動しない"
+              --deny   "[ FAIL ]"
+              "$<TARGET_FILE:btron-kernel>")
+  endif()
 endif()
 
 # --------------------------------------------------------------------------
@@ -334,6 +389,68 @@ if(TARGET btron-kernel)
     VERBATIM)
 
   add_custom_target(btron-gui-image ALL DEPENDS "${BTRON_GUI_IMAGE}")
+
+  if(BTRON_ARCH STREQUAL "x86_64")
+    # **x86_64 の起動経路 (T1-11)。** ここで見るのは
+    #
+    #   - UEFI から ELF が読まれ、CR3 を自前の表に差し替えて上位半分へ移る
+    #   - ACPI の MADT から Local APIC と IOAPIC が取れる
+    #   - TSC を PIT で校正して周波数が出る（CPUID 0x15 が無い機種のため）
+    #   - 起動時の不変条件検査（アーキ非依存の 24 件）が全部通る
+    #
+    # 中心核はまだ接続していないので、そこで止まることも検査する。
+    # **嘘をつかずに止まる**ことが条件（スタブで動くふりをしない）。
+    add_test(NAME boot-uefi-x86_64
+      COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/run_qemu.py"
+              --arch x86_64 --uefi --timeout 90
+              --expect "BTRON3 準拠 OS — UEFI ローダ"
+              --expect "BTRON3 準拠 OS — x86_64"
+              --expect "起動経路  : UEFI"
+              --expect "上位半分へ移行しました"
+              --expect "ハード記述: ACPI"
+              --expect "割込み    : APIC"
+              --expect "中心核は未接続"
+              --expect "[ DONE ] 24/24"
+              --deny   "[ FAIL ]"
+              --deny   "*** 例外 ***"
+              "${BTRON_DISK_IMAGE}")
+  endif()
+
+  # ここから下は arm64 の検査。x86_64 は中心核より上がまだ繋がって
+  # いないので（T1-11 の残り）、同じ期待値では測れない。
+  if(BTRON_ARCH STREQUAL "arm64")
+
+  # 自立起動 (D8 / startup.c) の検査用イメージ。
+  #
+  # ESP に \BTRON\SELFBOOT の印を置く。カーネルはこの印があると
+  # 起動時検査の代わりに**本来の起動列**を通す — ドライバを登録し、
+  # BTRON 区画を探して接続し（未構築なら構築し）、ディスク上の実行
+  # プログラムから外殻を起こす。**カーネルもローダも同じバイナリ**で、
+  # 印だけが違う（PANICTEST / HOLD と同じ仕掛け）。
+  set(BTRON_SELFBOOT_IMAGE
+      "${CMAKE_CURRENT_BINARY_DIR}/btron-${BTRON_ARCH}-selfboot.img")
+
+  add_custom_command(
+    OUTPUT "${BTRON_SELFBOOT_IMAGE}"
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/mkimage.py"
+            --arch ${BTRON_ARCH} --selfboot
+            --loader "${BTRON_UEFI_IMAGE}"
+            --kernel "$<TARGET_FILE:btron-kernel>"
+            --out    "${BTRON_SELFBOOT_IMAGE}"
+    DEPENDS "${BTRON_UEFI_IMAGE}" btron-kernel
+            "${CMAKE_CURRENT_SOURCE_DIR}/tools/mkimage.py"
+    COMMENT "自立起動の検査用ディスクイメージ"
+    VERBATIM)
+
+  add_custom_target(btron-selfboot-image ALL DEPENDS "${BTRON_SELFBOOT_IMAGE}")
+
+  # **永続性は 1 回の起動では確かめられない。** 同じイメージの写しで
+  # 2 度起動し、1 回目に構築、2 回目に「前回の内容が残っている」ことを見る。
+  add_test(NAME selfboot-${BTRON_ARCH}
+    COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tools/run_selfboot.py"
+            --arch ${BTRON_ARCH} --timeout 120
+            "${BTRON_SELFBOOT_IMAGE}")
 
   # UEFI 経由の起動。直接起動と違い、メモリマップ・ACPI/DT・GOP が来る。
   #
@@ -471,6 +588,7 @@ if(TARGET btron-kernel)
             --deny   "[ FAIL ]"
             --deny   "ローダ異常終了"
             "${BTRON_DISK_IMAGE}")
+  endif() # arm64 の検査群
 endif()
 
 # --------------------------------------------------------------------------

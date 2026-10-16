@@ -183,6 +183,16 @@ IMPORT WERR dev_open_system(CONST TC *dev, W o_mode);
 IMPORT ERR serdev_register(void);  /* "com" シリアル（文字型） */
 IMPORT ERR ramdisk_register(void); /* "rda" RAM ディスク（ブロック型） */
 
+/* virtio-blk。"vda" を登録する。**サブユニットが GPT の区画**になる。
+ * ディスクが無い構成では ER_NOEXS を返す（異常ではない）。 */
+IMPORT ERR vblk_register(void);
+
+/* 検証とログ用。 */
+IMPORT UD vblk_capacity(void);     /* 512B セクタ数 */
+IMPORT W vblk_parts(void);         /* 見つけた区画の数 */
+IMPORT W vblk_btron_part(void);    /* BTRON 区画のサブユニット番号。無ければ -1 */
+IMPORT UD vblk_part_blocks(W sub);
+
 /* virtio-input。"kbd" と "pd" を登録し、イベント管理に実体を与える。
  * 入力装置が 1 台も無ければ ER_NOEXS を返す（異常ではない）。 */
 IMPORT ERR vinput_register(void);

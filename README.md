@@ -61,8 +61,10 @@ TRON Forum のいずれとも関係はなく、これらによる承認も受け
 > 2. **外殻の残りのマネージャ** — 実身/仮身・パーツ・メニュー・パネル・
 >    トレー・データ・印刷・TCP/IP・TIP（仕様 第3章の 10 本）
 > 3. **TAD と基本エディタ・日本語入力**（Phase 7）
-> 4. **x86_64 の起動経路・SMP・タスク例外** — x86_64 は HAL を型検査して
->    いるだけで未検証です
+> 4. **x86_64 の中心核・SMP・タスク例外** — **x86_64 は UEFI から起動し、
+>    ページングを立て、ACPI から APIC を読み、起動時の不変条件 24 件まで
+>    通ります**（T1-11）。APIC・タイマ割込み・コンテキスト切替がまだで、
+>    そこが入ると中心核以上も両アーキで走ります
 
 ## 開発環境の構築
 
@@ -133,7 +135,7 @@ cmake --preset x86_64  && cmake --build --preset x86_64
 
 | | |
 |---|---|
-| `btron-arm64.elf` | カーネル本体 |
+| `btron-<arch>.elf` | カーネル本体 |
 | `BOOTAA64.EFI` | UEFI ブートローダ（PE/COFF。カーネルとは別のトリプルでビルドされます） |
 | `btron-arm64.img` | 起動可能なディスクイメージ（GPT + ESP） |
 | `btron-arm64-gui.img` | 画面を見るためのイメージ。検査のあと電源を落とさず画面を残します |
@@ -211,7 +213,8 @@ python3 tools/run_qemu.py --arch arm64 --uefi --timeout 60 --input \
 ### 実行
 
 ```sh
-ctest --preset arm64   # 直接起動 / UEFI(ACPI) / DT / 入力 / GICv3+SMP / GOP / 緊急画面 の 9 通り + 文書の検査
+ctest --preset arm64   # 直接起動 / UEFI(ACPI) / DT / 入力 / GICv3+SMP / GOP / 緊急画面 / 自立起動 + 文書の検査
+ctest --preset x86_64  # UEFI から起動し、ページングと不変条件 24 件まで
 
 python3 tools/run_qemu.py --arch arm64 --uefi --interactive build/arm64/btron-arm64.img
 python3 tools/run_qemu.py --arch arm64 --interactive        build/arm64/btron-arm64.elf

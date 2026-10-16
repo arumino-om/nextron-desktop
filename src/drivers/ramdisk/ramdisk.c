@@ -124,6 +124,8 @@ LOCAL CONST DevDriver ram_drv = {
 /* 媒体を用意して登録する。**システムメモリから取る** —
  * 仕様 §1.5 の「システム ( OS やデバイスドライバー等 ) からのみ使用可能」
  * がまさにドライバのためのものである。 */
+LOCAL Bool ram_registered;
+
 EXPORT ERR ramdisk_register(void)
 {
 	M_STATE ms;
@@ -132,6 +134,10 @@ EXPORT ERR ramdisk_register(void)
 	W nblk;
 	ERR er;
 
+	/* 2 度呼ばれても 1 度しか登録しない（serdev と同じ理由）。 */
+	if (ram_registered) {
+		return ER_OK;
+	}
 	if (mbk_sts(&ms) < 0 || ms.blksz <= 0) {
 		return ER_NOSPC;
 	}
@@ -141,5 +147,9 @@ EXPORT ERR ramdisk_register(void)
 		return er;
 	}
 	ram_base = (UB *)adr;
-	return dev_register(&ram_drv);
+	er = dev_register(&ram_drv);
+	if (er == ER_OK) {
+		ram_registered = True;
+	}
+	return er;
 }

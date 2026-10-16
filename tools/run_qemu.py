@@ -134,10 +134,23 @@ def qemu_argv(arch: str, image: Path, interactive: bool, uefi: bool,
         # -bios で与える。pflash で与えるには 64MB にパディングする必要があり、
         # NVRAM も要る。取り外し可能メディアの既定パス
         # (/EFI/BOOT/BOOTAA64.EFI) から起動するので NVRAM の起動項目は不要。
-        argv += [
-            "-bios", firmware(arch),
-            "-drive", f"format=raw,if=virtio,file={image}",
-        ]
+        argv += ["-bios", firmware(arch)]
+        if arch == "arm64":
+            # **ディスクを virtio-mmio に挿す。**
+            #
+            # `if=virtio` だけだと、arm64 virt 機種では virtio-blk-pci に
+            # なる（virt には PCIe ホストブリッジがある）。本OS の virtio は
+            # mmio トランスポートしか持たないので、カーネルから見えない。
+            # `-device virtio-blk-device` が mmio 版である（入力装置を
+            # `virtio-keyboard-device` で挿しているのと同じ理由）。
+            #
+            # ファームウェアは mmio のディスクからでも起動できる。
+            argv += [
+                "-drive", f"if=none,id=btron-disk,format=raw,file={image}",
+                "-device", "virtio-blk-device,drive=btron-disk",
+            ]
+        else:
+            argv += ["-drive", f"format=raw,if=virtio,file={image}"]
     else:
         argv += ["-kernel", str(image)]
 

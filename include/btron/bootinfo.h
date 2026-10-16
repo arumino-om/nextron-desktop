@@ -123,6 +123,31 @@ typedef struct BootInfo {
  * まま ESP の中身だけ変えて振る舞いを切り替える（Phase 1 ㉙）。 */
 #define BI_F_HOLD 0x0002ULL
 
+/* ESP に `\BTRON\SELFBOOT` が置かれていた。
+ *
+ * **起動時検査の代わりに、本来の起動列を通す印**（D8 / startup.c）。
+ * ドライバを登録し、BTRON 区画を探して接続し（未構築なら構築し）、
+ * **ディスク上の実行プログラムから外殻を起こす**。
+ *
+ * 検査の経路と分けてあるのは、検査が「ファイルシステムは 1 つも
+ * 接続されていない状態から始まる」ことを前提に書かれているため。
+ * これも PANICTEST / HOLD と同じく**同じバイナリのまま**切り替える。 */
+#define BI_F_SELFBOOT 0x0004ULL
+
+/* 起動時の不変条件検査（アーキ非依存。src/kernel/boot/earlytest.c）。
+ *
+ * **中心核が立つ前に起動文脈のまま走らせる。** 両アーキで同じ検査が
+ * 同じ順で走るように 1 か所に置いてある。 */
+IMPORT void boot_early_tests(void);
+
+/* 起動時の表示（アーキ非依存。src/kernel/boot/bootlog.c）。
+ * **出力の形は ctest の --expect が見ている。** */
+IMPORT void boot_put_dec(UD v);
+IMPORT void boot_put_hex(UD v);
+IMPORT void boot_show_bootinfo(void);
+IMPORT void boot_show_machdesc(void);
+IMPORT void boot_draw_splash(void);
+
 /* ------------------------------------------------------------------ */
 /* カーネル側の受け取り口                                              */
 /*                                                                     */

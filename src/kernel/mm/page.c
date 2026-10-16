@@ -30,6 +30,14 @@
 LOCAL UD pm_base;   /* 表が覆う物理範囲の先頭（ページ境界） */
 LOCAL UD pm_pages;  /* 表が覆うページ数 */
 LOCAL UW *pm_map;   /* 1 ページ 1 ビット。1 = 使用中 */
+/* **配ってよいページの表。** 1 = このアロケータが配る対象。
+ *
+ * これが無いと、身に覚えのない `pmem_free()`（二重解放や野良のアドレス）が
+ * ファームウェアや MMIO の領域を「空き」にしてしまう。上の pm_map だけでは
+ * 「確保されている」と「最初から配る気が無い」が区別できない。
+ * x86_64 では物理 0 番地付近が表の内側に来るので、arm64（RAM が
+ * 0x4000_0000 から）では出なかったこの穴が実際に出た。 */
+LOCAL UW *pm_ok;
 LOCAL UD pm_total;  /* 使える総ページ数 */
 LOCAL UD pm_free;   /* 空きページ数 */
 LOCAL UD pm_hint;   /* 次に探し始める添字 */
@@ -37,20 +45,41 @@ LOCAL Bool pm_ready = False;
 
 #define BITS_PER_WORD 32U
 
+LOCAL inline Bool map_get(CONST UW *m, UD i)
+{
+	return ((m[i / BITS_PER_WORD] >> (UW)(i % BITS_PER_WORD)) & 1U) != 0 ? True
+	                                                                     : False;
+}
+
+LOCAL inline void map_set(UW *m, UD i)
+{
+	m[i / BITS_PER_WORD] |= 1U << (UW)(i % BITS_PER_WORD);
+}
+
+LOCAL inline void map_clr(UW *m, UD i)
+{
+	m[i / BITS_PER_WORD] &= ~(1U << (UW)(i % BITS_PER_WORD));
+}
+
 LOCAL inline Bool bit_get(UD i)
 {
-	return ((pm_map[i / BITS_PER_WORD] >> (UW)(i % BITS_PER_WORD)) & 1U) != 0 ? True
-	                                                                         : False;
+	return map_get(pm_map, i);
 }
 
 LOCAL inline void bit_set(UD i)
 {
-	pm_map[i / BITS_PER_WORD] |= 1U << (UW)(i % BITS_PER_WORD);
+	map_set(pm_map, i);
 }
 
 LOCAL inline void bit_clr(UD i)
 {
-	pm_map[i / BITS_PER_WORD] &= ~(1U << (UW)(i % BITS_PER_WORD));
+	map_clr(pm_map, i);
+}
+
+/* このページを配る対象として扱ってよいか。 */
+LOCAL inline Bool ok_get(UD i)
+{
+	return map_get(pm_ok, i);
 }
 
 LOCAL inline UD idx_of(UD pa)
@@ -79,6 +108,7 @@ LOCAL void release_range(UD lo, UD hi)
 		hi = pm_base + (pm_pages << hal_page_shift());
 	}
 	for (i = idx_of(lo); i < idx_of(hi) && i < pm_pages; i++) {
+		map_set(pm_ok, i); /* 配ってよいページ */
 		if (bit_get(i)) {
 			bit_clr(i);
 			pm_total++;
@@ -103,6 +133,9 @@ LOCAL void reserve_range(UD lo, UD hi)
 	}
 	for (i = idx_of(lo); i < idx_of(hi + (UD)hal_page_size() - 1) && i < pm_pages;
 	     i++) {
+		/* **配る対象から外す。** 外しておかないと、野良の
+		 * `pmem_free()` でカーネル自身の領域が空きに戻ってしまう。 */
+		map_clr(pm_ok, i);
 		if (!bit_get(i)) {
 			bit_set(i);
 			if (pm_total > 0) {
@@ -161,7 +194,8 @@ EXPORT ERR pmem_init(void)
 		UD first = 0;
 		UD pages = map_bytes / ps;
 
-		for (i = 0; i < pages; i++) {
+		/* 表は 2 枚（使用中 / 配ってよい）。連続で取る。 */
+		for (i = 0; i < pages * 2; i++) {
 			UD pa = pmem_early_alloc_page();
 
 			if (pa == 0) {
@@ -174,10 +208,13 @@ EXPORT ERR pmem_init(void)
 			}
 		}
 		pm_map = (UW *)(VP)BTRON_PA_TO_VA(first);
+		pm_ok = (UW *)(VP)BTRON_PA_TO_VA(first + map_bytes);
 	}
-	/* 最初は全部「使用中」。空き領域だけを開放していく。 */
+	/* 最初は全部「使用中」かつ「配る対象でない」。
+	 * 空き領域だけを開放し、そこだけを配る対象にする。 */
 	for (i = 0; i < map_bytes / 4; i++) {
 		pm_map[i] = 0xFFFFFFFFU;
+		pm_ok[i] = 0U;
 	}
 	pm_total = 0;
 	pm_free = 0;
@@ -198,6 +235,15 @@ EXPORT ERR pmem_init(void)
 	 * 二重に配らないよう、必ずここで押さえる。 */
 	reserve_range(hal_kernel_pa_base(), hal_kernel_pa_end());
 	reserve_range(pmem_early_base(), pmem_early_limit());
+
+	/* **物理 0 番地は配らない。**
+	 *
+	 * `pmem_alloc()` は失敗を 0 で返す契約なので、0 番地を本物のページと
+	 * して配ると「成功したのに失敗に見える」区別のつかない値になる。
+	 * 野良の `pmem_free(0, …)` が本物のページを解放してしまう事故も
+	 * 防げる（実際に x86_64 で踏んだ。arm64 は RAM が 0x4000_0000 から
+	 * なので 0 番地が表の外にあり、この穴が見えていなかった）。 */
+	reserve_range(0, ps);
 
 	pm_hint = 0;
 	pm_ready = True;
@@ -279,6 +325,11 @@ EXPORT void pmem_free(UD pa, UW npages)
 	state = hal_int_disable();
 	first = idx_of(pa);
 	for (k = 0; k < npages && first + k < pm_pages; k++) {
+		/* **配る対象でないページは触らない。** 身に覚えのない解放で
+		 * ファームウェアやカーネル自身の領域が空きに戻るのを防ぐ。 */
+		if (!ok_get(first + k)) {
+			continue;
+		}
 		if (bit_get(first + k)) {
 			bit_clr(first + k);
 			pm_free++;

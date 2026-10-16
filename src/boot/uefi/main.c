@@ -34,6 +34,9 @@
 /* 検査のあとも電源を落とさず画面を残す印。手で画面を見るためのもの。 */
 #define HOLD_PATH L"\\BTRON\\HOLD"
 
+/* 起動時検査の代わりに、本来の起動列を通す印 (D8 / startup.c)。 */
+#define SELFBOOT_PATH L"\\BTRON\\SELFBOOT"
+
 #define EFI_PAGE_SIZE 4096ULL
 #define PAGES_OF(n) (((n) + EFI_PAGE_SIZE - 1) / EFI_PAGE_SIZE)
 
@@ -585,6 +588,10 @@ EXPORT EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *systab)
 	if (has_marker(image, (CONST EFI_CHAR16 *)HOLD_PATH)) {
 		bi->flags |= BI_F_HOLD;
 		lcon_puts("  印        : HOLD（検査後も画面を残す）\n");
+	}
+	if (has_marker(image, (CONST EFI_CHAR16 *)SELFBOOT_PATH)) {
+		bi->flags |= BI_F_SELFBOOT;
+		lcon_puts("  印        : SELFBOOT（本来の起動列を通す）\n");
 	}
 
 	find_tables(bi);

@@ -89,7 +89,33 @@
 #define VIRTIO_F_VERSION_1 32
 
 /* 装置の種類 (§5)。使うものだけ。 */
+#define VIRTIO_ID_BLOCK 2
 #define VIRTIO_ID_INPUT 18
+
+/* ------------------------------------------------------------------ */
+/* virtio-blk (§5.2)                                                   */
+/* ------------------------------------------------------------------ */
+
+/* 設定空間。capacity は**512 バイトセクタ単位**（§5.2.4）。
+ * 論理ブロックサイズとは別物で、blk_size 機能が無ければ 512 と考える。 */
+#define VIRTIO_BLK_CFG_CAPACITY 0x00 /* le64 */
+
+/* 要求の型 (§5.2.6)。 */
+#define VIRTIO_BLK_T_IN 0   /* 装置 → こちら（読み） */
+#define VIRTIO_BLK_T_OUT 1  /* こちら → 装置（書き） */
+#define VIRTIO_BLK_T_FLUSH 4
+
+/* 要求ヘッダは 16 バイト。type(le32) reserved(le32) sector(le64)。
+ * **構造体を直接渡さない**（規律 R1）。バイト単位で詰める。 */
+#define VIRTIO_BLK_REQ_HDR 16
+
+/* 応答の 1 バイト (§5.2.6)。 */
+#define VIRTIO_BLK_S_OK 0
+#define VIRTIO_BLK_S_IOERR 1
+#define VIRTIO_BLK_S_UNSUPP 2
+
+/* セクタの大きさ。capacity の単位であり、GPT の LBA の単位でもある。 */
+#define VIRTIO_BLK_SECTOR 512
 
 /* ------------------------------------------------------------------ */
 /* split virtqueue (§2.6)                                              */
@@ -105,6 +131,11 @@ typedef struct VqDesc {
 
 #define VQ_DESC_F_NEXT 0x1
 #define VQ_DESC_F_WRITE 0x2 /* 装置が書く（＝こちらは読む） */
+
+/* avail リングのフラグ (§2.6.6)。立てると装置は割込みを上げない。
+ * ブロック装置は同期に使う（要求を出して待つ）ので、割込みを
+ * 使わずに used リングを見張る。 */
+#define VQ_AVAIL_F_NO_INTERRUPT 0x1
 
 /* used リングの 1 要素。8 バイト。 */
 typedef struct VqUsedElem {
