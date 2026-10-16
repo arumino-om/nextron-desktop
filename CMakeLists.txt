@@ -114,6 +114,30 @@ add_custom_command(
   COMMENT "グリフデータを生成 (GNU Unifont)"
   VERBATIM)
 
+# ソースの列挙はディレクトリごとの sources.cmake にある（W0-2 / 規律 R29）。
+# ソースを 1 本足す作業がこのファイルを触らずに済むようにするため。
+foreach(_frag
+    src/kernel/core/sources.cmake
+    src/kernel/core/tests/sources.cmake
+    src/kernel/periph/sources.cmake
+    src/kernel/boot/sources.cmake
+    src/kernel/mm/sources.cmake
+    src/kernel/screen/sources.cmake
+    src/kernel/klib/sources.cmake
+    src/kernel/fs/sources.cmake
+    src/drivers/sources.cmake
+    src/subsystems/sources.cmake
+    src/lib/dp/sources.cmake
+    src/lib/appl/sources.cmake
+    src/lib/sys/sources.cmake)
+  include("${CMAKE_CURRENT_SOURCE_DIR}/${_frag}")
+endforeach()
+
+# アーキ依存の分。**中心核から上はアーキ中立**なので、ここだけが分かれる。
+include("${CMAKE_CURRENT_SOURCE_DIR}/src/kernel/hal/${BTRON_ARCH}/sources.cmake" OPTIONAL)
+include("${CMAKE_CURRENT_SOURCE_DIR}/src/boot/${BTRON_ARCH}/sources.cmake" OPTIONAL)
+
+
 # --------------------------------------------------------------------------
 # ユーザプログラム (EL0)
 #
@@ -136,9 +160,7 @@ set(BTRON_WM_OBJ "${CMAKE_CURRENT_BINARY_DIR}/user_winman.c")
 function(btron_add_user name blobname out_c)
   cmake_parse_arguments(U "" "" "SRCS" ${ARGN})
   add_executable(${name}
-    src/lib/sys/crt0.S
-    src/lib/sys/syscall.c
-    src/lib/sys/rt.c
+    ${BTRON_SRCS_SYS}
     ${U_SRCS})
   target_link_libraries(${name} PRIVATE btron_flags btron_headers)
   target_link_options(${name} PRIVATE
@@ -168,31 +190,18 @@ if(BTRON_ARCH STREQUAL "arm64")
   # **ユーザプログラムに結合する**。描画はシステムコールではない。
   btron_add_user(btron-user-shell btron_user_shell "${BTRON_SHELL_OBJ}"
     SRCS src/user/shell.c
-         src/lib/sys/screen.c
-         src/lib/dp/pixel.c
-         src/lib/dp/env.c
-         src/lib/dp/draw.c
-         src/lib/dp/bitmap.c
-         src/lib/dp/text.c
-         src/lib/dp/pointer.c
-         src/lib/appl/font/fontcli.c
-         src/lib/appl/mgr/mgrcli.c)
+         ${BTRON_SRCS_SYS_SCREEN}
+         ${BTRON_SRCS_DP}
+         ${BTRON_SRCS_APPL})
 
   # **ウィンドウマネージャ本体。** 詳細 E22「1 プロセス 1 サーバ」。
   # カーネルには入らない。利用側 (wincli.c) だけがカーネルに残る。
   btron_add_user(btron-user-winman btron_user_winman "${BTRON_WM_OBJ}"
     SRCS src/user/winman_main.c
-         src/subsystems/window/winman.c
-         src/subsystems/window/winsrv.c
-         src/lib/sys/screen.c
-         src/lib/dp/pixel.c
-         src/lib/dp/env.c
-         src/lib/dp/draw.c
-         src/lib/dp/bitmap.c
-         src/lib/dp/text.c
-         src/lib/dp/pointer.c
-         src/lib/appl/font/fontcli.c
-         src/lib/appl/mgr/mgrcli.c)
+         ${BTRON_SRCS_WINMAN}
+         ${BTRON_SRCS_SYS_SCREEN}
+         ${BTRON_SRCS_DP}
+         ${BTRON_SRCS_APPL})
 endif()
 
 # --------------------------------------------------------------------------
@@ -201,97 +210,36 @@ endif()
 # いまのところ arm64 のみ。起動してシリアルに出し、実行時に設計上の
 # 不変条件を検査して終了する。
 # --------------------------------------------------------------------------
-# 検査区分 (W0-1)。
-#
-# **列挙しないのは意図的である。** 区分を足す作業がこのファイルを
-# 触らずに済むようにする（docs/parallel.md のレーン分割の前提）。
-# CONFIGURE_DEPENDS を付けているので、ファイルを足せば ninja が
-# 構成からやり直す。
-file(GLOB BTRON_TEST_SRCS CONFIGURE_DEPENDS
-  "${CMAKE_CURRENT_SOURCE_DIR}/src/kernel/core/tests/*.c")
+# カーネル本体（アーキ非依存の分）。
+set(BTRON_SRCS_KERNEL_COMMON
+  ${BTRON_SRCS_KERNEL_CORE}
+  ${BTRON_SRCS_TESTS}
+  ${BTRON_SRCS_KERNEL_PERIPH}
+  ${BTRON_SRCS_KERNEL_BOOT}
+  ${BTRON_SRCS_KERNEL_MM}
+  ${BTRON_SRCS_KERNEL_SCREEN}
+  ${BTRON_SRCS_KERNEL_KLIB}
+  ${BTRON_SRCS_KERNEL_FS}
+  ${BTRON_SRCS_DRIVERS}
+  ${BTRON_SRCS_SUBSYS}
+  ${BTRON_SRCS_APPL}
+  ${BTRON_SRCS_APPL_WINDOW}
+  ${BTRON_SRCS_DP})
 
 if(BTRON_ARCH STREQUAL "arm64")
   add_executable(btron-kernel
-    ${BTRON_TEST_SRCS}
-    src/boot/arm64/start.S
-    src/boot/arm64/boot.c
-    src/kernel/hal/arm64/uart.c
-    src/kernel/hal/arm64/page.c
-    src/kernel/hal/arm64/exit.c
-    src/kernel/hal/arm64/mmu.c
-    src/kernel/hal/arm64/vectors.S
-    src/kernel/hal/arm64/exception.c
-    src/kernel/hal/arm64/timer.c
-    src/kernel/hal/arm64/cpu.c
-    src/kernel/hal/arm64/gic.c
-    src/kernel/hal/arm64/irq.c
-    src/kernel/hal/arm64/context.c
-    src/kernel/hal/arm64/context.S
-    src/kernel/core/sched.c
-    src/kernel/core/task.c
-    src/kernel/core/tasksync.c
-    src/kernel/core/sem.c
-    src/kernel/core/flag.c
-    src/kernel/core/mtx.c
-    src/kernel/core/mbx.c
-    src/kernel/core/mbf.c
-    src/kernel/core/mempool.c
-    src/kernel/core/cyclic.c
-    src/kernel/periph/taskcomm.c
-    src/kernel/periph/taskobj.c
-    src/kernel/periph/proc.c
-    src/kernel/periph/memory.c
-    src/kernel/periph/message.c
-    src/kernel/periph/gname.c
-    src/kernel/periph/event.c
-    src/kernel/periph/device.c
-    src/kernel/periph/file.c
-    src/kernel/periph/exec.c
-    src/kernel/fs/btronfs.c
-    src/drivers/serial/serdev.c
-    src/drivers/ramdisk/ramdisk.c
-    src/drivers/virtio/mmio.c
-    src/drivers/virtio/input.c
-    src/kernel/periph/clock.c
-    src/kernel/periph/system.c
-    src/kernel/core/time.c
-    src/kernel/core/intc.c
-    src/kernel/core/syscall.c
+    ${BTRON_SRCS_START}
+    ${BTRON_SRCS_HAL}
+    ${BTRON_SRCS_KERNEL_COMMON}
     "${BTRON_USER_OBJ}"
     "${BTRON_SHELL_OBJ}"
     "${BTRON_WM_OBJ}"
-    src/kernel/core/selftest.c
-    src/kernel/boot/bootinfo.c
-    src/kernel/boot/machdesc.c
-    src/kernel/boot/fdt.c
-    src/kernel/boot/acpi.c
-    src/kernel/klib/string.c
-    src/kernel/screen/fb.c
-    src/kernel/screen/font.c
-    src/kernel/screen/console.c
-    src/kernel/screen/panic.c
-    "${BTRON_FONT_DATA}"
-    src/kernel/mm/pmem.c
-    src/kernel/mm/page.c
-    src/kernel/mm/kheap.c
-    src/subsystems/mgr/manager.c
-    src/subsystems/font/fontman.c
-    src/subsystems/window/demo.c
-    src/lib/appl/font/fontcli.c
-    src/lib/appl/mgr/mgrcli.c
-    src/lib/appl/window/wincli.c
-    src/subsystems/window/winboot.c
-    src/lib/dp/pixel.c
-    src/lib/dp/env.c
-    src/lib/dp/draw.c
-    src/lib/dp/bitmap.c
-    src/lib/dp/text.c
-    src/lib/dp/pointer.c)
+    "${BTRON_FONT_DATA}")
 
   target_link_libraries(btron-kernel PRIVATE btron_flags btron_headers btron_test)
   set_target_properties(btron-kernel PROPERTIES OUTPUT_NAME "btron-arm64" SUFFIX ".elf")
 
-  set(_ld "${CMAKE_CURRENT_SOURCE_DIR}/src/boot/arm64/kernel.ld")
+  set(_ld "${BTRON_KERNEL_LD}")
   target_link_options(btron-kernel PRIVATE
     -Wl,-T,${_ld} -Wl,--build-id=none -static -nostartfiles)
   set_target_properties(btron-kernel PROPERTIES LINK_DEPENDS "${_ld}")

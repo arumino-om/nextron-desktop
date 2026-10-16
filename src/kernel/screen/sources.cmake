@@ -1,0 +1,7 @@
+# 画面コンソールと緊急画面 (F6 / E24)
+
+set(BTRON_SRCS_KERNEL_SCREEN
+  ${CMAKE_CURRENT_LIST_DIR}/fb.c
+  ${CMAKE_CURRENT_LIST_DIR}/font.c
+  ${CMAKE_CURRENT_LIST_DIR}/console.c
+  ${CMAKE_CURRENT_LIST_DIR}/panic.c)

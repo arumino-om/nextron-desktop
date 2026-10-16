@@ -1,0 +1,15 @@
+# 周辺核 (BTRON3 仕様 第1章)
+
+set(BTRON_SRCS_KERNEL_PERIPH
+  ${CMAKE_CURRENT_LIST_DIR}/taskcomm.c
+  ${CMAKE_CURRENT_LIST_DIR}/taskobj.c
+  ${CMAKE_CURRENT_LIST_DIR}/proc.c
+  ${CMAKE_CURRENT_LIST_DIR}/memory.c
+  ${CMAKE_CURRENT_LIST_DIR}/message.c
+  ${CMAKE_CURRENT_LIST_DIR}/gname.c
+  ${CMAKE_CURRENT_LIST_DIR}/event.c
+  ${CMAKE_CURRENT_LIST_DIR}/device.c
+  ${CMAKE_CURRENT_LIST_DIR}/file.c
+  ${CMAKE_CURRENT_LIST_DIR}/exec.c
+  ${CMAKE_CURRENT_LIST_DIR}/clock.c
+  ${CMAKE_CURRENT_LIST_DIR}/system.c)
