@@ -94,6 +94,14 @@ include(CTest)
 add_library(btron_test STATIC src/lib/std/test.c)
 target_link_libraries(btron_test PUBLIC btron_flags btron_headers)
 
+# タスク索引の鮮度 (W0-4)。
+#
+# docs/tasks/INDEX.md は生成物なので、タスクを足したまま作り直すのを
+# 忘れると古くなる。QEMU を使わないので一瞬で終わる。
+add_test(NAME docs-task-index
+  COMMAND "${Python3_EXECUTABLE}"
+          "${CMAKE_CURRENT_SOURCE_DIR}/tools/tasks_index.py" --check)
+
 # --------------------------------------------------------------------------
 # 内蔵グリフデータ (B8 / 詳細 B8)
 #
