@@ -432,7 +432,12 @@ if(TARGET btron-kernel)
               --expect "ハード記述: ACPI"
               --expect "割込み    : APIC"
               --expect "中心核は未接続"
-              --expect "[ DONE ] 25/25"
+              # **タイマ割込みが実際に入ったこと**（L5）。較正値と到来
+              # 回数を外側からも要求する —— 2 回以上来ていることが EOI が
+              # 効いている証拠である（earlytest.c に理由を書いた）。
+              --expect "MHz (較正)"
+              --expect "tick 到来  : 3 回"
+              --expect "[ DONE ] 26/26"
               --deny   "[ FAIL ]"
               --deny   "*** 例外 ***"
               "${BTRON_DISK_IMAGE}")

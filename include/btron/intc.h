@@ -105,6 +105,15 @@ IMPORT ER hal_msi_alloc(UW *intid, UD *addr, UW *data);
 /* ------------------------------------------------------------------ */
 
 /* hz Hz の周期割込みを仕掛ける。MachDesc の timer_intid を使う。 */
+/* tick に使う割込み番号。
+ *
+ * **アーキで出どころが違う。** arm64 は generic timer の PPI が記述
+ * （GTDT / FDT）に書いてあるのでそれを返す（規律 R19）。x86_64 は
+ * Local APIC のタイマで、**番号は記述ではなくソフトウェアが選ぶ**ので
+ * HAL が決めた値を返す。中心核は「HAL が使う番号」だけを知っていればよく、
+ * 記述を読む側に回らない（`MachDesc` を中心核が直に引かない）。 */
+IMPORT UW hal_timer_tick_intid(void);
+
 IMPORT ER hal_timer_tick_start(UW hz);
 
 /* 1 tick のミリ秒。システム時刻の刻み。 */

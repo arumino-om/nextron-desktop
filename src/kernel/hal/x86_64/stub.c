@@ -10,13 +10,13 @@
  * 中心核には接続していない。boot_main がそこで `hal_exit()` するので、
  * ここの関数は通常呼ばれない。
  *
- * 残っているもの（T1-11 の続き。arm64 側の対応物を括弧に書く）:
+ * 残っているもの（T1-11 の続き = L5。arm64 側の対応物を括弧に書く）:
  *
- *   - 割込みコントローラ: Local APIC / IOAPIC   (gic.c)
- *   - タイマ割込み: APIC タイマ                  (timer.c の tick 系)
  *   - コンテキスト切替                            (context.c / context.S)
- *   - 自前の GDT と TSS（ring 3 と例外スタック）  (arm64 は不要)
+ *   - TSS と ring 3 への降り方                    (arm64 は ERET だけで済む)
  *   - システムコールの入口: syscall / sysret      (vectors.S の svc 経路)
+ *
+ * **入ったもの**: Local APIC と タイマ割込みは apic.c にある。
  */
 
 #include <btron/hal.h>
@@ -35,61 +35,7 @@ LOCAL void missing(CONST B *what)
 
 /* ---- 割込みコントローラ (Local APIC / IOAPIC) ---- */
 
-EXPORT ER hal_intc_init(void)
-{
-	return E_NOSPT;
-}
-
-EXPORT ER hal_intc_enable(UW intid)
-{
-	(void)intid;
-	return E_NOSPT;
-}
-
-EXPORT ER hal_intc_disable(UW intid)
-{
-	(void)intid;
-	return E_NOSPT;
-}
-
-EXPORT ER hal_intc_set_priority(UW intid, UW prio)
-{
-	(void)intid;
-	(void)prio;
-	return E_NOSPT;
-}
-
-EXPORT UW hal_intc_acknowledge(void)
-{
-	return 1023U; /* 何も発生していない、として扱われる値 */
-}
-
-EXPORT void hal_intc_end(UW intid)
-{
-	(void)intid;
-}
-
-EXPORT UW hal_intc_version(void)
-{
-	return 0U; /* 不明。中心核の検査はこれを見て落ちる */
-}
-
 /* ---- タイマ割込み ---- */
-
-EXPORT ER hal_timer_tick_start(UW hz)
-{
-	(void)hz;
-	return E_NOSPT;
-}
-
-EXPORT UW hal_timer_tick_ms(void)
-{
-	return 0U;
-}
-
-EXPORT void hal_timer_tick_reload(void)
-{
-}
 
 /* ---- コンテキスト切替 ---- */
 
@@ -128,17 +74,3 @@ EXPORT UD hal_ctx_init_user(UD stack_top, UD entry, UD user_sp, UD arg)
 	missing("hal_ctx_init_user（ユーザ特権への初期化）");
 }
 
-/* MSI の宛先の割り当て (詳細 F8)。
- *
- * **これは missing() ではない。** PCIe 層は「宛先を割り当てられるか」を
- * 問い合わせる側で、`E_NOSPT` は正常な答えである（arm64 も ITS / GICv2m が
- * 無いので同じ値を返す）。x86_64 で本当に割り当てられるようになるのは
- * Local APIC が入ってから — 宛先は `0xFEE0_0000` 系のアドレスと
- * ベクタ番号で、追加のハードウェアは要らない（詳細 F8）。 */
-EXPORT ER hal_msi_alloc(UW *intid, UD *addr, UW *data)
-{
-	(void)intid;
-	(void)addr;
-	(void)data;
-	return E_NOSPT;
-}

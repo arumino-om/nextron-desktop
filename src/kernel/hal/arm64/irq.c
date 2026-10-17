@@ -71,6 +71,12 @@ EXPORT UW hal_timer_tick_ms(void)
 	return tick_ms;
 }
 
+EXPORT UW hal_timer_tick_intid(void)
+{
+	/* EL1 物理タイマの PPI。記述から取る（規律 R19）。 */
+	return machdesc()->timer_intid[MD_TIMER_NONSECURE];
+}
+
 EXPORT ER hal_timer_tick_start(UW hz)
 {
 	CONST MachDesc *md = machdesc();

@@ -12,6 +12,8 @@
 
 #include <btron/hal.h>
 #include <btron/intc.h>
+
+#include "apic.h"
 #include <btron/screen.h>
 
 IMPORT UD btron_last_syscall;
@@ -179,6 +181,10 @@ EXPORT void btron_exception_entry(UD vec, UD err, UD rip, UD regs)
 	 * **いまはまだ APIC を立てていないので、ここへは来ない**（T1-11 の
 	 * 残り）。経路だけ先に通してある。 */
 	if (vec >= 32) {
+		/* **どのベクタで来たかを APIC 側へ預ける。** x86 は「起きた
+		 * 割込みをレジスタに聞く」ことができないので、ゲートが受け取った
+		 * 番号をここで渡すしかない（apic.c の冒頭に経緯）。 */
+		apic_take_vector(vec);
 		intc_dispatch();
 		return;
 	}

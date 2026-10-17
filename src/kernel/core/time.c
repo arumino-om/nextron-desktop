@@ -14,7 +14,6 @@
  * タスク数が増えてからでよい（D9 と一緒に見直す）。
  */
 
-#include <btron/machdesc.h>
 
 #include "knl.h"
 
@@ -96,7 +95,6 @@ IMPORT void knl_flg_init(void);
 
 EXPORT ER knl_init(void)
 {
-	CONST MachDesc *md = machdesc();
 	ER er;
 	W i;
 
@@ -146,7 +144,9 @@ EXPORT ER knl_init(void)
 	if (er != E_OK) {
 		return er;
 	}
-	er = intc_set_handler(md->timer_intid[MD_TIMER_NONSECURE], knl_timer_handler, 0);
+	/* tick の番号は HAL に聞く。arm64 は記述の PPI、x86_64 は Local APIC の
+	 * ベクタで、出どころが違う（intc.h の hal_timer_tick_intid）。 */
+	er = intc_set_handler(hal_timer_tick_intid(), knl_timer_handler, 0);
 	if (er != E_OK) {
 		return er;
 	}

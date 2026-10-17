@@ -183,7 +183,7 @@ EXPORT void boot_main(UD arg)
 	 * 嘘をつかずに止めるのが要点である。スタブで「動いているように
 	 * 見せる」と、後から入れるときに何が動いていて何が動いていないのか
 	 * 分からなくなる。 */
-	hal_console_puts("\n  x86_64 は起動とページングまで。中心核は未接続\n");
-	hal_console_puts("  （APIC・タイマ割込み・コンテキスト切替が残り。T1-11）\n");
+	hal_console_puts("\n  x86_64 は Local APIC とタイマ割込みまで。中心核は未接続\n");
+	hal_console_puts("  （コンテキスト切替と ring 3 / syscall が残り。T1-11 / L5）\n");
 	hal_exit(btron_test_report());
 }
