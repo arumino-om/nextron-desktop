@@ -70,8 +70,12 @@ EXPORT Bool bootinfo_take(UD arg)
 	info.fb.height = src->fb.height;
 	info.fb.pitch = src->fb.pitch;
 	info.fb.format = src->fb.format;
+	info.fb.r_mask = src->fb.r_mask;
+	info.fb.g_mask = src->fb.g_mask;
+	info.fb.b_mask = src->fb.b_mask;
 	info.efi_system_table = src->efi_system_table;
 	info.flags = src->flags;
+	info.mem_raw_count = src->mem_raw_count;
 
 	if (src->mem_pa != 0) {
 		UD n = src->mem_count;

@@ -640,6 +640,45 @@ if(TARGET btron-kernel)
               "${BTRON_DISK_IMAGE}")
   endif()
 
+  # ------------------------------------------------------------------
+  # 実機規模 (T6-03 / 詳細 F9「実機で初めて効く差」)
+  #
+  # QEMU の既定 (512MB / 1 CPU / 800x600) では当たっているが、実機では
+  # 外れるものを、作れる範囲で実際に作って回す。
+  # ------------------------------------------------------------------
+
+  # RAM 32GB。**ページの表と直接マップの大きさがここで変わる。**
+  # 4KB 粒度で直接マップを張ると表が 64MB になり、早期プール (16MB) に
+  # 入らず「hal_vm_init に失敗」で止まる。ブロック記述子で張っている
+  # ことがこの構成でしか確かめられない。
+  #
+  # 画面も付ける —— 画面が無いと塗り潰しの検査が丸ごと飛ぶ（Phase 2 ㊿）。
+  add_test(NAME boot-uefi-bigmem-arm64
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/run_qemu.py"
+            --arch arm64 --uefi --timeout 180 --memory 32G
+            --extra=-device --extra=ramfb
+            --expect "起動経路  : UEFI"
+            # 32GB 分が実際に管理下に入っていること。
+            --expect "ページ) 管理下"
+            --expect "画面コンソール:"
+            --deny   "hal_vm_init に失敗"
+            --deny   "空き物理メモリが見つからない"
+            --deny   "[ FAIL ]"
+            --deny   "ローダ異常終了"
+            "${BTRON_DISK_IMAGE}")
+
+  # CPU 16 個。記述から読んだ数がそのまま出ること。
+  # **数を切り捨てない**ことは MD_MAX_CPUS (64) を超えないと効かないので、
+  # そちらは合成した MADT で検査している（src/kernel/core/tests/mm.c）。
+  add_test(NAME boot-uefi-smp16-arm64
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/run_qemu.py"
+            --arch arm64 --uefi --timeout 120
+            --extra=-smp --extra=16
+            --expect "CPU       : 16 個"
+            --deny   "[ FAIL ]"
+            --deny   "ローダ異常終了"
+            "${BTRON_DISK_IMAGE}")
+
   add_test(NAME panic-screen-${BTRON_ARCH}
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/run_qemu.py"
             --arch ${BTRON_ARCH} --uefi --timeout 90

@@ -7,4 +7,7 @@ set(BTRON_SRCS_KERNEL_BOOT
   ${CMAKE_CURRENT_LIST_DIR}/acpi.c
   ${CMAKE_CURRENT_LIST_DIR}/startup.c
   ${CMAKE_CURRENT_LIST_DIR}/earlytest.c
-  ${CMAKE_CURRENT_LIST_DIR}/bootlog.c)
+  ${CMAKE_CURRENT_LIST_DIR}/bootlog.c
+  # **ローダにも結合する純粋な関数** (T6-03)。cmake/uefi-loader.cmake を参照。
+  ${CMAKE_CURRENT_LIST_DIR}/memmap.c
+  ${CMAKE_CURRENT_LIST_DIR}/bootfb.c)

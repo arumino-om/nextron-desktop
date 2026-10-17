@@ -30,6 +30,14 @@ typedef struct Screen {
 	UW height;
 	UW pitch;  /* 1 走査線のバイト数。width * 4 とは限らない */
 	UW format; /* BFB_* (bootinfo.h) */
+
+	/* 画素の中の R / G / B の位置。**色を組み立てるのはこちらだけを見る。**
+	 * `format` は「画面があるか」の判定にしか使わない。実機には
+	 * PixelBitMask で任意の位置を返す GOP があり（詳細 F9）、
+	 * BGRA / RGBA の 2 通りに畳むと色が出なくなる。 */
+	UW r_mask;
+	UW g_mask;
+	UW b_mask;
 	/* 画面ポインタの共有状態の置き場（`PtrShared`。dp.h）。0 なら無い。
 	 * **ポインタは画面に 1 つしか無いのに DP はプロセスごとの
 	 * ライブラリ**なので、状態を 1 か所に置いて貸し出す。
@@ -52,7 +60,7 @@ IMPORT CONST Screen *screen(void);
 struct AddrSpace;
 IMPORT ERR screen_lend(struct AddrSpace *as, UD *user_base, UD *user_ptr);
 
-/* 色を作る。画素形式（BGRA / RGBA）の差をここで吸収する。 */
+/* 色を作る。画素形式（BGRA / RGBA / ビットマスク）の差をここで吸収する。 */
 IMPORT UW screen_rgb(UW r, UW g, UW b);
 
 IMPORT void screen_clear(UW color);

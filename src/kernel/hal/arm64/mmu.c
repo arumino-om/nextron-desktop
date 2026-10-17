@@ -217,14 +217,51 @@ LOCAL void free_table(UD pa, UW level)
 	pmem_free(pa, 1);
 }
 
-/* va に対応する L3 エントリへのポインタを得る。途中のテーブルは必要なら作る。 */
-LOCAL UD *walk(UD root_pa, UD va, Bool create)
+/* 1 段が覆う大きさ。L3 = 4KB、L2 = 2MB、L1 = 1GB（4KB granule）。
+ * 規律 R2 によりページサイズは直書きせず、段ごとに 9 ビットずつ広げる。 */
+LOCAL inline UD level_span(UW level)
+{
+	return (UD)hal_page_size() << (9U * (3U - level));
+}
+
+/* va を辿り、写像を決めている記述子を返す。終わった段を *level に返す。
+ *
+ * **ブロック記述子 (L1 / L2) で終わることがある。** 直接マップは
+ * 2MB / 1GB のブロックで張ってあるので、L3 まで下れるとは限らない。 */
+LOCAL UD *lookup(UD root_pa, UD va, UW *level)
 {
 	UD *tbl = table_ptr(root_pa);
-	UW level;
+	UW lv;
 
-	for (level = 0; level < 3; level++) {
-		UD *e = &tbl[idx_of(va, level)];
+	for (lv = 0; lv < 3; lv++) {
+		UD *e = &tbl[idx_of(va, lv)];
+
+		if (!(*e & D_VALID)) {
+			return 0;
+		}
+		if (!(*e & D_TABLE)) {
+			*level = lv; /* ブロック記述子。ここで写像が決まる */
+			return e;
+		}
+		tbl = table_ptr(*e & D_ADDR_MASK);
+	}
+	*level = 3;
+	return &tbl[idx_of(va, 3)];
+}
+
+/* va に対応する `level` 段のエントリへのポインタを得る。
+ * 途中のテーブルは必要なら作る。
+ *
+ * **途中がブロック記述子だったら 0 を返す。** そこへ細かい写像を
+ * 重ねるには分割が要るが、直接マップの上に別の写像を重ねることは
+ * ないので、分割は実装せず「できない」と答える。黙って壊すよりよい。 */
+LOCAL UD *walk_to(UD root_pa, UD va, UW level, Bool create)
+{
+	UD *tbl = table_ptr(root_pa);
+	UW lv;
+
+	for (lv = 0; lv < level; lv++) {
+		UD *e = &tbl[idx_of(va, lv)];
 
 		if (!(*e & D_VALID)) {
 			UD next;
@@ -236,10 +273,18 @@ LOCAL UD *walk(UD root_pa, UD va, Bool create)
 				return 0;
 			}
 			*e = (next & D_ADDR_MASK) | D_VALID | D_TABLE;
+		} else if (!(*e & D_TABLE)) {
+			return 0; /* ブロック写像の途中。分割はしない */
 		}
 		tbl = table_ptr(*e & D_ADDR_MASK);
 	}
-	return &tbl[idx_of(va, 3)];
+	return &tbl[idx_of(va, level)];
+}
+
+/* va に対応する L3 エントリへのポインタを得る。途中のテーブルは必要なら作る。 */
+LOCAL UD *walk(UD root_pa, UD va, Bool create)
+{
+	return walk_to(root_pa, va, 3, create);
 }
 
 /* ------------------------------------------------------------------ */
@@ -273,6 +318,16 @@ EXPORT ERR hal_vm_unmap(AddrSpace *as, UD va, UD size)
 
 	if ((va | size) & (ps - 1)) {
 		return -1;
+	}
+	/* **先に全域を検めてから外す。** 途中にブロック写像（直接マップ）が
+	 * 混じっていたら 1 つも外さずに断る。半分だけ外れた状態を作らない。 */
+	for (off = 0; off < size; off += ps) {
+		UW level;
+		UD *e = lookup(as->root_pa, va + off, &level);
+
+		if (e != 0 && level < 3) {
+			return -1; /* ブロック写像の一部。粒度が違う */
+		}
 	}
 	for (off = 0; off < size; off += ps) {
 		UD *e = walk(as->root_pa, va + off, False);
@@ -308,13 +363,17 @@ EXPORT ERR hal_vm_unmap_shared(UD va, UD size)
 
 EXPORT UD hal_vm_translate(CONST AddrSpace *as, UD va)
 {
-	UD ps = (UD)hal_page_size();
-	UD *e = walk(as->root_pa, va, False);
+	UW level = 3;
+	UD *e = lookup(as->root_pa, va, &level);
+	UD span;
 
 	if (e == 0 || !(*e & D_VALID)) {
 		return 0;
 	}
-	return (*e & D_ADDR_MASK) | (va & (ps - 1));
+	/* ブロック写像なら、記述子が持つのはブロックの先頭。
+	 * ブロック内の位置を足して戻す。 */
+	span = level_span(level);
+	return ((*e & D_ADDR_MASK) & ~(span - 1)) | (va & (span - 1));
 }
 
 EXPORT ERR hal_vm_create(AddrSpace *as)
@@ -419,18 +478,76 @@ EXPORT UD hal_vm_map_framebuf(UD pa, UD size)
 /* 起動時の初期化                                                      */
 /* ------------------------------------------------------------------ */
 
-/* 物理範囲を直接マップ領域に張る。範囲はページ境界に丸める。 */
+/* 物理範囲を直接マップ領域に張る。範囲はページ境界に丸める。
+ *
+ * **ブロック記述子を使う。** 4KB 粒度で張ると表が物理メモリの
+ * 1/512 になり、32GB では 64MB になって早期プール (16MB) に入らない
+ * ——「hal_vm_init に失敗」で止まる。実機の RAM は 16〜64GB なので
+ * （詳細 F9「実機で初めて効く差」）、ここは素直に書けない場所である。
+ *
+ * 1GB (L1) / 2MB (L2) / 4KB (L3) を、揃っている限り大きい方から使う。
+ * 32GB なら L1 ブロック 32 個で足りる。Phase 2 ㉛ の「2MB ブロックを
+ * 使えば 1/512 で済むが、まずは素直に」の宿題がここで返ってきた。 */
 LOCAL ERR map_direct(UD start, UD end)
 {
 	UD ps = (UD)hal_page_size();
+	UW attr = BTRON_PG_READ | BTRON_PG_WRITE | BTRON_PG_EXEC;
+	UD page_desc = attr_to_desc(attr);
+	/* ブロック記述子はページ記述子の bit1 を落としたもの。 */
+	UD block_desc = page_desc & ~D_PAGE;
+	UD at;
 
 	start &= ~(ps - 1);
 	end = (end + ps - 1) & ~(ps - 1);
-	if (end <= start) {
-		return 0;
+
+	for (at = start; at < end;) {
+		UD va = BTRON_PA_TO_VA(at);
+		UW level;
+		Bool done = False;
+
+		/* L1 (1GB) → L2 (2MB) の順に、揃っていて丸ごと入る方を使う。 */
+		for (level = 1; level <= 2 && !done; level++) {
+			UD span = level_span(level);
+			UD *e;
+
+			if ((at & (span - 1)) != 0 || end - at < span) {
+				continue;
+			}
+			e = walk_to(kernel_space.root_pa, va, level, True);
+			if (e == 0) {
+				continue; /* 途中が既にブロック。より細かい段で見る */
+			}
+			if ((*e & D_VALID) != 0 && (*e & D_TABLE) != 0) {
+				/* 既に細かい表がぶら下がっている（カーネル本体や
+				 * 早期プールを先に張った分）。**潰すと表が迷子になる**
+				 * ので、この区画は細かい段で埋める。 */
+				continue;
+			}
+			*e = (at & D_ADDR_MASK) | block_desc;
+			at += span;
+			done = True;
+		}
+		if (done) {
+			continue;
+		}
+		/* 端は 4KB で埋める。 */
+		{
+			UD *e = walk(kernel_space.root_pa, va, True);
+
+			if (e == 0) {
+				/* 上の段が既にブロックで覆っている。同じ物理を
+				 * 指しているなら、やることは残っていない。 */
+				if (hal_vm_translate(&kernel_space, va) != at) {
+					return -1;
+				}
+			} else {
+				*e = (at & D_ADDR_MASK) | page_desc;
+			}
+			at += ps;
+		}
 	}
-	return hal_vm_map(&kernel_space, BTRON_PA_TO_VA(start), start, end - start,
-	                  BTRON_PG_READ | BTRON_PG_WRITE | BTRON_PG_EXEC);
+	__asm__ volatile("dsb ishst" ::: "memory");
+	return 0;
 }
 
 EXPORT ERR hal_vm_init(void)
@@ -498,20 +615,42 @@ EXPORT ERR hal_vm_init(void)
 	 * 使えない領域 (MMIO 等) は張らない。張ると投機実行でデバイスを
 	 * 突っつくことになる。
 	 *
-	 * 512MB を 4KB 粒度で張ると表が 1MB ほど増える。2MB ブロックを
-	 * 使えば 1/512 で済むが、まずは素直に。 */
+	 * 粒度はブロック記述子（map_direct の前書き）。
+	 *
+	 * **隣り合う領域はまとめてから張る。** UEFI のマップは種別ごとに
+	 * 細切れになっているが、直接マップの属性は種別によらず同じなので、
+	 * 繋げた方が大きいブロックに収まる。1GB ブロックが使えるかどうかは
+	 * ここで決まる。 */
 	{
 		UW i;
+		UD lo = 0;
+		UD hi = 0;
 
 		for (i = 0; i < bootinfo_mem_count(); i++) {
 			CONST BootMemRegion *r = bootinfo_mem(i);
+			UD base;
 
-			if (r->type == BMEM_UNUSABLE) {
+			if (r->type == BMEM_UNUSABLE || r->size == 0) {
 				continue;
 			}
-			if (map_direct(r->base, r->base + r->size) != 0) {
+			/* 昇順で重なりが無いことを前提にしつつ、万一重なっても
+			 * 二度張らないように既に張った先から始める。 */
+			base = (r->base > hi) ? r->base : hi;
+			if (base >= r->base + r->size) {
+				continue;
+			}
+			if (hi != 0 && base == hi) {
+				hi = r->base + r->size; /* 繋がっている。伸ばすだけ */
+				continue;
+			}
+			if (hi > lo && map_direct(lo, hi) != 0) {
 				return -1;
 			}
+			lo = base;
+			hi = r->base + r->size;
+		}
+		if (hi > lo && map_direct(lo, hi) != 0) {
+			return -1;
 		}
 	}
 	/* カーネル本体を上位半分 (BTRON_KERNEL_BASE) に写像する。
@@ -610,4 +749,15 @@ EXPORT ERR hal_vm_init(void)
 EXPORT CONST AddrSpace *hal_vm_kernel_space(void)
 {
 	return &kernel_space;
+}
+
+EXPORT UD hal_vm_map_span(CONST AddrSpace *as, UD va)
+{
+	UW level = 3;
+	UD *e = lookup(as->root_pa, va, &level);
+
+	if (e == 0 || !(*e & D_VALID)) {
+		return 0;
+	}
+	return level_span(level);
 }

@@ -339,8 +339,15 @@ typedef struct EFI_GRAPHICS_OUTPUT_PROTOCOL_MODE {
 	EFI_UINTN FrameBufferSize;
 } EFI_GRAPHICS_OUTPUT_PROTOCOL_MODE;
 
+struct EFI_GRAPHICS_OUTPUT_PROTOCOL;
+
 typedef struct EFI_GRAPHICS_OUTPUT_PROTOCOL {
-	VP QueryMode;
+	/* モードの一覧は読む。**SetMode は呼ばない** —— 詳細 F9 が
+	 * 「UEFI が設定したモードをそのまま使う」と決めており、
+	 * モード切り替えは実機ブートの前提から外してある。 */
+	EFI_STATUS(*QueryMode)
+	(struct EFI_GRAPHICS_OUTPUT_PROTOCOL *This, UW ModeNumber, EFI_UINTN *SizeOfInfo,
+	 EFI_GRAPHICS_OUTPUT_MODE_INFORMATION **Info);
 	VP SetMode;
 	VP Blt;
 	EFI_GRAPHICS_OUTPUT_PROTOCOL_MODE *Mode;

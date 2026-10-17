@@ -27,7 +27,7 @@
 /* "BTRONBI1" をリトルエンディアンで並べたもの。
  * 第 1 引数がこの値で始まっていなければ BootInfo ではない。 */
 #define BTRON_BOOTINFO_MAGIC 0x3149424E4F525442ULL
-#define BTRON_BOOTINFO_VERSION 1
+#define BTRON_BOOTINFO_VERSION 2
 
 /* Device Tree Blob の先頭マジック（ビッグエンディアン 0xd00dfeed）。
  * QEMU の -kernel 直接起動では第 1 引数が DTB のアドレスになるので、
@@ -62,7 +62,10 @@ typedef struct BootMemRegion {
 #define BFB_NONE 0
 #define BFB_BGRA8 1 /* 下位から B,G,R,予約 の各 8bit (GOP の BlueGreenRedReserved) */
 #define BFB_RGBA8 2 /* 下位から R,G,B,予約 の各 8bit */
-#define BFB_OTHER 3 /* ビットマスク指定。いまは使わない */
+/* ビットマスク指定 (GOP の PixelBitMask)。**実機にはこれを返す GOP がある**
+ * （詳細 F9「実機で初めて効く差」）。R/G/B の位置と幅が機種任意なので、
+ * 形式の番号だけでは色が組み立てられず、マスクそのものが要る。 */
+#define BFB_BITMASK 3
 
 typedef struct BootFrameBuffer {
 	UD base;   /* 物理アドレス。0 ならフレームバッファ無し */
@@ -71,6 +74,16 @@ typedef struct BootFrameBuffer {
 	UW height;
 	UW pitch;  /* 1 走査線のバイト数。width * 4 とは限らない */
 	UW format; /* BFB_* */
+
+	/* 画素の中の R / G / B の位置。**どの形式でも必ず埋める。**
+	 *
+	 * BGRA / RGBA のときも対応するマスクを入れておくので、受け取る側は
+	 * `format` で分岐せずマスクだけを見れば色を組み立てられる。
+	 * 形式の番号を見るのは「無い (BFB_NONE)」の判定だけでよくなる。 */
+	UW r_mask;
+	UW g_mask;
+	UW b_mask;
+	UW resv;
 } BootFrameBuffer;
 
 /* ------------------------------------------------------------------ */
@@ -92,6 +105,10 @@ typedef struct BootInfo {
 
 	UD mem_count; /* BootMemRegion の個数 */
 	UD mem_pa;    /* BootMemRegion 配列の物理アドレス */
+
+	/* 畳む前の UEFI メモリ記述子の個数。**実機では 100 を超えることがある**
+	 * （詳細 F9）。畳みが効いているかを後から見るためだけに持つ。 */
+	UD mem_raw_count;
 
 	BootFrameBuffer fb;
 
@@ -182,5 +199,44 @@ IMPORT CONST BootMemRegion *bootinfo_mem(UW i);     /* 範囲外は 0 */
 /* 条件に合う BMEM_FREE 領域を 1 つ選ぶ。
  * `after` 以降で `size` バイト以上入る最も低い領域を返す。無ければ 0。 */
 IMPORT UD bootinfo_find_free(UD size, UD after);
+
+/* ------------------------------------------------------------------ */
+/* メモリマップの畳み込み (src/kernel/boot/memmap.c)                    */
+/*                                                                     */
+/* **ローダとカーネルの両方にリンクされる。** 実機のメモリマップは要素が */
+/* 100 を超えることがあり (詳細 F9)、そのままでは上の配列に入らない。    */
+/* 畳みの規則が 2 つあってはならないので 1 本のソースを共有している。    */
+/*                                                                     */
+/* どちらも入力が**物理アドレスの昇順に並んでいること**を前提にする。    */
+/* ------------------------------------------------------------------ */
+
+/* 隣り合う同じ種別を 1 本にする。大きさ 0 の要素は落とす。新しい個数を返す。 */
+IMPORT UD bootmem_fold(BootMemRegion *r, UD n);
+
+/* 個数が max 以下になるまで、隣り合う 2 本を 1 本に畳む。
+ * 畳んだ結果の種別は必ず**厳しい方**を採るので、使えない領域が
+ * 使えるものとして現れることはない。 */
+IMPORT UD bootmem_compact(BootMemRegion *r, UD n, UD max);
+
+/* ------------------------------------------------------------------ */
+/* 画素形式 (src/kernel/boot/bootfb.c)                                 */
+/*                                                                     */
+/* **こちらもローダとカーネルの両方にリンクされる。** 実機には GOP が   */
+/* PixelBitMask を返す実装があり (詳細 F9)、QEMU ではその構成を作れない。*/
+/* 純粋な関数にして、合成した値をカーネルの自己検査から食わせる。       */
+/* ------------------------------------------------------------------ */
+
+/* R/G/B のマスクを検めて `fb` に入れ、形式 (BFB_*) を決める。
+ * マスクが連続していない / 重なっている / 0 なら False を返し、
+ * `fb` は触らない。 */
+IMPORT Bool bootfb_set_masks(BootFrameBuffer *fb, UW r_mask, UW g_mask, UW b_mask);
+
+/* マスクのビット位置と階調ビット数。 */
+IMPORT UW bootfb_mask_pos(UW mask);
+IMPORT UW bootfb_mask_bits(UW mask);
+
+/* 0〜255 の階調 3 つを、マスクの位置と幅に合わせて 1 画素に詰める。
+ * **マスクの幅は 8 とは限らない**（ビットマスク指定では 5 や 6 もある）。 */
+IMPORT UW bootfb_pack(UW r_mask, UW g_mask, UW b_mask, UW r, UW g, UW b);
 
 #endif /* __BTRON_BOOTINFO_H__ */

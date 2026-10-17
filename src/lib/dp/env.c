@@ -67,36 +67,64 @@ LOCAL void name_set(TC *dst, CONST B *ascii)
 	}
 }
 
+/* マスクから「ビット位置」と「階調ビット数」を取り出す。 */
+LOCAL UW mask_pos(UW mask)
+{
+	UW pos = 0;
+
+	if (mask == 0) {
+		return 0;
+	}
+	while ((mask & 1U) == 0) {
+		mask >>= 1;
+		pos++;
+	}
+	return pos;
+}
+
+LOCAL UW mask_bits(UW mask)
+{
+	UW bits = 0;
+
+	while ((mask & 1U) == 0 && mask != 0) {
+		mask >>= 1;
+	}
+	while ((mask & 1U) != 0) {
+		mask >>= 1;
+		bits++;
+	}
+	return bits;
+}
+
 /* 画面のデバイス仕様を組み立てる。
  *
- * フレームバッファは 32 ビット語の中に 8 ビットずつ R/G/B が入っている。
- * `color[]` は「下位バイトが階調ビット数、上位バイトがビット位置」なので、
- * BGRA なら赤がビット 16、RGBA なら赤がビット 0 になる。
- * **ここを取り違えると赤と青が入れ替わる。** fb.c の screen_rgb() が
- * 同じ分岐を持っているのと同じ理由。 */
+ * `color[]` は「下位バイトが階調ビット数、上位バイトがビット位置」。
+ * **BGRA / RGBA の 2 通りで分岐してはならない** —— 実機には
+ * ビットマスク指定で任意の位置を返す GOP がある（詳細 F9）。
+ * 画面が持っているマスクからそのまま位置と幅を取る。
+ * fb.c の screen_rgb() がマスクだけを見ているのと同じ理由。 */
 LOCAL Bool screen_spec(DEVSPEC *sp)
 {
 	CONST Screen *s = screen();
-	UW rpos;
-	UW bpos;
+	UW depth;
 
 	if (s == 0 || s->base == 0) {
 		return False;
 	}
-	rpos = (s->format == BFB_RGBA8) ? 0U : 16U;
-	bpos = (s->format == BFB_RGBA8) ? 16U : 0U;
+	depth = mask_bits(s->r_mask) + mask_bits(s->g_mask) + mask_bits(s->b_mask);
 
 	sp->attr = (H)(DEV_MEM | DEV_RGB); /* 固有ビットマップ有、RGB、マップ無 */
 	sp->planes = 1;
-	/* 境界 32 ビットの器に有効 24 ビット。仕様の上限は 28 なので収まる。 */
-	sp->pixbits = (H)BMP_PIXBITS(32, 24);
+	/* 境界 32 ビットの器。有効ビット数はマスクの合計（通常 24）。
+	 * 仕様の上限は 28 なので収まる。 */
+	sp->pixbits = (H)BMP_PIXBITS(32, depth);
 	sp->hpixels = (H)s->width;
 	sp->vpixels = (H)s->height;
 	sp->hres = 0; /* 解像度は分からない。仕様は「規定されていない場合は 0」 */
 	sp->vres = 0;
-	sp->color[0] = DEV_COLINFO(rpos, 8); /* 赤 */
-	sp->color[1] = DEV_COLINFO(8, 8);    /* 緑 */
-	sp->color[2] = DEV_COLINFO(bpos, 8); /* 青 */
+	sp->color[0] = DEV_COLINFO(mask_pos(s->r_mask), mask_bits(s->r_mask));
+	sp->color[1] = DEV_COLINFO(mask_pos(s->g_mask), mask_bits(s->g_mask));
+	sp->color[2] = DEV_COLINFO(mask_pos(s->b_mask), mask_bits(s->b_mask));
 	sp->color[3] = 0;
 	{
 		W i;

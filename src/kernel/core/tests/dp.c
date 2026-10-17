@@ -1032,27 +1032,133 @@ BTRON_TEST_GROUP("ディスプレイプリミティブ 描画 (第2章)", 260, T
 			 * QEMU では書き込みがどちらもホストのメモリ操作になるので
 			 * 差が出にくい。実機では効くはずだが、**この検査が捕まえて
 			 * いるのは経路の方**である。取り違えないこと。 */
+			UD px = (UD)(UW)b.c.right * (UD)(UW)b.c.bottom;
+			W nspp;
+
 			t0 = hal_timer_count();
 			for (i = 0; i < 4; i++) {
 				(void)gfil_rec(sg, b, (CONST PAT *)BLACK50, 0, G_STORE);
 			}
 			t1 = hal_timer_count();
 			us = (freq > 0) ? (W)(((t1 - t0) * 1000000UL) / freq / 4) : 0;
+			/* **画素あたりで見る。** 絶対時間で上限を切ると、
+			 * 解像度が変わっただけで落ちたり通ったりする。実機の
+			 * 画面は 1920x1080 以上あり（詳細 F9）、800x600 の
+			 * 4.3 倍の画素がある。見たいのは経路であって大きさ
+			 * ではないので、割って比べる。 */
+			nspp = (px > 0) ? (W)(((UD)(UW)us * 1000UL) / px) : 0;
 			hal_console_puts("    全画面塗り: ");
 			tst_put_dec(us);
 			hal_console_puts(" us/回 (");
 			tst_put_dec((W)b.c.right);
 			hal_console_puts("x");
 			tst_put_dec((W)b.c.bottom);
-			hal_console_puts(")\n");
-			/* **桁の検査。** 実測 11ms 台に対して 40ms を上限にする。
-			 * 1 画素ずつの経路に戻ると 238ms になるので確実に落ちる。
-			 * 余裕を広く取っているのは、構成によって画面の大きさが
-			 * 変わるためである。 */
-			BTRON_CHECK("走査線単位の経路が効いている", us > 0 && us < 40000);
+			hal_console_puts(" = ");
+			tst_put_dec(nspp);
+			hal_console_puts(" ns/画素)\n");
+			/* **桁の検査。** 実測 12〜25 ns/画素に対して 100 を
+			 * 上限にする。1 画素ずつの経路に戻ると 800x600 で
+			 * 238ms = 496 ns/画素になるので確実に落ちる。 */
+			BTRON_CHECK("走査線単位の経路が効いている",
+			            us > 0 && nspp > 0 && nspp < 100);
 			BTRON_CHECK("閉じる", gcls_env(sg) == EG_OK);
 		} else {
 			BTRON_CHECK("画面が無い構成なので飛ばす", True);
+		}
+	});
+
+	BTRON_TEST("走査線の本数が線形に効く (1920x1080。詳細 F9)", {
+		/* **実機の画面は 1920x1080 以上ある**（詳細 F9 の差分表）。
+		 * ところが QEMU + ArmVirtQemu の ramfb は 640x480 /
+		 * 800x600 / 1024x768 の 3 通りしか持たず、ファームウェアが
+		 * 選ぶのは 800x600 である。モードの切り替えは詳細 F9 が
+		 * 「要らない（UEFI が設定したモードをそのまま使う）」と
+		 * 決めているので、**画面側ではこの大きさを作れない**。
+		 *
+		 * 描いている経路は画面もメモリも同じ（src/lib/dp/pixel.c の
+		 * 走査線単位の高速経路）なので、同じ横幅のメモリ描画環境を
+		 * 1920x1080 で作って、走査線の本数に比例することを見る。
+		 * **どの構成でも走る**のが画面側の検査との違いで、
+		 * 規律 R27 の「構成によって飛ばされる検査」を避けている。 */
+		CONST W bw = 1920;
+		CONST W bh = 1080;
+		CONST W small_h = 135; /* 1/8 */
+		VP mem = 0;
+		UD need = (UD)(UW)bw * 4U * (UD)(UW)bh;
+		UW nblk = (UW)((need + hal_page_size() - 1) / hal_page_size());
+
+		if (get_mbk(&mem, (W)nblk, 0) != ER_OK || mem == 0) {
+			BTRON_CHECK("8MB が取れない構成なので飛ばす", True);
+		} else {
+			BMP bm;
+			GID g;
+
+			bm.planes = 1;
+			bm.pixbits = BMP_PIXBITS(32, 24);
+			bm.rowbytes = (UH)(bw * 4);
+			bm.bounds.c.left = 0;
+			bm.bounds.c.top = 0;
+			bm.bounds.c.right = (H)bw;
+			bm.bounds.c.bottom = (H)bh;
+			bm.baseaddr[0] = (UB *)mem;
+
+			g = gopn_mem(0, &bm, 0);
+			BTRON_CHECK("1920x1080 の描画環境", g >= 1);
+			if (g >= 1) {
+				UD freq = hal_timer_freq();
+				UD t0;
+				UD t1;
+				W big;
+				W small;
+				RECT r;
+				W i;
+
+				r.c.left = 0;
+				r.c.top = 0;
+				r.c.right = (H)bw;
+				r.c.bottom = (H)bh;
+				t0 = hal_timer_count();
+				for (i = 0; i < 2; i++) {
+					(void)gfil_rec(g, r, (CONST PAT *)BLACK50, 0,
+					               G_STORE);
+				}
+				t1 = hal_timer_count();
+				big = (freq > 0) ? (W)(((t1 - t0) * 1000000UL) / freq / 2)
+				                 : 0;
+
+				/* 同じ横幅で走査線だけ 1/8 にする。 */
+				r.c.bottom = (H)small_h;
+				t0 = hal_timer_count();
+				for (i = 0; i < 2; i++) {
+					(void)gfil_rec(g, r, (CONST PAT *)BLACK50, 0,
+					               G_STORE);
+				}
+				t1 = hal_timer_count();
+				small = (freq > 0)
+				            ? (W)(((t1 - t0) * 1000000UL) / freq / 2)
+				            : 0;
+
+				hal_console_puts("    1920x1080 = ");
+				tst_put_dec(big);
+				hal_console_puts(" us, 1920x135 = ");
+				tst_put_dec(small);
+				hal_console_puts(" us\n");
+
+				BTRON_CHECK("測れている", big > 0 && small > 0);
+				/* **走査線 8 倍なら 8 倍前後**であること。
+				 * 本数に対して超線形なら、走査線ごとに増える
+				 * 仕事（毎行の判定やクリップの再計算）が
+				 * 入り込んでいる。余裕は広く取る —— 見たいのは
+				 * 桁であって係数ではない。 */
+				BTRON_CHECK("線形に効いている",
+				            big >= small * 4 && big <= small * 16);
+				/* 画素あたりの上限。画面側と同じ尺度で見る。 */
+				BTRON_CHECK("画素あたりの速さ",
+				            (UD)(UW)big * 1000UL /
+				                    ((UD)(UW)bw * (UD)(UW)bh) < 100);
+				BTRON_CHECK("閉じる", gcls_env(g) == EG_OK);
+			}
+			BTRON_CHECK("領域を返す", rel_mbk(mem) == ER_OK);
 		}
 	});
 

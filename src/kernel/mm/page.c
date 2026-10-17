@@ -96,32 +96,75 @@ LOCAL inline UD pa_of(UD i)
 /* 立ち上げ                                                            */
 /* ------------------------------------------------------------------ */
 
-/* [lo, hi) を空きとして開放する。範囲は表の中に収める。 */
-LOCAL void release_range(UD lo, UD hi)
+/* 1 語の中の立っているビット数。
+ *
+ * **1 ビットずつ回してはいけない。** 実機の RAM は 16〜64GB あり
+ * （詳細 F9）、64GB では表が 1,600 万ビットになる。起動のたびに
+ * 全ビットを 1 つずつ触ると、それだけで目に見える時間になる。 */
+LOCAL inline UW popcount32(UW v)
 {
-	UD i;
+	v = v - ((v >> 1) & 0x55555555U);
+	v = (v & 0x33333333U) + ((v >> 2) & 0x33333333U);
+	v = (v + (v >> 4)) & 0x0F0F0F0FU;
+	return (v * 0x01010101U) >> 24;
+}
 
-	if (lo < pm_base) {
-		lo = pm_base;
+/* ビットの区間 [from, to) を語単位で操作する。
+ * `set` が真なら立てる（使用中にする）、偽なら落とす（空きにする）。
+ * 数えるのは**実際に変わったビット**だけ。 */
+LOCAL void bits_range(UD from, UD to, Bool set)
+{
+	if (to > pm_pages) {
+		to = pm_pages;
 	}
-	if (hi > pm_base + (pm_pages << hal_page_shift())) {
-		hi = pm_base + (pm_pages << hal_page_shift());
-	}
-	for (i = idx_of(lo); i < idx_of(hi) && i < pm_pages; i++) {
-		map_set(pm_ok, i); /* 配ってよいページ */
-		if (bit_get(i)) {
-			bit_clr(i);
-			pm_total++;
-			pm_free++;
+	while (from < to) {
+		UD w = from / BITS_PER_WORD;
+		UW off = (UW)(from % BITS_PER_WORD);
+		UW n = (UW)((to - from < BITS_PER_WORD - off) ? (to - from)
+		                                              : (BITS_PER_WORD - off));
+		UW mask = (n == BITS_PER_WORD) ? 0xFFFFFFFFU : (((1U << n) - 1U) << off);
+		UW old = pm_map[w];
+		UW changed = set ? (mask & ~old) : (mask & old);
+
+		if (changed != 0) {
+			UW c = popcount32(changed);
+
+			pm_map[w] = set ? (old | mask) : (old & ~mask);
+			if (set) {
+				pm_total = (pm_total > c) ? pm_total - c : 0;
+				pm_free = (pm_free > c) ? pm_free - c : 0;
+			} else {
+				pm_total += c;
+				pm_free += c;
+			}
 		}
+		from += n;
 	}
 }
 
-/* [lo, hi) を使用中にする。既に使用中なら数えない。 */
-LOCAL void reserve_range(UD lo, UD hi)
+/* 「配ってよい」印 (`pm_ok`) の区間操作。数を数えないので bits_range とは
+ * 別にしてある。**こちらも語単位で回す** — 理由は同じで、64GB では
+ * 1,600 万ビットあるため（詳細 F9）。 */
+LOCAL void ok_range(UD from, UD to, Bool ok)
 {
-	UD i;
+	if (to > pm_pages) {
+		to = pm_pages;
+	}
+	while (from < to) {
+		UD w = from / BITS_PER_WORD;
+		UW off = (UW)(from % BITS_PER_WORD);
+		UW n = (UW)((to - from < BITS_PER_WORD - off) ? (to - from)
+		                                              : (BITS_PER_WORD - off));
+		UW mask = (n == BITS_PER_WORD) ? 0xFFFFFFFFU : (((1U << n) - 1U) << off);
 
+		pm_ok[w] = ok ? (pm_ok[w] | mask) : (pm_ok[w] & ~mask);
+		from += n;
+	}
+}
+
+/* [lo, hi) を空きとして開放する。範囲は表の中に収める。 */
+LOCAL void release_range(UD lo, UD hi)
+{
 	if (lo < pm_base) {
 		lo = pm_base;
 	}
@@ -131,21 +174,27 @@ LOCAL void reserve_range(UD lo, UD hi)
 	if (hi <= lo) {
 		return;
 	}
-	for (i = idx_of(lo); i < idx_of(hi + (UD)hal_page_size() - 1) && i < pm_pages;
-	     i++) {
-		/* **配る対象から外す。** 外しておかないと、野良の
-		 * `pmem_free()` でカーネル自身の領域が空きに戻ってしまう。 */
-		map_clr(pm_ok, i);
-		if (!bit_get(i)) {
-			bit_set(i);
-			if (pm_total > 0) {
-				pm_total--;
-			}
-			if (pm_free > 0) {
-				pm_free--;
-			}
-		}
+	ok_range(idx_of(lo), idx_of(hi), True); /* 配ってよいページ */
+	bits_range(idx_of(lo), idx_of(hi), False);
+}
+
+/* [lo, hi) を使用中にする。既に使用中なら数えない。 */
+LOCAL void reserve_range(UD lo, UD hi)
+{
+	if (lo < pm_base) {
+		lo = pm_base;
 	}
+	if (hi > pm_base + (pm_pages << hal_page_shift())) {
+		hi = pm_base + (pm_pages << hal_page_shift());
+	}
+	if (hi <= lo) {
+		return;
+	}
+	/* **配る対象から外す。** 外しておかないと、野良の `pmem_free()` で
+	 * カーネル自身の領域が空きに戻ってしまう。
+	 * 端のページは丸ごと押さえる — 半端に跨いでいても配らせない。 */
+	ok_range(idx_of(lo), idx_of(hi + (UD)hal_page_size() - 1), False);
+	bits_range(idx_of(lo), idx_of(hi + (UD)hal_page_size() - 1), True);
 }
 
 EXPORT ERR pmem_init(void)
@@ -284,6 +333,15 @@ EXPORT UD pmem_alloc(UW npages)
 		start = (pass == 0) ? pm_hint : 0;
 		run = 0;
 		for (i = start; i < pm_pages; i++) {
+			/* **全部埋まっている語は語ごと飛ばす。** 64GB では表が
+			 * 1,600 万ビットあり、1 ビットずつ見ると探索だけで
+			 * 時間が溶ける（詳細 F9: 実機の RAM は 16〜64GB）。 */
+			if ((i % BITS_PER_WORD) == 0 &&
+			    pm_map[i / BITS_PER_WORD] == 0xFFFFFFFFU) {
+				run = 0;
+				i += BITS_PER_WORD - 1;
+				continue;
+			}
 			if (bit_get(i)) {
 				run = 0;
 				continue;

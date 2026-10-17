@@ -135,14 +135,14 @@ def input_args(arch: str) -> list[str]:
 
 def qemu_argv(arch: str, image: Path, interactive: bool, uefi: bool,
               machine: str, extra: list[str], gui: bool = False,
-              monitor: str = "", qmp: str = "",
+              monitor: str = "", qmp: str = "", memory: str = "512M",
               semihosting: bool = True) -> list[str]:
     if arch == "arm64":
         argv = [
             "qemu-system-aarch64",
             "-machine", machine,
             "-cpu", "cortex-a72",
-            "-m", "512M",
+            "-m", memory,
             "-no-reboot",
         ]
         if semihosting:
@@ -153,7 +153,7 @@ def qemu_argv(arch: str, image: Path, interactive: bool, uefi: bool,
         argv = [
             "qemu-system-x86_64",
             "-machine", machine,
-            "-m", "512M",
+            "-m", memory,
             "-no-reboot",
         ]
         if semihosting:
@@ -333,6 +333,7 @@ def screenshot_run(args) -> int:
         argv = qemu_argv(args.arch, args.image, False, args.uefi,
                          args.machine or DEFAULT_MACHINE[args.arch],
                          args.extra, monitor=sock, qmp=qsock,
+                         memory=args.memory,
                          semihosting=not args.no_semihosting)
         print(f"$ {' '.join(argv)}\n", file=sys.stderr)
         proc = subprocess.Popen(argv, stdout=subprocess.PIPE,
@@ -421,6 +422,10 @@ def main() -> int:
     ap.add_argument("--machine",
                     help="QEMU の -machine に渡す文字列。"
                          "arm64 で ACPI を切り Device Tree を使わせるなら virt,acpi=off")
+    ap.add_argument("--memory", default="512M", metavar="SIZE",
+                    help="QEMU の -m に渡す値（既定 512M）。"
+                         "実機の RAM は 16〜64GB あり、ページの表と直接マップの"
+                         "大きさがそこで変わる（詳細 F9）。32G などを指定する")
     ap.add_argument("--extra", action="append", default=[], metavar="ARG",
                     help="QEMU に素通しする引数（複数可）")
     ap.add_argument("--no-semihosting", action="store_true",
@@ -469,7 +474,8 @@ def main() -> int:
 
     argv = qemu_argv(args.arch, args.image, args.interactive, args.uefi,
                      args.machine or DEFAULT_MACHINE[args.arch], args.extra,
-                     gui=args.gui, semihosting=not args.no_semihosting)
+                     gui=args.gui, memory=args.memory,
+                     semihosting=not args.no_semihosting)
 
     if args.interactive or args.gui:
         print(f"$ {' '.join(argv)}\n", file=sys.stderr)

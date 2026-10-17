@@ -30,6 +30,11 @@ find_program(BTRON_LLD_LINK lld-link REQUIRED)
 set(_uefi_srcs
   src/boot/uefi/main.c
   src/boot/uefi/console.c
+  # **ローダとカーネルで同じものを使う純粋な関数** (T6-03)。
+  # メモリマップの畳みと GOP の画素形式の読み取りは、ローダ側で起き、
+  # カーネル側の検査で確かめたい。両方に結合して 1 つの実装にする。
+  src/kernel/boot/memmap.c
+  src/kernel/boot/bootfb.c
   ${BTRON_UEFI_ARCH_SRC})
 
 set(_uefi_flags

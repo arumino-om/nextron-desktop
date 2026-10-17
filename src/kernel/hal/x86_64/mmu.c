@@ -196,6 +196,35 @@ LOCAL void free_table(UD pa, UW level, UW last)
 	pmem_free(pa, 1);
 }
 
+/* 1 段が覆う大きさ。PT = 4KB、PD = 2MB、PDPT = 1GB。 */
+LOCAL inline UD level_span(UW level)
+{
+	return (UD)hal_page_size() << (9U * (3U - level));
+}
+
+/* va を辿り、写像を決めているエントリを返す。終わった段を *level に返す。
+ * **大ページ (E_PS) で終わることがある。** arm64 側の lookup() と対。 */
+LOCAL UD *lookup(UD root_pa, UD va, UW *level)
+{
+	UD *tbl = table_ptr(root_pa);
+	UW lv;
+
+	for (lv = 0; lv < 3; lv++) {
+		UD *e = &tbl[idx_of(va, lv)];
+
+		if (!(*e & E_P)) {
+			return 0;
+		}
+		if (lv > 0 && (*e & E_PS) != 0) {
+			*level = lv; /* 大ページ。ここで写像が決まる */
+			return e;
+		}
+		tbl = table_ptr(*e & E_ADDR_MASK);
+	}
+	*level = 3;
+	return &tbl[idx_of(va, 3)];
+}
+
 LOCAL UD *walk(UD root_pa, UD va, Bool create)
 {
 	UD *tbl = table_ptr(root_pa);
@@ -215,6 +244,10 @@ LOCAL UD *walk(UD root_pa, UD va, Bool create)
 			}
 			/* 中間段は許可を絞らない。最終段の権限が実効値になる。 */
 			*e = (next & E_ADDR_MASK) | E_P | E_RW | E_US;
+		} else if (level > 0 && (*e & E_PS) != 0) {
+			/* 大ページの途中。分割はしないので「できない」と答える。
+			 * 黙って潰すと写像が消える（arm64 側と同じ扱い）。 */
+			return 0;
 		}
 		tbl = table_ptr(*e & E_ADDR_MASK);
 	}
@@ -281,13 +314,15 @@ EXPORT ERR hal_vm_unmap_shared(UD va, UD size)
 
 EXPORT UD hal_vm_translate(CONST AddrSpace *as, UD va)
 {
-	UD ps = (UD)hal_page_size();
-	UD *e = walk(as->root_pa, va, False);
+	UW level = 3;
+	UD *e = lookup(as->root_pa, va, &level);
+	UD span;
 
 	if (e == 0 || !(*e & E_P)) {
 		return 0;
 	}
-	return (*e & E_ADDR_MASK) | (va & (ps - 1));
+	span = level_span(level);
+	return ((*e & E_ADDR_MASK) & ~(span - 1)) | (va & (span - 1));
 }
 
 EXPORT ERR hal_vm_create(AddrSpace *as)
@@ -367,6 +402,17 @@ EXPORT Bool hal_vm_enabled(void)
 EXPORT CONST AddrSpace *hal_vm_kernel_space(void)
 {
 	return &kernel_space;
+}
+
+EXPORT UD hal_vm_map_span(CONST AddrSpace *as, UD va)
+{
+	UW level = 3;
+	UD *e = lookup(as->root_pa, va, &level);
+
+	if (e == 0 || !(*e & E_P)) {
+		return 0;
+	}
+	return level_span(level);
 }
 
 LOCAL UD map_alias(UD pa, UD size, UW attr)

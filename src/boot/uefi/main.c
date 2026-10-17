@@ -366,6 +366,78 @@ LOCAL void find_tables(BootInfo *bi)
 	lcon_puts("\n");
 }
 
+/* 画素形式を BootFrameBuffer に写す。
+ *
+ * **実機には PixelBitMask を返す GOP がある**（詳細 F9「実機で初めて効く差」）。
+ * BGRA / RGBA しか扱わないと、そういう機械では画面が無いことになる。
+ * **GOP の形式番号をマスクに直すのがここの仕事**で、検めと形式の決定は
+ * カーネルと共有している bootfb_set_masks() に任せる。 */
+LOCAL Bool take_pixel_format(BootFrameBuffer *fb,
+                             CONST EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *mi)
+{
+	switch (mi->PixelFormat) {
+	case PixelBlueGreenRedReserved8BitPerColor:
+		return bootfb_set_masks(fb, 0x00FF0000U, 0x0000FF00U, 0x000000FFU);
+
+	case PixelRedGreenBlueReserved8BitPerColor:
+		return bootfb_set_masks(fb, 0x000000FFU, 0x0000FF00U, 0x00FF0000U);
+
+	case PixelBitMask:
+		/* 位置も幅も機種任せ。妥当性は共有の関数が見る。 */
+		return bootfb_set_masks(fb, mi->RedMask, mi->GreenMask, mi->BlueMask);
+
+	default:
+		/* PixelBltOnly。ExitBootServices 後は Blt を呼べないので使えない。 */
+		return False;
+	}
+}
+
+LOCAL CONST B *pixel_format_name(UW f)
+{
+	switch (f) {
+	case PixelRedGreenBlueReserved8BitPerColor:
+		return "RGBA8";
+	case PixelBlueGreenRedReserved8BitPerColor:
+		return "BGRA8";
+	case PixelBitMask:
+		return "BitMask";
+	default:
+		return "BltOnly";
+	}
+}
+
+/* GOP が持っているモードを全部出す。
+ *
+ * **モードは切り替えない**（詳細 F9: UEFI が設定したモードをそのまま使う）。
+ * これは実機で「何が選べて何が選ばれたか」を人が見るためだけの出力で、
+ * 画面が思った大きさでないときに最初に見る場所になる。 */
+LOCAL void show_gop_modes(EFI_GRAPHICS_OUTPUT_PROTOCOL *gop)
+{
+	UW i;
+
+	lcon_puts("  GOP モード: ");
+	lcon_dec(gop->Mode->MaxMode);
+	lcon_puts(" 通り (現在 ");
+	lcon_dec(gop->Mode->Mode);
+	lcon_puts(")\n");
+	for (i = 0; i < gop->Mode->MaxMode; i++) {
+		EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *mi = 0;
+		EFI_UINTN size = 0;
+
+		if (EFI_ERROR(gop->QueryMode(gop, i, &size, &mi)) || mi == 0) {
+			continue;
+		}
+		lcon_puts((i == gop->Mode->Mode) ? "   *" : "    ");
+		lcon_dec(mi->HorizontalResolution);
+		lcon_puts("x");
+		lcon_dec(mi->VerticalResolution);
+		lcon_puts(" ");
+		lcon_puts(pixel_format_name(mi->PixelFormat));
+		lcon_puts("\n");
+		BS->FreePool(mi);
+	}
+}
+
 LOCAL void find_framebuffer(BootInfo *bi)
 {
 	CONST EFI_GUID gop_guid = EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID;
@@ -379,6 +451,7 @@ LOCAL void find_framebuffer(BootInfo *bi)
 		return;
 	}
 	mi = gop->Mode->Info;
+	show_gop_modes(gop);
 
 	bi->fb.base = gop->Mode->FrameBufferBase;
 	bi->fb.size = gop->Mode->FrameBufferSize;
@@ -386,18 +459,14 @@ LOCAL void find_framebuffer(BootInfo *bi)
 	bi->fb.height = mi->VerticalResolution;
 	/* GOP が返すのは「1 走査線の画素数」。バイト数に直す。 */
 	bi->fb.pitch = mi->PixelsPerScanLine * 4U;
-	switch (mi->PixelFormat) {
-	case PixelBlueGreenRedReserved8BitPerColor:
-		bi->fb.format = BFB_BGRA8;
-		break;
-	case PixelRedGreenBlueReserved8BitPerColor:
-		bi->fb.format = BFB_RGBA8;
-		break;
-	default:
-		/* ビットマスク指定や BltOnly は扱わない。 */
+	if (!take_pixel_format(&bi->fb, mi)) {
+		lcon_puts("  画面      : 扱えない画素形式 (");
+		lcon_puts(pixel_format_name(mi->PixelFormat));
+		lcon_puts(")\n");
 		bi->fb.base = 0;
+		bi->fb.size = 0;
 		bi->fb.format = BFB_NONE;
-		break;
+		return;
 	}
 
 	/* FrameBufferBase が 0 のドライバがある（EDK2 の VirtioGpuDxe が該当。
@@ -416,6 +485,8 @@ LOCAL void find_framebuffer(BootInfo *bi)
 	lcon_dec(bi->fb.height);
 	lcon_puts(" pitch ");
 	lcon_dec(bi->fb.pitch);
+	lcon_puts(" ");
+	lcon_puts(pixel_format_name(mi->PixelFormat));
 	lcon_puts(" @ ");
 	lcon_hex(bi->fb.base);
 	lcon_puts("\n");
@@ -490,41 +561,25 @@ LOCAL void sort_memory_map(EFI_MEMORY_DESCRIPTOR *map, UD count, UD desc_size)
 	}
 }
 
-/* 隣接する同種の領域を 1 本に畳む。UEFI のマップは細切れで、
- * BOOTINFO_MAX_REGIONS に収めるには畳まないと溢れる。
+/* UEFI の記述子を BootMemRegion に写す。畳みはしない（数も減らさない）。
  * 呼ぶ前に sort_memory_map() で昇順にしておくこと。 */
-LOCAL UD fold_memory_map(CONST EFI_MEMORY_DESCRIPTOR *map, UD count, UD desc_size,
-                         BootMemRegion *out, UD max)
+LOCAL UD take_memory_map(CONST EFI_MEMORY_DESCRIPTOR *map, UD count, UD desc_size,
+                         BootMemRegion *out, UD cap)
 {
 	UD n = 0;
 	UD i;
 
-	for (i = 0; i < count; i++) {
+	for (i = 0; i < count && n < cap; i++) {
 		CONST EFI_MEMORY_DESCRIPTOR *d =
 		    (CONST EFI_MEMORY_DESCRIPTOR *)((CONST UB *)map + i * desc_size);
-		UW type = efi_type_to_bmem(d->Type);
-		UD base = d->PhysicalStart;
 		UD size = d->NumberOfPages * EFI_PAGE_SIZE;
 
 		if (size == 0) {
 			continue;
 		}
-		if (n > 0 && out[n - 1].type == type && out[n - 1].base + out[n - 1].size == base) {
-			out[n - 1].size += size;
-			continue;
-		}
-		if (n >= max) {
-			/* 溢れた分は切り捨てるのではなく、最後の領域を伸ばして
-			 * 「使ってはならない」側に寄せる。安全側に倒す。 */
-			if (n > 0) {
-				out[n - 1].type = BMEM_UNUSABLE;
-				out[n - 1].size = base + size - out[n - 1].base;
-			}
-			continue;
-		}
-		out[n].base = base;
+		out[n].base = d->PhysicalStart;
 		out[n].size = size;
-		out[n].type = type;
+		out[n].type = efi_type_to_bmem(d->Type);
 		out[n].resv = 0;
 		n++;
 	}
@@ -542,6 +597,8 @@ EXPORT EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *systab)
 	KernelImage ki;
 	BootInfo *bi;
 	BootMemRegion *regions;
+	BootMemRegion *scratch;
+	UD scratch_max;
 	EFI_PHYSICAL_ADDRESS handoff = 0;
 	UD handoff_size;
 	EFI_MEMORY_DESCRIPTOR *map;
@@ -611,21 +668,39 @@ EXPORT EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *systab)
 	if (st != EFI_BUFFER_TOO_SMALL) {
 		die("GetMemoryMap(サイズ問い合わせ)", st);
 	}
-	map_size += desc_size * 16;
+	map_size += desc_size * 32;
 	map = (EFI_MEMORY_DESCRIPTOR *)alloc_pool(map_size);
+
+	/* 畳む前の作業領域。**実機のマップは 100 を超えることがある**ので
+	 * (詳細 F9)、記述子をそのまま並べられる大きさを先に取っておく。
+	 * ExitBootServices の後では確保できないし、この中で確保すると
+	 * マップ自体が変わってしまう。 */
+	scratch_max = map_size / desc_size;
+	scratch = (BootMemRegion *)alloc_pool(sizeof(BootMemRegion) * scratch_max);
 
 	/* ExitBootServices は MapKey が古いと EFI_INVALID_PARAMETER を返す。
 	 * そのときはマップを取り直して再試行する（仕様が要求する手順）。 */
 	for (tries = 0; tries < 8; tries++) {
 		EFI_UINTN sz = map_size;
+		UD n;
+		UD i;
 
 		st = BS->GetMemoryMap(&sz, map, &map_key, &desc_size, &desc_ver);
 		if (EFI_ERROR(st)) {
 			die("GetMemoryMap", st);
 		}
 		sort_memory_map(map, sz / desc_size, desc_size);
-		bi->mem_count =
-		    fold_memory_map(map, sz / desc_size, desc_size, regions, BOOTINFO_MAX_REGIONS);
+
+		/* 写す → 隣接同種を畳む → 入りきるまで隣同士を畳む。
+		 * 畳みの規則はカーネルと共有している（memmap.c）。 */
+		bi->mem_raw_count = sz / desc_size;
+		n = take_memory_map(map, sz / desc_size, desc_size, scratch, scratch_max);
+		n = bootmem_fold(scratch, n);
+		n = bootmem_compact(scratch, n, BOOTINFO_MAX_REGIONS);
+		for (i = 0; i < n; i++) {
+			regions[i] = scratch[i];
+		}
+		bi->mem_count = n;
 
 		st = BS->ExitBootServices(image, map_key);
 		if (!EFI_ERROR(st)) {
@@ -635,6 +710,10 @@ EXPORT EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *systab)
 	if (EFI_ERROR(st)) {
 		die("ExitBootServices", st);
 	}
+	/* **ここで畳んだ結果は出さない。** ExitBootServices の後なので
+	 * コンソールが使えず、前に出すとその出力自体がマップを変えて
+	 * MapKey が古くなる。報告はカーネルの show_bootinfo() が行う
+	 * （`mem_raw_count` を引き継いでいるのはそのため）。 */
 
 	/* ---- ここから先はファームウェアのサービスを呼べない ----
 	 * ConOut も Serial I/O もブートサービスのドライバなので使えない。

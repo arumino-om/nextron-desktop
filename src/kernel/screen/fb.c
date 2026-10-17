@@ -9,9 +9,11 @@
  * `hal_vm_map_device()` が返す別名は `BTRON_MMIO_BASE + 物理`で一意なので、
  * 貸出側が別の仮想アドレスに張っても衝突しない。
  *
- * 【画素形式】GOP は BGRA と RGBA の 2 通りを返す（詳細 D8 ⑩）。
- * 色の組み立てを screen_rgb() に閉じて、描画側は形式を意識しない。
- * 規律 R7 の「変換は境界にのみ置く」と同じ形。
+ * 【画素形式】GOP は BGRA / RGBA のほかに**ビットマスク指定**を返すことが
+ * あり、実機にはそれを返す実装がある（詳細 F9「実機で初めて効く差」）。
+ * したがって形式の番号で 2 分岐してはならない。ローダがどの形式でも
+ * R/G/B のマスクを埋めてくるので、色の組み立ては screen_rgb() の中で
+ * **マスクだけ**を見る。規律 R7 の「変換は境界にのみ置く」と同じ形。
  */
 
 #include <btron/bootinfo.h>
@@ -102,6 +104,9 @@ EXPORT ERR screen_init(void)
 	scr.height = fb->height;
 	scr.pitch = fb->pitch;
 	scr.format = fb->format;
+	scr.r_mask = fb->r_mask;
+	scr.g_mask = fb->g_mask;
+	scr.b_mask = fb->b_mask;
 
 	/* ポインタの共有状態。物理ページから取るのは、貸し出すときに
 	 * ページ単位で切り出せなければならないからである（カーネルの
@@ -126,15 +131,12 @@ EXPORT CONST Screen *screen(void)
 
 EXPORT UW screen_rgb(UW r, UW g, UW b)
 {
-	r &= 0xFFU;
-	g &= 0xFFU;
-	b &= 0xFFU;
-	if (!ready || scr.format == BFB_BGRA8) {
-		/* 下位から B,G,R,予約 */
-		return (r << 16) | (g << 8) | b;
+	if (!ready) {
+		/* 画面が無い構成でも色の計算は通る。既定は BGRA（GOP の
+		 * BlueGreenRedReserved）にしておく。 */
+		return ((r & 0xFFU) << 16) | ((g & 0xFFU) << 8) | (b & 0xFFU);
 	}
-	/* 下位から R,G,B,予約 */
-	return (b << 16) | (g << 8) | r;
+	return bootfb_pack(scr.r_mask, scr.g_mask, scr.b_mask, r, g, b);
 }
 
 LOCAL inline volatile UW *at(W x, W y)
@@ -155,7 +157,8 @@ EXPORT UW screen_get(W x, W y)
 	if (!ready || x < 0 || y < 0 || (UW)x >= scr.width || (UW)y >= scr.height) {
 		return 0;
 	}
-	return *at(x, y) & 0xFFFFFFU;
+	/* 予約ビットは返さない。有効なのは R/G/B のマスクが覆う分だけ。 */
+	return *at(x, y) & (scr.r_mask | scr.g_mask | scr.b_mask);
 }
 
 EXPORT void screen_fill(W x, W y, W w, W h, UW color)
