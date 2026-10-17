@@ -28,6 +28,36 @@
 IMPORT B __kernel_start[];
 IMPORT B __kernel_end[];
 
+/* 画面に出ている「文字の量」を数える。
+ *
+ * 画面コンソールの前景色の画素を拾う。**出力が画面に届いていることを
+ * 読み返しで確かめる**ために使う（㉗ と同じ考え方で、スクリーンショット
+ * 比較にしない）。カーソルの位置を知らなくても増減で判定できる。
+ *
+ * 全画素を読むとフレームバッファはキャッシュが効かないので重い（㉖）。
+ * グリフは 8x16 なので、横 2 画素・縦 3 画素ごとに拾えば十分に当たる。 */
+LOCAL UD screen_ink(void)
+{
+	CONST Screen *s = screen();
+	CONST UW fg = screen_rgb(0xD0, 0xD8, 0xE0);
+	UD n = 0;
+	UW y;
+
+	if (s == 0) {
+		return 0;
+	}
+	for (y = 0; y < s->height; y += 3) {
+		UW x;
+
+		for (x = 0; x < s->width; x += 2) {
+			if (screen_get((W)x, (W)y) == fg) {
+				n++;
+			}
+		}
+	}
+	return n;
+}
+
 EXPORT void boot_early_tests(void)
 {
 	BTRON_TEST("基本データタイプの幅", {
@@ -220,9 +250,17 @@ EXPORT void boot_early_tests(void)
 		CONST MachDesc *md = machdesc();
 
 		if (bootinfo()->dtb == 0 && bootinfo()->acpi_rsdp == 0) {
-			/* QEMU -kernel 直接起動。記述が無いので既定値で動いている。 */
+			/* QEMU -kernel 直接起動。記述が無いので既定値で動いている。
+			 * **その既定値も ID レジスタで確かめてから開いている**（R31）。 */
 			BTRON_CHECK("記述なし", md->source == MD_SRC_NONE);
-			BTRON_CHECK("既定値で動作", hal_console_pa() != 0);
+			BTRON_CHECK("確かめた既定値", hal_console_opened());
+		} else if ((bootinfo()->flags & BI_F_NO_UART) != 0) {
+			/* NOUART の印。**シリアルが無い機械のふり**をしている
+			 * （規律 R31 の逆テスト）。記述自体は読めている。 */
+			BTRON_CHECK("出どころ", md->source != MD_SRC_NONE);
+			BTRON_CHECK("シリアルは消えた", md->uart_type == MD_UART_NONE);
+			BTRON_CHECK("番地も消えた", md->uart_pa == 0);
+			BTRON_CHECK("ドライバも黙った", !hal_console_opened());
 		} else {
 			BTRON_CHECK("出どころ", md->source != MD_SRC_NONE);
 			/* **アーキで中身が違う。** 記述から何が取れるべきかは
@@ -267,6 +305,58 @@ EXPORT void boot_early_tests(void)
 		/* 周波数。arm64 は CNTFRQ_EL0 を読むだけ、x86_64 は TSC を
 		 * 校正する（CPUID 0x15 が無い機種が普通にある）。 */
 		BTRON_CHECK("タイマ周波数", hal_timer_freq() > 0);
+	});
+
+	BTRON_TEST("記述に無いシリアルへは書かない (規律 R31)", {
+		CONST MachDesc *md = machdesc();
+
+		if (md->uart_type != MD_UART_NONE) {
+			/* 記述から取れた。そこを使っていること。 */
+			BTRON_CHECK("記述どおり", hal_console_opened());
+		} else if ((bootinfo()->flags & BI_F_NO_UART) != 0) {
+			/* **「シリアルが無い機械」のふり**（R31 の逆テスト）。
+			 * 既定値も試さないので、完全に黙っていなければならない。 */
+			BTRON_CHECK("黙っている", !hal_console_opened());
+
+			/* **黙ったうえで、画面には出ていること。**
+			 * シリアルが無い機械では画面が唯一の出力路になる
+			 * （詳細 F9「報告と終了」）。黙るだけでは何も分からない。
+			 *
+			 * 出しているのは検査の `[ PASS ]` と同じ経路
+			 * （`hal_console_puts` → `hal_console_tee` → 画面コンソール）
+			 * なので、ここが通れば結果も画面に出ている。 */
+			if (screen() != 0) {
+				UD before = screen_ink();
+
+				hal_console_puts("  シリアルが無いので画面だけに出して"
+				                 "います（R31 / 詳細 F9）\n");
+				BTRON_CHECK("画面には出ている", screen_ink() > before);
+			}
+		} else if (md->source == MD_SRC_NONE) {
+			/* 記述が 1 つも無い経路（-kernel 直接起動）。
+			 * 既定値を使うが、ID レジスタで確かめてから開いている。 */
+			BTRON_CHECK("確かめた既定値", hal_console_opened());
+		} else {
+			/* **記述はあるが、そこにシリアルが無い。**
+			 *
+			 * ここでの振る舞いは**アーキで違ってよい。分かれ目は
+			 * 「確かめること自体が落ちるか」**である（規律 R31 は
+			 * 「読んで確かめられるときだけ既定値を使う」）。
+			 *
+			 *   MMIO (arm64)  居ない番地は**読むだけで外部アボート**。
+			 *                 確かめられないので触らない = 黙る
+			 *   PIO  (x86)    居ない番地を突いても止まらない。
+			 *                 スクラッチレジスタで確かめてから開ける */
+#if defined(__aarch64__)
+			BTRON_CHECK("黙っている", !hal_console_opened());
+#else
+			/* q35 は SPCR を出さないが COM1 は居る。確かめが取れた
+			 * から開いている、という状態。**ポート I/O は
+			 * アドレス空間に現れない**ので写像は増えない。 */
+			BTRON_CHECK("確かめてから開いた", hal_console_opened());
+			BTRON_CHECK("写像は増えない", hal_console_pa() == 0);
+#endif
+		}
 	});
 
 	BTRON_TEST("MMIO 区画への写像 (§3.2-3 / R18 の機構)", {

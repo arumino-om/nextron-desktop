@@ -65,3 +65,8 @@ EXPORT void hal_dma_barrier(void)
 {
 	__asm__ volatile("dsb sy" ::: "memory");
 }
+
+EXPORT void hal_cpu_halt(void)
+{
+	__asm__ volatile("wfe");
+}

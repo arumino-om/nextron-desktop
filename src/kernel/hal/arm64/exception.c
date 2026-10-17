@@ -79,9 +79,29 @@ EXPORT void hal_exception_init(void)
  * 2 度目からは何も出さずに止める。最初の報告が画面に残る。 */
 LOCAL W report_depth;
 
+/* src/kernel/hal/arm64/exit.c。セミホスティングが使えなかったことを
+ * 見分けて、記述どおりの電源断へ回すための口。 */
+IMPORT Bool hal_exit_pending(void);
+IMPORT void hal_exit_continue(void) __attribute__((noreturn));
+
 EXPORT void hal_exception_report(UD esr, UD far, UD elr)
 {
 	UD ec = (esr >> 26) & 0x3F;
+
+	/* **これは異常ではなく、終了の途中である。**
+	 *
+	 * `hal_exit()` の `hlt #0xF000` は、セミホスティングが無い環境
+	 * （実機）では「分類なし」の同期例外になる。ARM のセミホスティングに
+	 * 存在確認の呼び出しが無いので、**例外になったことがそのまま
+	 * 「実機である」という答え**になる（Phase 2 (56) の裏返し）。
+	 * 報告は出さずに、次の段（PSCI SYSTEM_OFF）へ進む。
+	 *
+	 * report_depth == 0 に限っているのが要点で、**報告の途中で
+	 * hal_exit が落ちた場合は下の入れ子の処理に任せる** — そちらは
+	 * 画面に出た本物の例外を消さずに止める (56)。 */
+	if (hal_exit_pending() && report_depth == 0) {
+		hal_exit_continue(); /* 戻らない */
+	}
 
 	report_depth++;
 	if (report_depth > 1) {

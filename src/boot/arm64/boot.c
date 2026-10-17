@@ -40,6 +40,41 @@ IMPORT B __kernel_end[];
 #define QEMU_VIRT_RAM_SIZE (512ULL * 1024 * 1024)
 
 
+/* シリアルを開く。**開ける確証が取れたときだけ**（規律 R31）。
+ *
+ * 道は 2 つだけで、どちらも通らなければ黙る。
+ *
+ *   記述が指した番地          実機の本線。ファームウェアが書いた値
+ *   組み込みの既定値          記述が 1 つも無い経路のみ。ID で確かめる
+ *
+ * **黙ることが正しい動作である。** 実機にはシリアルが無い機械があり
+ * （詳細 F9）、そこで既定値へ書くと外部アボートになって無言で止まる。
+ * 出力は画面が引き受ける（`hal_console_tee` と緊急画面。規律 R18）。
+ */
+LOCAL void open_console(void)
+{
+	CONST MachDesc *md = machdesc();
+
+	if (hal_console_set(md->uart_type, md->uart_pa)) {
+		hal_console_puts("  シリアル  : ");
+		hal_console_puts(md_uart_name(md->uart_type));
+		hal_console_puts(" @ ");
+		boot_put_hex(md->uart_pa);
+		hal_console_puts("\n");
+		return;
+	}
+	/* 記述が 1 つも無い = QEMU の -kernel 直接起動（開発用）。
+	 * **実機はこの経路に来ない** — 必ず UEFI 経由で来て DT か ACPI を
+	 * 置く。規律 R19 が既定値を認めているのはここだけで、それでも
+	 * ID レジスタで確かめてから開く。 */
+	/* NOUART の印が立っていたら既定値も試さない。「シリアルが無い
+	 * 機械」のふりをさせる逆テスト用（規律 R31）。 */
+	if (md->source == MD_SRC_NONE
+	    && (bootinfo()->flags & BI_F_NO_UART) == 0) {
+		(void)hal_console_default();
+	}
+}
+
 EXPORT void boot_early(UD arg)
 {
 	Bool via_uefi;
@@ -47,32 +82,24 @@ EXPORT void boot_early(UD arg)
 	UD pool;
 
 	hal_cpu_init();       /* SIMD/FP のトラップを外す。コンテキスト切替が要求する */
-	hal_console_init();
 	hal_exception_init(); /* これより後のフォルトは無言のハングではなく報告になる */
+
+	/* **記述を読む前に喋らない**（規律 R31）。
+	 *
+	 * 以前はここで既定アドレスのシリアルを開いて銘を出していた。QEMU では
+	 * 当たりだが、実機ではその番地に何も無く、外部アボートで無言に止まる。
+	 * 順番を「引き継ぎ情報 → 記述 → シリアル」に変えると、開くときには
+	 * 必ず裏付け（記述か ID レジスタ）がある。
+	 *
+	 * 引き継ぎ情報と DT / ACPI のテーブルはローダの領域にあり、この先
+	 * 写像されない。いまは MMU が無効で全物理メモリが見えているので、
+	 * ここで読んでカーネル内へ複製する。 */
+	via_uefi = bootinfo_take(arg);
+	(void)machdesc_probe();
+	open_console();
 
 	hal_console_puts("\n");
 	hal_console_puts("BTRON3 準拠 OS — arm64\n");
-
-	/* 引き継ぎ情報を取り込む。ローダが置いた領域はこの先写像されないので、
-	 * MMU を有効にする前にカーネル内へ複製しておく。 */
-	via_uefi = bootinfo_take(arg);
-
-	/* ハードウェア構成を読む（詳細 D8）。DT / ACPI のテーブルも
-	 * ファームウェアの領域にあり、この先写像されない。いまは MMU が
-	 * 無効で全物理メモリが見えているので、ここで読んで複製する。 */
-	if (machdesc_probe()) {
-		CONST MachDesc *md = machdesc();
-
-		/* シリアルを記述どおりに差し替える。既定値は記述が読めない
-		 * ときの保険であって、本来のアドレスはここから来る。 */
-		if (hal_console_set(md->uart_type, md->uart_pa)) {
-			hal_console_puts("  シリアル  : ");
-			hal_console_puts(md_uart_name(md->uart_type));
-			hal_console_puts(" @ ");
-			boot_put_hex(md->uart_pa);
-			hal_console_puts("\n");
-		}
-	}
 
 	/* カーネルが実際に置かれた物理先頭を HAL に教える。UEFI ローダは
 	 * リンク時の LMA が空いていなければ別の場所へ置く（規律 R17）。 */

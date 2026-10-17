@@ -477,7 +477,7 @@ BTRON_TEST_GROUP("PCIe の列挙と MSI-X (詳細 F8)", 760, TST_PHASE_PROC, tst
 			                mx.table < BTRON_RESERVED_BASE);
 			/* **open しただけでは有効にしない。** 宛先を書く前に有効に
 			 * すると、装置が何も書いていない番地へ割込みを送る
-			 * （規律 R29 と同じ形。msi.c の「有効にする順番」）。 */
+			 * （規律 R31 と同じ形。msi.c の「有効にする順番」）。 */
 			BTRON_CHECK("open では有効にしない", !pci_msix_enabled(d, &mx));
 
 			/* 宛先はアーキの割込みコントローラが決める（詳細 F8）。

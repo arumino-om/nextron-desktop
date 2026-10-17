@@ -63,7 +63,8 @@ def need(prog: str) -> str:
 
 def build_esp(esp: Path, size_mib: int, boot_name: str,
               loader: Path, kernel: Path, panic_test: bool = False,
-              hold: bool = False, selfboot: bool = False) -> None:
+              hold: bool = False, selfboot: bool = False,
+              no_uart: bool = False) -> None:
     """FAT の ESP イメージを作り、ローダとカーネルを入れる。"""
     need("mformat")
     need("mcopy")
@@ -112,6 +113,20 @@ def build_esp(esp: Path, size_mib: int, boot_name: str,
                           "あとも電源を落とさず画面を残します。\n",
                           encoding="utf-8")
         run(["mcopy", "-i", str(esp), str(marker), "::/BTRON/HOLD"])
+        marker.unlink()
+
+    if no_uart:
+        # 「シリアルが無い機械」のふりをさせる印（規律 R29 の逆テスト）。
+        #
+        # 実機のノート PC には 16550 が無いことがあり、そのとき既定
+        # アドレスへ書き込むと外部アボートで無言に止まる（詳細 F9）。
+        # QEMU の virt / q35 は記述からシリアルを消せないので、
+        # **この印だけが実機の経路を再現する手段**になる。
+        marker = esp.with_suffix(".nouart")
+        marker.write_text("シリアルが無い機械のふりをさせる印。これがあると、"
+                          "記述から読んだ UART を捨てて黙ります。\n",
+                          encoding="utf-8")
+        run(["mcopy", "-i", str(esp), str(marker), "::/BTRON/NOUART"])
         marker.unlink()
 
 
@@ -170,6 +185,9 @@ def main() -> int:
     ap.add_argument("--panic-test", action="store_true",
                     help="緊急画面 (T4-02) の検査用の印を入れる。"
                          "起動時検査のあとにわざと例外を起こすようになる")
+    ap.add_argument("--no-uart", action="store_true",
+                    help="シリアルが無い機械のふりをさせる印を入れる (R29)。"
+                         "記述から読んだ UART を捨てて黙るようになる")
     args = ap.parse_args()
 
     for p in (args.loader, args.kernel):
@@ -180,7 +198,8 @@ def main() -> int:
 
     esp = args.out.with_suffix(".esp")
     build_esp(esp, args.esp_size, DEFAULT_BOOT_NAME[args.arch], args.loader,
-              args.kernel, args.panic_test, args.hold, args.selfboot)
+              args.kernel, args.panic_test, args.hold, args.selfboot,
+              args.no_uart)
     build_disk(args.out, esp, args.fs_size)
 
     print(f"{args.out}  ({args.out.stat().st_size // (1024 * 1024)}MiB)")
@@ -194,6 +213,8 @@ def main() -> int:
         print("  /BTRON/HOLD              <- 検査後も画面を残す印")
     if args.selfboot:
         print("  /BTRON/SELFBOOT          <- 本来の起動列を通す印")
+    if args.no_uart:
+        print("  /BTRON/NOUART            <- シリアルが無い機械のふりをさせる印")
     return 0
 
 

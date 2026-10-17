@@ -36,6 +36,8 @@
 
 /* 起動時検査の代わりに、本来の起動列を通す印 (D8 / startup.c)。 */
 #define SELFBOOT_PATH L"\\BTRON\\SELFBOOT"
+/* シリアルが無い機械のふりをさせる印（規律 R31 の逆テスト）。 */
+#define NO_UART_PATH L"\\BTRON\\NOUART"
 
 #define EFI_PAGE_SIZE 4096ULL
 #define PAGES_OF(n) (((n) + EFI_PAGE_SIZE - 1) / EFI_PAGE_SIZE)
@@ -592,6 +594,10 @@ EXPORT EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *systab)
 	if (has_marker(image, (CONST EFI_CHAR16 *)SELFBOOT_PATH)) {
 		bi->flags |= BI_F_SELFBOOT;
 		lcon_puts("  印        : SELFBOOT（本来の起動列を通す）\n");
+	}
+	if (has_marker(image, (CONST EFI_CHAR16 *)NO_UART_PATH)) {
+		bi->flags |= BI_F_NO_UART;
+		lcon_puts("  印        : NOUART（シリアルが無い機械のふり）\n");
 	}
 
 	find_tables(bi);

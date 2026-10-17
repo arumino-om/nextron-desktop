@@ -390,6 +390,28 @@ if(TARGET btron-kernel)
 
   add_custom_target(btron-gui-image ALL DEPENDS "${BTRON_GUI_IMAGE}")
 
+  # シリアルが無い機械のふりをさせるイメージ（規律 R31 の逆テスト）。
+  #
+  # 実機のノート PC には 16550 が無いことがあり（詳細 F9）、そのとき
+  # 既定アドレスへ書き込むと外部アボートで無言に止まる。**QEMU の
+  # virt も q35 も記述からシリアルを消せない**ので、ESP に印を置いて
+  # カーネル側で記述から捨てる形にした（PANICTEST と同じ仕掛け）。
+  set(BTRON_NOUART_IMAGE "${CMAKE_CURRENT_BINARY_DIR}/btron-${BTRON_ARCH}-nouart.img")
+
+  add_custom_command(
+    OUTPUT "${BTRON_NOUART_IMAGE}"
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/mkimage.py"
+            --arch ${BTRON_ARCH} --no-uart
+            --loader "${BTRON_UEFI_IMAGE}"
+            --kernel "$<TARGET_FILE:btron-kernel>"
+            --out    "${BTRON_NOUART_IMAGE}"
+    DEPENDS "${BTRON_UEFI_IMAGE}" btron-kernel
+            "${CMAKE_CURRENT_SOURCE_DIR}/tools/mkimage.py"
+    COMMENT "シリアルが無い機械のふりをさせるディスクイメージ"
+    VERBATIM)
+
+  add_custom_target(btron-nouart-image ALL DEPENDS "${BTRON_NOUART_IMAGE}")
+
   if(BTRON_ARCH STREQUAL "x86_64")
     # **x86_64 の起動経路 (T1-11)。** ここで見るのは
     #
@@ -410,11 +432,37 @@ if(TARGET btron-kernel)
               --expect "ハード記述: ACPI"
               --expect "割込み    : APIC"
               --expect "中心核は未接続"
-              --expect "[ DONE ] 24/24"
+              --expect "[ DONE ] 25/25"
               --deny   "[ FAIL ]"
               --deny   "*** 例外 ***"
               "${BTRON_DISK_IMAGE}")
   endif()
+
+  # 実機で死なない経路 (T6-02) — その 1: シリアルが無い機械。
+  #
+  # **これは逆テストである。** 既定アドレスへの書き込みが 1 つでも
+  # 残っていれば、この構成で外部アボートになって落ちる（規律 R31）。
+  #
+  # シリアルが黙るので**カーネルの出力は 1 行も出ない**。だから
+  # --expect では確かめられず、判定は
+  #
+  #   ・ローダの行（印が読まれたこと）が出ていること
+  #   ・カーネルの行が出て**いない**こと = 本当に黙っていること
+  #   ・終了コード 0 = 画面側の検査まで全部通ったこと
+  #
+  # の 3 つで行う。「画面に出ていること」はカーネル自身が画素を
+  # 読み返して確かめている（earlytest.c の R31 の検査。㉗ と同じ考え方）。
+  add_test(NAME no-uart-${BTRON_ARCH}
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/run_qemu.py"
+            --arch ${BTRON_ARCH} --uefi --timeout 120
+            --extra=-device --extra=ramfb
+            --expect "印        : NOUART"
+            --deny   "ハード記述:"
+            --deny   "上位半分へ移行しました"
+            --deny   "*** 例外 ***"
+            --deny   "[ FAIL ]"
+            --deny   "ローダ異常終了"
+            "${BTRON_NOUART_IMAGE}")
 
   # ここから下は arm64 の検査。x86_64 は中心核より上がまだ繋がって
   # いないので（T1-11 の残り）、同じ期待値では測れない。
@@ -572,6 +620,26 @@ if(TARGET btron-kernel)
   #
   # 落ちるのが正常なので --expect-exit で終了コードを指定する。
   # ここを普通の検査にすると「落ちなかったこと」しか確かめられない。
+  if(BTRON_ARCH STREQUAL "arm64")
+    # 実機で死なない経路 (T6-02) — その 2: 終了の手段が無い機械。
+    #
+    # セミホスティングを外すと `hlt #0xF000` は「分類なし」の同期例外に
+    # なる（Phase 2 (56)）。**それを異常として報告せず**、記述から取った
+    # 呼び口で PSCI SYSTEM_OFF へ回ることを確かめる。
+    #
+    # 終了コードは持ち帰れない（PSCI で落ちると常に 0）ので、合否は
+    # "[ DONE ] n/n" と --deny で見る。
+    add_test(NAME poweroff-psci-arm64
+      COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/run_qemu.py"
+              --arch arm64 --uefi --timeout 120 --no-semihosting
+              --expect "[ DONE ]"
+              --expect "電源を落とします (PSCI SYSTEM_OFF)"
+              --deny   "*** 例外 ***"
+              --deny   "[ FAIL ]"
+              --deny   "ローダ異常終了"
+              "${BTRON_DISK_IMAGE}")
+  endif()
+
   add_test(NAME panic-screen-${BTRON_ARCH}
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/run_qemu.py"
             --arch ${BTRON_ARCH} --uefi --timeout 90

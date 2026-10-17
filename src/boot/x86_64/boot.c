@@ -45,6 +45,34 @@ IMPORT B __kernel_end[];
 /* 第 1 段: 恒等写像の上（物理アドレス）で走る                          */
 /* ------------------------------------------------------------------ */
 
+/* シリアルを開く。**開ける確証が取れたときだけ**（規律 R31）。
+ *
+ * x86 はポート番号が ACPI の SPCR に入る。読めなければ COM1 の既定値を
+ * 試すが、**スクラッチレジスタで本当に居ることを確かめてから開く** ——
+ * ノート PC には 16550 が無く、居ない装置の THRE を待つと永久に回る
+ * （詳細 F9 / 判明 (62)）。黙ったときの出力は画面が引き受ける。 */
+LOCAL void open_console(void)
+{
+	CONST MachDesc *md = machdesc();
+
+	if (hal_console_set(md->uart_type, md->uart_pa)) {
+		hal_console_puts("  シリアル  : ");
+		hal_console_puts(md_uart_name(md->uart_type));
+		hal_console_puts(" @ ");
+		boot_put_hex(md->uart_pa);
+		hal_console_puts("\n");
+		return;
+	}
+	/* 記述に無い。**確かめの取れる既定値なら開く**（q35 は SPCR を
+	 * 出さないが COM1 は居る）。確かめが取れなければ黙る。
+	 *
+	 * NOUART の印が立っていたら試さない — 「シリアルが無い機械」の
+	 * ふりをさせる逆テストなので、既定値で開いては意味が無い（R31）。 */
+	if ((bootinfo()->flags & BI_F_NO_UART) == 0) {
+		(void)hal_console_default();
+	}
+}
+
 EXPORT void boot_early(UD arg)
 {
 	Bool via_uefi;
@@ -53,15 +81,22 @@ EXPORT void boot_early(UD arg)
 	UD found;
 
 	hal_cpu_init();
-	hal_console_init();
 	hal_exception_init(); /* これより後のフォルトは無言のハングではなく報告になる */
+
+	/* **記述を読む前に喋らない**（規律 R31）。順番は
+	 * 「引き継ぎ情報 → 記述 → シリアル」で、開くときには必ず裏付け
+	 * （SPCR か スクラッチレジスタ）がある。
+	 *
+	 * 引き継ぎ情報と ACPI のテーブルはローダの領域にあり、この先
+	 * 写像されない。いまは恒等写像で全物理メモリが見えているので、
+	 * ここで読んでカーネル内へ複製する。 */
+	via_uefi = bootinfo_take(arg);
+	(void)machdesc_probe();
+	open_console();
 
 	hal_console_puts("\n");
 	hal_console_puts("BTRON3 準拠 OS — x86_64\n");
 
-	/* 引き継ぎ情報を取り込む。ローダが置いた領域はこの先写像されないので、
-	 * CR3 を差し替える前にカーネル内へ複製しておく。 */
-	via_uefi = bootinfo_take(arg);
 	if (!via_uefi) {
 		/* **x86_64 には直接起動の経路が無い。** arm64 は QEMU の -kernel で
 		 * ELF をそのまま置けるが、x86_64 で同じことをすると QEMU は
@@ -70,23 +105,6 @@ EXPORT void boot_early(UD arg)
 		hal_exit(1);
 	}
 
-	/* ハードウェア構成を読む（詳細 D8）。ACPI のテーブルはファームウェアの
-	 * 領域にあり、この先写像されない。いまは恒等写像で全物理メモリが
-	 * 見えているので、ここで読んで複製する。 */
-	if (machdesc_probe()) {
-		CONST MachDesc *md = machdesc();
-
-		/* シリアルを記述どおりに差し替える。x86 では ACPI の SPCR に
-		 * ポート番号が入る。読めなければ COM1 の既定値のまま（R19 の
-		 * 保険）。 */
-		if (hal_console_set(md->uart_type, md->uart_pa)) {
-			hal_console_puts("  シリアル  : ");
-			hal_console_puts(md_uart_name(md->uart_type));
-			hal_console_puts(" @ ");
-			boot_put_hex(md->uart_pa);
-			hal_console_puts("\n");
-		}
-	}
 
 	/* カーネルが実際に置かれた物理先頭を HAL に教える。ローダはリンク時の
 	 * LMA が空いていなければ別の場所へ置く（規律 R17）。 */

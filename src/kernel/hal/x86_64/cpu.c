@@ -186,6 +186,15 @@ EXPORT Bool hal_int_enabled(void)
 	return ((read_rflags() & RFLAGS_IF) != 0) ? True : False;
 }
 
+/* 割込みが来るまで止める。**戻ってもよい**（起こされただけ）。
+ * 終了も電源断もできないときの停止ループに使う（F7 / 詳細 F9）。
+ * `hal_cpu_idle` と違い、割込みを許可しない — 既に死んでいる文脈から
+ * 呼ばれるため。 */
+EXPORT void hal_cpu_halt(void)
+{
+	__asm__ volatile("hlt");
+}
+
 EXPORT void hal_cpu_idle(void)
 {
 	/* 割込みが来るまで止まる。**sti と hlt を続けて書くのが要点** —

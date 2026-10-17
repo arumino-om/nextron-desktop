@@ -14,6 +14,7 @@
  *         ├ SPCR         デバッグコンソールのシリアル
  *         ├ MCFG         PCIe の ECAM 窓 (詳細 F8)
  *         └ FACP (FADT)  arm64 の PSCI の有無と呼び方
+ *             └ DSDT     `\_S5` の SLP_TYP だけを拾う（x86_64 の電源断。F7）
  *
  * 【規律 R7】すべてリトルエンディアン。MADT のサブテーブルは 1 バイト境界から
  * 始まり中に 8 バイト値が入るので、構造体を被せず bytes.h のバイト単位
@@ -117,11 +118,27 @@
 #define ECAM_BUS_SHIFT 20 /* 1 バス = 1MB */
 
 /* --- FADT ("FACP") --- */
+#define FADT_DSDT 40          /* 32bit。ACPI 1.0 から */
+#define FADT_PM1A_CNT_BLK 64  /* 32bit。ポート I/O のアドレス */
+#define FADT_PM1B_CNT_BLK 68
+#define FADT_PM1_CNT_LEN 89   /* 8bit。バイト数（2 のはず） */
 #define FADT_ARM_BOOT_ARCH 129
 #define FADT_MIN_SIZE 131
+#define FADT_X_DSDT 140       /* 64bit。ACPI 2.0 以降。優先する */
+#define FADT_X_PM1A_CNT 172   /* GAS 12 バイト */
+#define FADT_X_PM1B_CNT 184
+#define FADT_X_MIN_SIZE 196   /* X_PM1b_CNT の末尾まで */
 
 #define ARM_BOOT_PSCI_COMPLIANT 0x1
 #define ARM_BOOT_PSCI_USE_HVC 0x2
+
+/* --- AML（`\_S5` だけを探す。解釈器ではない） --- */
+#define AML_NAME_OP 0x08
+#define AML_PACKAGE_OP 0x12
+#define AML_ZERO_OP 0x00
+#define AML_ONE_OP 0x01
+#define AML_BYTE_PREFIX 0x0A
+#define AML_WORD_PREFIX 0x0B
 
 /* ------------------------------------------------------------------ */
 /* 検証                                                                */
@@ -300,13 +317,149 @@ LOCAL void take_mcfg(BytePtr t, UD len, MachDesc *md)
 	}
 }
 
+/* AML の整数オブジェクト 1 個を読む。読めた長さを *adv に返す。
+ *
+ * `\_S5` のパッケージ要素に現れるのは小さな整数だけなので、
+ * ZeroOp / OneOp / BytePrefix / WordPrefix の 4 つで足りる。 */
+LOCAL Bool aml_int(BytePtr t, UD at, UD end, UW *out, UD *adv)
+{
+	UB op;
+
+	if (at >= end) {
+		return False;
+	}
+	op = rd_u8(t, at);
+	switch (op) {
+	case AML_ZERO_OP:
+		*out = 0;
+		*adv = 1;
+		return True;
+	case AML_ONE_OP:
+		*out = 1;
+		*adv = 1;
+		return True;
+	case AML_BYTE_PREFIX:
+		if (at + 1 >= end) {
+			return False;
+		}
+		*out = rd_u8(t, at + 1);
+		*adv = 2;
+		return True;
+	case AML_WORD_PREFIX:
+		if (at + 2 >= end) {
+			return False;
+		}
+		*out = rd_le16(t, at + 1);
+		*adv = 3;
+		return True;
+	default:
+		return False;
+	}
+}
+
+/* DSDT の中から `Name(_S5, Package{ SLP_TYPa, SLP_TYPb, ... })` を探す。
+ *
+ * **これは AML 解釈器ではない。** 名前空間も評価も持たず、
+ *
+ *   08 5F 53 35 5F 12 <PkgLength> <要素数> <要素...>
+ *   ^NameOp  "_S5_"  ^PackageOp
+ *
+ * という 1 つのバイト並びを走査するだけである。S5 の SLP_TYP が FADT に
+ * 無く DSDT にしかないせいで、**AML を 1 行も解釈せずに電源を落とす
+ * には、この形を直に探す以外の手が無い**（詳細 F8 は AML 解釈器 =
+ * T1-15 を実機ブートの前提から外すと決めている）。
+ *
+ * NameOp と PackageOp で挟まれた形まで一致を要求しているので、
+ * `_S5_` という名前が他の場所（参照や文字列）に現れても拾わない。 */
+EXPORT Bool acpi_s5_parse(UD dsdt_pa, UD len, UW *slp_typ_a, UW *slp_typ_b)
+{
+	BytePtr t = (BytePtr)(VP)dsdt_pa;
+	UD at;
+
+	if (dsdt_pa == 0 || len < SDT_HEADER_SIZE) {
+		return False;
+	}
+	/* ヘッダの後ろが AML。末尾 8 バイトは最短の一致にも足りない。 */
+	for (at = SDT_HEADER_SIZE; at + 8 <= len; at++) {
+		UD p;
+		UD adv;
+		UW n;
+		UW a;
+		UW b;
+
+		if (rd_u8(t, at) != AML_NAME_OP || !bstr_eqn(t, at + 1, "_S5_", 4)
+		    || rd_u8(t, at + 5) != AML_PACKAGE_OP) {
+			continue;
+		}
+		/* PkgLength は先頭バイトの上位 2bit が「後続バイト数」。
+		 * 長さ自体は使わない（要素は直後に並ぶ）ので読み飛ばす。 */
+		p = at + 6;
+		p += 1 + (UD)(rd_u8(t, p) >> 6);
+		if (p >= len) {
+			return False;
+		}
+		n = rd_u8(t, p); /* 要素数。PackageOp は ByteData で持つ */
+		p++;
+		if (n < 2) {
+			return False; /* SLP_TYPa / SLP_TYPb が揃っていない */
+		}
+		if (!aml_int(t, p, len, &a, &adv)) {
+			return False;
+		}
+		p += adv;
+		if (!aml_int(t, p, len, &b, &adv)) {
+			return False;
+		}
+		*slp_typ_a = a;
+		*slp_typ_b = b;
+		return True;
+	}
+	return False;
+}
+
 LOCAL void take_fadt(BytePtr t, UD len, MachDesc *md)
 {
 	UH flags;
+	UD dsdt;
 
 	if (len < FADT_MIN_SIZE) {
 		return;
 	}
+
+	/* --- 電源断 (F7)。PM1 制御レジスタと SLP_TYP ---
+	 *
+	 * 64bit の X_ 側があればそちらを使う。ACPI 2.0 以降は X_ が正で、
+	 * 32bit 側は互換のために残されているだけ。 */
+	if (len >= FADT_X_MIN_SIZE && rd_le64(t, FADT_X_PM1A_CNT + 4) != 0) {
+		UW space = rd_u8(t, FADT_X_PM1A_CNT);
+
+		md->pm1_kind = (space == GAS_SPACE_IO) ? MD_PM1_PIO : MD_PM1_MMIO;
+		md->pm1a_cnt = rd_le64(t, FADT_X_PM1A_CNT + 4);
+		md->pm1b_cnt = rd_le64(t, FADT_X_PM1B_CNT + 4);
+	} else if (rd_le32(t, FADT_PM1A_CNT_BLK) != 0) {
+		/* 32bit 側はポート I/O と規定されている */
+		md->pm1_kind = MD_PM1_PIO;
+		md->pm1a_cnt = rd_le32(t, FADT_PM1A_CNT_BLK);
+		md->pm1b_cnt = rd_le32(t, FADT_PM1B_CNT_BLK);
+	}
+
+	dsdt = (len >= FADT_X_DSDT + 8) ? rd_le64(t, FADT_X_DSDT) : 0;
+	if (dsdt == 0) {
+		dsdt = rd_le32(t, FADT_DSDT);
+	}
+	if (dsdt != 0) {
+		BytePtr d = (BytePtr)(VP)dsdt;
+		UD dlen = rd_le32(d, SDT_LENGTH);
+
+		/* DSDT もファームウェアの外部入力。長さとチェックサムを見る。 */
+		if (dlen >= SDT_HEADER_SIZE && dlen <= 0x100000ULL
+		    && bstr_eqn(d, SDT_SIG, "DSDT", 4) && checksum_ok(d, dlen)) {
+			md->s5_known =
+			    acpi_s5_parse(dsdt, dlen, &md->slp_typ_a, &md->slp_typ_b);
+		}
+	}
+
+	/* --- CPU の起動方法（= arm64 の電源断の呼び口） --- */
 	flags = rd_le16(t, FADT_ARM_BOOT_ARCH);
 	if ((flags & ARM_BOOT_PSCI_COMPLIANT) == 0) {
 		return;

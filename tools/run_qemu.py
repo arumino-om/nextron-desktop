@@ -38,6 +38,11 @@ PixelBltOnly を返すのでカーネルが画面を取れない（詳細 D8）�
 
 テストハーネス (include/btron/test.h) は最後に "[ DONE ] 合格/総数" を出し、
 失敗があれば終了コード 1 で ARM セミホスティング経由で終了する。
+
+【セミホスティングを外す】--no-semihosting を付けると、実機と同じく
+終了の手段が無い状態になり、カーネルは記述どおりの電源断
+（arm64 = PSCI SYSTEM_OFF / x86_64 = ACPI S5）へ落ちる。終了コードは
+持ち帰れないので、合否は --expect / --deny と "[ DONE ]" で判定する。
 """
 
 from __future__ import annotations
@@ -130,24 +135,29 @@ def input_args(arch: str) -> list[str]:
 
 def qemu_argv(arch: str, image: Path, interactive: bool, uefi: bool,
               machine: str, extra: list[str], gui: bool = False,
-              monitor: str = "", qmp: str = "") -> list[str]:
+              monitor: str = "", qmp: str = "",
+              semihosting: bool = True) -> list[str]:
     if arch == "arm64":
         argv = [
             "qemu-system-aarch64",
             "-machine", machine,
             "-cpu", "cortex-a72",
             "-m", "512M",
-            "-semihosting",          # hal_exit() が QEMU を終了させるのに使う
             "-no-reboot",
         ]
+        if semihosting:
+            # hal_exit() が QEMU を終了させるのに使う。**終了コードを
+            # 持ち帰れるのはこの経路だけ**なので、検査では必ず付ける。
+            argv += ["-semihosting"]
     elif arch == "x86_64":
         argv = [
             "qemu-system-x86_64",
             "-machine", machine,
             "-m", "512M",
             "-no-reboot",
-            "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
         ]
+        if semihosting:
+            argv += ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"]
     else:
         sys.exit(f"未知のアーキテクチャ: {arch}")
 
@@ -322,7 +332,8 @@ def screenshot_run(args) -> int:
         raw = Path(tmp) / "frame.ppm"
         argv = qemu_argv(args.arch, args.image, False, args.uefi,
                          args.machine or DEFAULT_MACHINE[args.arch],
-                         args.extra, monitor=sock, qmp=qsock)
+                         args.extra, monitor=sock, qmp=qsock,
+                         semihosting=not args.no_semihosting)
         print(f"$ {' '.join(argv)}\n", file=sys.stderr)
         proc = subprocess.Popen(argv, stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT, text=True)
@@ -412,6 +423,11 @@ def main() -> int:
                          "arm64 で ACPI を切り Device Tree を使わせるなら virt,acpi=off")
     ap.add_argument("--extra", action="append", default=[], metavar="ARG",
                     help="QEMU に素通しする引数（複数可）")
+    ap.add_argument("--no-semihosting", action="store_true",
+                    help="セミホスティング（x86_64 は isa-debug-exit）を付けない。"
+                         "**実機にはこれが無い**ので、記述どおりの電源断"
+                         "（PSCI SYSTEM_OFF / ACPI S5）へ落ちることを試すのに使う。"
+                         "終了コードは持ち帰れないので、合否は出力で判定する")
     ap.add_argument("--expect-exit", type=int, default=None, metavar="N",
                     help="この終了コードを正常とみなす。"
                          "わざと落として挙動を見る検査（緊急画面など）で使う")
@@ -453,7 +469,7 @@ def main() -> int:
 
     argv = qemu_argv(args.arch, args.image, args.interactive, args.uefi,
                      args.machine or DEFAULT_MACHINE[args.arch], args.extra,
-                     gui=args.gui)
+                     gui=args.gui, semihosting=not args.no_semihosting)
 
     if args.interactive or args.gui:
         print(f"$ {' '.join(argv)}\n", file=sys.stderr)
@@ -482,7 +498,11 @@ def main() -> int:
     if timed_out:
         problems.append(f"{args.timeout} 秒でタイムアウトした")
     # x86_64 の isa-debug-exit は (code << 1) | 1 を返すので 1 は正常終了。
-    ok_rc = (0,) if args.arch == "arm64" else (0, 1)
+    #
+    # --no-semihosting ではカーネルが PSCI SYSTEM_OFF / ACPI S5 で落ちるので、
+    # 終了コードは常に 0 になる（**検査の合否は持ち帰れない**）。
+    # そのため、この構成では --expect / --deny と "[ DONE ] n/n" で判定する。
+    ok_rc = (0,) if (args.arch == "arm64" or args.no_semihosting) else (0, 1)
     if args.expect_exit is not None:
         ok_rc = (args.expect_exit,)
     if not timed_out and rc not in ok_rc:

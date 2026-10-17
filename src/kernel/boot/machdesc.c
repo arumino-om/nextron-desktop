@@ -45,6 +45,16 @@ LOCAL void merge(MachDesc *dst, CONST MachDesc *src)
 	if (dst->boot_method == MD_BOOT_NONE) {
 		dst->boot_method = src->boot_method;
 	}
+	if (dst->pm1_kind == MD_PM1_NONE && src->pm1_kind != MD_PM1_NONE) {
+		dst->pm1_kind = src->pm1_kind;
+		dst->pm1a_cnt = src->pm1a_cnt;
+		dst->pm1b_cnt = src->pm1b_cnt;
+	}
+	if (!dst->s5_known && src->s5_known) {
+		dst->s5_known = True;
+		dst->slp_typ_a = src->slp_typ_a;
+		dst->slp_typ_b = src->slp_typ_b;
+	}
 	if (dst->cpu_count == 0 && src->cpu_count != 0) {
 		UW n = (src->cpu_count < MD_MAX_CPUS) ? src->cpu_count : MD_MAX_CPUS;
 
@@ -81,6 +91,12 @@ LOCAL void clear(MachDesc *md)
 	for (i = 0; i < MD_TIMER_COUNT; i++) {
 		md->timer_intid[i] = 0;
 	}
+	md->pm1_kind = MD_PM1_NONE;
+	md->pm1a_cnt = 0;
+	md->pm1b_cnt = 0;
+	md->s5_known = False;
+	md->slp_typ_a = 0;
+	md->slp_typ_b = 0;
 	md->boot_method = MD_BOOT_NONE;
 	md->cpu_count = 0;
 	for (i = 0; i < MD_MAX_CPUS; i++) {
@@ -117,10 +133,21 @@ EXPORT Bool machdesc_probe(void)
 	if (!primary_ok && other_ok) {
 		/* 本線が無かった。もう一方をそのまま使う。 */
 		desc = other;
-		return True;
-	}
-	if (primary_ok && other_ok) {
+		primary_ok = True;
+	} else if (primary_ok && other_ok) {
 		merge(&desc, &other);
+	}
+
+	/* ESP に NOUART の印があれば、読めたシリアルを捨てる。
+	 *
+	 * **実機で「シリアルが無い機械」を再現する唯一の手段**（R31 の逆テスト）。
+	 * QEMU の virt も q35 も記述から UART を消せないので、ここで捨てる。
+	 * 捨てる場所をパーサの後にしてあるのが要点で、**パーサは普通に動いた
+	 * うえで、利用側が記述に UART が無い機械として振る舞う**。
+	 * 既定アドレスへ書いていれば、この構成で外部アボートになる。 */
+	if ((bi->flags & BI_F_NO_UART) != 0) {
+		desc.uart_type = MD_UART_NONE;
+		desc.uart_pa = 0;
 	}
 	return primary_ok;
 }

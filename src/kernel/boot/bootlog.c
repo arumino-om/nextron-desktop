@@ -151,6 +151,18 @@ EXPORT void boot_show_machdesc(void)
 		hal_console_puts(" INTID ");
 		boot_put_dec(md->virtio[0].intid);
 	}
+	/* 電源断 (F7)。arm64 は PSCI なので「CPU 起動方法」と同じ呼び口に
+	 * なる。ここに出るのは ACPI の PM1 を持つ機械（x86_64）だけ。 */
+	if (md->pm1_kind != MD_PM1_NONE) {
+		hal_console_puts("\n    電源断    : ACPI PM1 @ ");
+		boot_put_hex(md->pm1a_cnt);
+		if (md->s5_known) {
+			hal_console_puts(" SLP_TYP ");
+			boot_put_dec(md->slp_typ_a);
+		} else {
+			hal_console_puts(" SLP_TYP 不明（\\_S5 が読めない）");
+		}
+	}
 	/* PCIe の ECAM 窓（詳細 F8）。**この行は DT 経路と ACPI 経路で一字一句
 	 * 同じになるはずで、それが 2 つのパーサの相互検証になる**（Phase 1 ⑫ と
 	 * 同じ形。ctest が両方の構成で同じ文字列を要求している）。 */

@@ -42,10 +42,17 @@
 #define MD_INTC_GICV3 2
 #define MD_INTC_APIC 3
 
-/* CPU の起動方法 */
+/* CPU の起動方法。**電源を落とす方法でもある** — PSCI は CPU_ON と
+ * SYSTEM_OFF を同じ呼び口で提供するので、arm64 の F7（電源管理）の
+ * 終了経路はこの欄がそのまま答えになる。 */
 #define MD_BOOT_NONE 0
 #define MD_BOOT_PSCI_HVC 1 /* PSCI を HVC 命令で呼ぶ */
 #define MD_BOOT_PSCI_SMC 2 /* PSCI を SMC 命令で呼ぶ */
+
+/* ACPI PM1 制御レジスタの在り方（x86_64 の電源断。F7） */
+#define MD_PM1_NONE 0
+#define MD_PM1_PIO 1  /* ポート I/O（PC の既定） */
+#define MD_PM1_MMIO 2 /* メモリ写像 */
 
 /* タイマの割込み。添字はこの順で固定する。 */
 #define MD_TIMER_SECURE 0
@@ -110,6 +117,23 @@ typedef struct MachDesc {
 	 * 周波数は CNTFRQ_EL0 から読むのでここには入れない。 */
 	UW timer_intid[MD_TIMER_COUNT];
 
+	/* --- 電源断 (F7 / 詳細 F9) ---
+	 *
+	 * arm64 は上の boot_method（PSCI）がそのまま終了経路になるので、
+	 * ここは x86_64 の ACPI PM1 制御レジスタ専用である。
+	 *
+	 * **SLP_TYP は FADT に無い。** ACPI 規格は S5 の SLP_TYP 値を
+	 * DSDT の `\_S5` パッケージに置いており、機種によって違う。そのため
+	 * 値を決め打ちできず、`\_S5` を読まないと電源が落ちない
+	 * （T1-15 の AML 解釈器までは要らない。詳細 F8 の「AML を読まずに
+	 * 実機を起動する」方針はそのまま保てる）。 */
+	UW pm1_kind;  /* MD_PM1_* */
+	UD pm1a_cnt;  /* PM1a_CNT。pm1_kind が NONE なら無効 */
+	UD pm1b_cnt;  /* PM1b_CNT。0 なら片側だけ */
+	Bool s5_known; /* \_S5 が読めた */
+	UW slp_typ_a;
+	UW slp_typ_b;
+
 	/* --- CPU (D3: SMP) --- */
 	UW boot_method; /* MD_BOOT_* */
 	UW cpu_count;   /* 記述に現れた CPU の総数。MD_MAX_CPUS を超えても数える */
@@ -159,5 +183,15 @@ IMPORT CONST B *md_boot_name(UW v);
  * 読めた項目だけを上書きし、読めなければ md を触らない。 */
 IMPORT Bool fdt_parse(UD dtb_pa, MachDesc *md);
 IMPORT Bool acpi_parse(UD rsdp_pa, MachDesc *md);
+
+/* DSDT（AML）の中から `\_S5` の SLP_TYP だけを取り出す。
+ *
+ * **AML 解釈器ではない。** `Name(_S5, Package{...})` という 1 つの形を
+ * バイト列として探すだけで、評価も名前空間も持たない。T1-15（AML）を
+ * 実機ブートの前提にしないための最小限（詳細 F8）。
+ *
+ * 実機でしか通らない経路なので、合成した AML を食わせて検査している
+ * （x86_64 のブート経路が無いあいだ、ここだけは単体で確かめられる）。 */
+IMPORT Bool acpi_s5_parse(UD dsdt_pa, UD len, UW *slp_typ_a, UW *slp_typ_b);
 
 #endif /* __BTRON_MACHDESC_H__ */
