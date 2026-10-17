@@ -46,6 +46,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import socket
 import struct
 import subprocess
@@ -59,6 +60,15 @@ REPO = Path(__file__).resolve().parents[1]
 
 # flake.nix の devShell が公開するファームウェアのパス
 FIRMWARE_ENV = {"arm64": "ARM64_UEFI_FD", "x86_64": "X64_UEFI_FD"}
+FIRMWARE_VARS_ENV = {"arm64": "ARM64_UEFI_VARS", "x86_64": "X64_UEFI_VARS"}
+
+# 分割ファームウェアの「変数」側のファイル名。CODE 側の名前から推測する。
+# edk2 の配り方が 3 通りあるので順に試す。
+VARS_PATTERNS = [
+    ("edk2-x86_64-code.fd", "edk2-i386-vars.fd"),  # x86_64 の CODE は i386 の VARS と組む
+    ("-code.fd", "-vars.fd"),                      # edk2-aarch64-code.fd / edk2-arm-vars.fd
+    ("_CODE", "_VARS"),                            # Debian/Ubuntu の OVMF_CODE_4M.fd
+]
 
 
 def firmware(arch: str) -> str:
@@ -71,6 +81,28 @@ def firmware(arch: str) -> str:
             f"  非ネイティブ側は  nix build .#ovmf-x64 / .#ovmf-aarch64  で用意できます。"
         )
     return path
+
+
+def firmware_vars(arch: str) -> Path | None:
+    """分割ファームウェアの変数側。1 枚物なら None。
+
+    **x86_64 の edk2 は -bios では読めない。** QEMU 同梱の
+    `edk2-x86_64-code.fd` は CODE だけの像で、`-bios` に渡すと
+    `could not load PC BIOS` になる。pflash の 2 枚組（読み出し専用の
+    CODE ＋ 書き込み可能な VARS）で渡す必要がある。一方 Debian/Ubuntu の
+    `/usr/share/ovmf/OVMF.fd` は 1 枚物なので `-bios` で動く。
+    **どちらも使えるように、VARS が見つかるかどうかで切り替える。**
+    """
+    explicit = os.environ.get(FIRMWARE_VARS_ENV[arch])
+    if explicit:
+        return Path(explicit) if Path(explicit).exists() else None
+    code = Path(firmware(arch))
+    for suffix, replacement in VARS_PATTERNS:
+        if suffix in code.name:
+            cand = code.with_name(code.name.replace(suffix, replacement))
+            if cand.exists():
+                return cand
+    return None
 
 
 DEFAULT_MACHINE = {"arm64": "virt", "x86_64": "q35"}
@@ -134,7 +166,21 @@ def qemu_argv(arch: str, image: Path, interactive: bool, uefi: bool,
         # -bios で与える。pflash で与えるには 64MB にパディングする必要があり、
         # NVRAM も要る。取り外し可能メディアの既定パス
         # (/EFI/BOOT/BOOTAA64.EFI) から起動するので NVRAM の起動項目は不要。
-        argv += ["-bios", firmware(arch)]
+        # **分割ファームウェア (CODE + VARS) は pflash でしか読めない。**
+        # VARS は書き込み可能でなければならないので毎回複製する
+        # （元は nix store の中にあり読み出し専用）。
+        vars_fd = firmware_vars(arch)
+        if vars_fd is None:
+            argv += ["-bios", firmware(arch)]
+        else:
+            tmp = Path(tempfile.mkdtemp(prefix="btron-uefi-")) / "vars.fd"
+            shutil.copyfile(vars_fd, tmp)
+            tmp.chmod(0o600)
+            argv += [
+                "-drive",
+                f"if=pflash,unit=0,format=raw,readonly=on,file={firmware(arch)}",
+                "-drive", f"if=pflash,unit=1,format=raw,file={tmp}",
+            ]
         if arch == "arm64":
             # **ディスクを virtio-mmio に挿す。**
             #

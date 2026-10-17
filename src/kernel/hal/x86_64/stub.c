@@ -127,3 +127,18 @@ EXPORT UD hal_ctx_init_user(UD stack_top, UD entry, UD user_sp, UD arg)
 	(void)arg;
 	missing("hal_ctx_init_user（ユーザ特権への初期化）");
 }
+
+/* MSI の宛先の割り当て (詳細 F8)。
+ *
+ * **これは missing() ではない。** PCIe 層は「宛先を割り当てられるか」を
+ * 問い合わせる側で、`E_NOSPT` は正常な答えである（arm64 も ITS / GICv2m が
+ * 無いので同じ値を返す）。x86_64 で本当に割り当てられるようになるのは
+ * Local APIC が入ってから — 宛先は `0xFEE0_0000` 系のアドレスと
+ * ベクタ番号で、追加のハードウェアは要らない（詳細 F8）。 */
+EXPORT ER hal_msi_alloc(UW *intid, UD *addr, UW *data)
+{
+	(void)intid;
+	(void)addr;
+	(void)data;
+	return E_NOSPT;
+}

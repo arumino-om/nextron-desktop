@@ -48,13 +48,25 @@
           inherit (pkgs.stdenv.hostPlatform) isAarch64 isx86_64;
           ovmfAarch64 = if isAarch64 then pkgs.OVMF.fd else pkgs.pkgsCross.aarch64-multiplatform.OVMF.fd;
           ovmfX64 = if isx86_64 then pkgs.OVMF.fd else pkgs.pkgsCross.gnu64.OVMF.fd;
+          # ホストと同じ CPU ファミリのものはネイティブに作れる。
+          #
+          # **非ネイティブ側は QEMU 同梱の edk2 を使う。** nixpkgs の qemu は
+          # share/qemu/edk2-{x86_64,aarch64}-code.fd を持っているので、
+          # edk2 のクロスビルド (643MB + 8 derivation) を踏まずに
+          # 反対のアーキを回せる。**分割ファームウェアなので CODE と VARS の
+          # 2 枚組で、run_qemu.py が pflash で渡す**（-bios では読めない）。
+          qemuFw = "${pkgs.qemu}/share/qemu";
           nativeOvmf =
-            if isAarch64 then
+            (if isAarch64 then
               { ARM64_UEFI_FD = "${ovmfAarch64}/FV/QEMU_EFI.fd"; }
-            else if isx86_64 then
+             else
+              { ARM64_UEFI_FD = "${qemuFw}/edk2-aarch64-code.fd";
+                ARM64_UEFI_VARS = "${qemuFw}/edk2-arm-vars.fd"; })
+            // (if isx86_64 then
               { X64_UEFI_FD = "${ovmfX64}/FV/OVMF.fd"; }
-            else
-              { };
+             else
+              { X64_UEFI_FD = "${qemuFw}/edk2-x86_64-code.fd";
+                X64_UEFI_VARS = "${qemuFw}/edk2-i386-vars.fd"; });
         in
         {
           default = pkgs.mkShell {

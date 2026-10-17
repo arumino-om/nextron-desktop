@@ -26,6 +26,27 @@ set(CMAKE_C_COMPILER_TARGET ${BTRON_TARGET_TRIPLE})
 set(CMAKE_CXX_COMPILER_TARGET ${BTRON_TARGET_TRIPLE})
 set(CMAKE_ASM_COMPILER_TARGET ${BTRON_TARGET_TRIPLE})
 
+# **リンクのときだけ別のトリプルを名乗る（x86_64 / darwin ホストの回避）。**
+#
+# clang の bare-metal ドライバは aarch64 では ld.lld を直接呼ぶが、
+# `x86_64-*-none-elf` では Generic_GCC へ落ちて**リンクを `gcc` 経由で行う**。
+# ホストが macOS だとその `gcc` は Apple clang なので、Mach-O 用の引数
+# (`-arch arm64` / `-platform_version` / `-syslibroot`) が混ざり、
+#
+#     ld64.lld: error: unknown argument '-T'          （-fuse-ld=lld のとき）
+#     ld.lld:   error: unknown argument '-arch'       （--ld-path のとき）
+#
+# のどちらかで落ちる。コンパイル (`-c`) は none-elf で問題なく、**リンクの
+# 経路選択だけ**の問題なので、リンク時に `linux-gnu` を名乗って ELF の
+# ld.lld を引く。あとから渡した `--target` が勝つ。`-nostdlib`
+# `-nostartfiles` を付けているので Linux の crt も libc も引かない。
+#
+# **ホストが Linux なら元から通る**（Generic_GCC が GNU ld / lld を呼ぶ）。
+# この 1 行は macOS で x86_64 を触れるようにするためのものである。
+if(BTRON_ARCH STREQUAL "x86_64")
+  set(CMAKE_EXE_LINKER_FLAGS_INIT "--target=x86_64-unknown-linux-gnu")
+endif()
+
 # D1: ELF。リンカは lld。
 set(CMAKE_C_COMPILER_RANLIB llvm-ranlib)
 set(CMAKE_CXX_COMPILER_RANLIB llvm-ranlib)
