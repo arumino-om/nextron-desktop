@@ -61,12 +61,35 @@
  * 何も挿していない枠は DeviceID 0 を返す（枠の存在と中身は別）。 */
 #define MD_MAX_VIRTIO 32
 
+/* PCIe の ECAM 窓。1 窓 = 1 ホストブリッジ = 1 PCI セグメント。
+ * QEMU は 1 つしか置かないが、実機では複数ある（詳細 F8）。
+ * MD_MAX_CPUS と同じく D9 が決まるまでの暫定値で、溢れたら切り捨てて
+ * 数だけ数える。 */
+#define MD_MAX_ECAM 4
+
 /* MMIO 1 枠の記述。アドレスと割込みの対。 */
 typedef struct MdSlot {
 	UD pa;
 	UD size;
 	UW intid; /* GIC の INTID。0 なら割込みが分からなかった */
 } MdSlot;
+
+/* ECAM 窓 1 つの記述（詳細 F8）。
+ *
+ * **大きさの出どころが 2 つの記述で違う。** DT の `reg` は窓の大きさを
+ * 直接持っているが、ACPI の MCFG は持っておらず、バス番号の範囲から
+ * 導くしかない（1 バス = 1MB）。同じ機種なら両者が一致するはずで、
+ * それが Phase 1 ⑫ と同じ相互検証になる。
+ *
+ * `pa` は **`bus_start` のバス**の先頭である。bus 番号 b の構成空間は
+ * `pa + ((b - bus_start) << 20)` から 1MB 分。 */
+typedef struct MdEcam {
+	UD pa;
+	UD size;
+	UW segment;   /* PCI セグメント（DT の linux,pci-domain / MCFG の PciSegment）*/
+	UW bus_start;
+	UW bus_end;
+} MdEcam;
 
 typedef struct MachDesc {
 	UW source; /* MD_SRC_*。NONE なら何も読めなかった */
@@ -99,6 +122,19 @@ typedef struct MachDesc {
 	 * 中身の判定はドライバ側 (virtio_mmio_probe) の仕事。 */
 	UW virtio_count;
 	MdSlot virtio[MD_MAX_VIRTIO];
+
+	/* --- PCIe の ECAM 窓 (詳細 F8 / 規律 R19) ---
+	 *
+	 * virtio の枠と同じで、ここに入るのは**窓**であって装置ではない。
+	 * 窓の中に何が挿さっているかは構成空間を読むまで分からないので、
+	 * 列挙は `src/drivers/pci` の仕事（詳細 F8「この層が持たない知識」）。
+	 *
+	 * 窓が無い機種もある（QEMU の `-M virt` を ACPI で動かすと MCFG は
+	 * 来るが、DT 経路しか無い機種では窓が 0 個になる）。
+	 * **0 個と「読めていない」は区別できない**ので、使う側は
+	 * 「窓が無ければ PCIe 装置も無い」として扱う。 */
+	UW ecam_count;
+	MdEcam ecam[MD_MAX_ECAM];
 } MachDesc;
 
 /* ------------------------------------------------------------------ */

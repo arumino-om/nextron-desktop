@@ -151,6 +151,26 @@ EXPORT void boot_show_machdesc(void)
 		hal_console_puts(" INTID ");
 		boot_put_dec(md->virtio[0].intid);
 	}
+	/* PCIe の ECAM 窓（詳細 F8）。**この行は DT 経路と ACPI 経路で一字一句
+	 * 同じになるはずで、それが 2 つのパーサの相互検証になる**（Phase 1 ⑫ と
+	 * 同じ形。ctest が両方の構成で同じ文字列を要求している）。 */
+	for (i = 0; i < md->ecam_count && i < MD_MAX_ECAM; i++) {
+		CONST MdEcam *e = &md->ecam[i];
+
+		hal_console_puts("\n    PCIe ECAM : seg ");
+		boot_put_dec(e->segment);
+		hal_console_puts(" bus ");
+		boot_put_dec(e->bus_start);
+		hal_console_puts("-");
+		boot_put_dec(e->bus_end);
+		hal_console_puts(" @ ");
+		boot_put_hex(e->pa);
+		hal_console_puts(" size ");
+		boot_put_hex(e->size);
+	}
+	if (md->ecam_count == 0) {
+		hal_console_puts("\n    PCIe ECAM : なし");
+	}
 	hal_console_puts("\n");
 }
 

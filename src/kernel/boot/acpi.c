@@ -12,6 +12,7 @@
  *         ├ APIC (MADT)  割込みコントローラと CPU
  *         ├ GTDT         arm64 の generic timer
  *         ├ SPCR         デバッグコンソールのシリアル
+ *         ├ MCFG         PCIe の ECAM 窓 (詳細 F8)
  *         └ FACP (FADT)  arm64 の PSCI の有無と呼び方
  *
  * 【規律 R7】すべてリトルエンディアン。MADT のサブテーブルは 1 バイト境界から
@@ -100,6 +101,20 @@
 #define GAS_SPACE_MEM 0
 #define GAS_SPACE_IO 1
 #define SPCR_GAS 40
+
+/* --- MCFG (詳細 F8) ---
+ *
+ * ヘッダの後に 8 バイトの予約があり、そこから 16 バイトの割り当て
+ * エントリが並ぶ。**窓の大きさはどこにも無い**のでバス番号の範囲から
+ * 導く（PCIe は 1 バスに 256 関数 x 4KB = 1MB）。 */
+#define MCFG_FIRST 44
+#define MCFG_ENTRY_SIZE 16
+#define MCFG_E_BASE 0
+#define MCFG_E_SEGMENT 8
+#define MCFG_E_BUS_START 10
+#define MCFG_E_BUS_END 11
+
+#define ECAM_BUS_SHIFT 20 /* 1 バス = 1MB */
 
 /* --- FADT ("FACP") --- */
 #define FADT_ARM_BOOT_ARCH 129
@@ -257,6 +272,34 @@ LOCAL void take_spcr(BytePtr t, UD len, MachDesc *md)
 	md->uart_pa = addr;
 }
 
+LOCAL void take_mcfg(BytePtr t, UD len, MachDesc *md)
+{
+	UD at;
+
+	for (at = MCFG_FIRST; at + MCFG_ENTRY_SIZE <= len; at += MCFG_ENTRY_SIZE) {
+		UD base = rd_le64(t, at + MCFG_E_BASE);
+		UW first = rd_u8(t, at + MCFG_E_BUS_START);
+		UW last = rd_u8(t, at + MCFG_E_BUS_END);
+		MdEcam *e;
+
+		/* 壊れたエントリは捨てる。信じると MMIO としてゴミを叩く。 */
+		if (base == 0 || last < first) {
+			continue;
+		}
+		if (md->ecam_count >= MD_MAX_ECAM) {
+			md->ecam_count++; /* 数だけ数える */
+			continue;
+		}
+		e = &md->ecam[md->ecam_count];
+		e->pa = base;
+		e->size = (UD)(last - first + 1) << ECAM_BUS_SHIFT;
+		e->segment = rd_le16(t, at + MCFG_E_SEGMENT);
+		e->bus_start = first;
+		e->bus_end = last;
+		md->ecam_count++;
+	}
+}
+
 LOCAL void take_fadt(BytePtr t, UD len, MachDesc *md)
 {
 	UH flags;
@@ -298,6 +341,8 @@ LOCAL void take_table(UD pa, MachDesc *md)
 		take_gtdt(t, len, md);
 	} else if (bstr_eqn(t, SDT_SIG, "SPCR", 4)) {
 		take_spcr(t, len, md);
+	} else if (bstr_eqn(t, SDT_SIG, "MCFG", 4)) {
+		take_mcfg(t, len, md);
 	} else if (bstr_eqn(t, SDT_SIG, "FACP", 4)) {
 		take_fadt(t, len, md);
 	}

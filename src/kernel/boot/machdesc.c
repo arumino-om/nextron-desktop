@@ -53,6 +53,17 @@ LOCAL void merge(MachDesc *dst, CONST MachDesc *src)
 		}
 		dst->cpu_count = src->cpu_count;
 	}
+	/* ECAM 窓（詳細 F8）。**片方にしか無いことが普通にある** —
+	 * arm64 の DT 経路では `pci-host-ecam-generic` が立つが、同じ機種の
+	 * ACPI 経路では MCFG から来る。どちらか一方でも取れれば PCIe が使える。 */
+	if (dst->ecam_count == 0 && src->ecam_count != 0) {
+		UW n = (src->ecam_count < MD_MAX_ECAM) ? src->ecam_count : MD_MAX_ECAM;
+
+		for (i = 0; i < n; i++) {
+			dst->ecam[i] = src->ecam[i];
+		}
+		dst->ecam_count = src->ecam_count;
+	}
 }
 
 LOCAL void clear(MachDesc *md)
@@ -74,6 +85,14 @@ LOCAL void clear(MachDesc *md)
 	md->cpu_count = 0;
 	for (i = 0; i < MD_MAX_CPUS; i++) {
 		md->cpu_id[i] = 0;
+	}
+	md->ecam_count = 0;
+	for (i = 0; i < MD_MAX_ECAM; i++) {
+		md->ecam[i].pa = 0;
+		md->ecam[i].size = 0;
+		md->ecam[i].segment = 0;
+		md->ecam[i].bus_start = 0;
+		md->ecam[i].bus_end = 0;
 	}
 }
 

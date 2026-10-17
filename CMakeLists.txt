@@ -491,6 +491,18 @@ if(TARGET btron-kernel)
               --expect "GICv2 dist 0x0000000008000000 cpu 0x0000000008010000"
               --expect "EL1 物理 = 30"
               --expect "PSCI (HVC)"
+              # PCIe の装置数は**この土台の QEMU の起動引数で決まる** ——
+              # T3-03 で -drive if=virtio（virtio-blk-pci になる）をやめて
+              # -device virtio-blk-device（mmio 版）にしたので、PCI バスに
+              # 居るのはホストブリッジと virtio-net の 2 個である。
+              # PCIe の ECAM 窓 (詳細 F8)。**この行は下の ACPI 構成と
+              # 一字一句同じ**で、それが 2 つのパーサの相互検証になる
+              # （DT は `reg` から大きさを直接、ACPI は MCFG のバス範囲から
+              # 導くので、出どころが違うのに一致しなければならない）。
+              --expect "PCIe ECAM : seg 0 bus 0-255 @ 0x0000004010000000 size 0x0000000010000000"
+              --expect "PCIe 装置 : 2 個"
+              --expect "class 0x06/0x00/0x00"
+              --deny   "PCIe ECAM : なし"
               --deny   "DTB       : なし"
               --deny   "[ FAIL ]"
               --deny   "ローダ異常終了"
@@ -525,6 +537,7 @@ if(TARGET btron-kernel)
               "${BTRON_DISK_IMAGE}")
 
     # GICv2 の値（上）と同じ内容を ACPI 側でも確かめる。
+    # **PCIe の ECAM も同じ**（MCFG から来る。詳細 F8）。
     add_test(NAME boot-uefi-acpi-gic-arm64
       COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/run_qemu.py"
               --arch arm64 --uefi --timeout 90
@@ -532,6 +545,10 @@ if(TARGET btron-kernel)
               --expect "GICv2 dist 0x0000000008000000 cpu 0x0000000008010000"
               --expect "EL1 物理 = 30"
               --expect "PSCI (HVC)"
+              --expect "PCIe ECAM : seg 0 bus 0-255 @ 0x0000004010000000 size 0x0000000010000000"
+              --expect "PCIe 装置 : 2 個"
+              --expect "class 0x06/0x00/0x00"
+              --deny   "PCIe ECAM : なし"
               --deny   "[ FAIL ]"
               "${BTRON_DISK_IMAGE}")
 

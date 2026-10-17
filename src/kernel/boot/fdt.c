@@ -305,6 +305,52 @@ LOCAL void take_virtio(CONST Fdt *f, CONST Node *n, UW pac, UW psc, MachDesc *md
 	md->virtio_count++;
 }
 
+/* PCIe の ECAM 窓（詳細 F8）。
+ *
+ * `reg` は**親の** #address-cells / #size-cells で読む。pcie ノード自身の
+ * #address-cells は 3（PCI の 3 セルアドレス）だが、それは子に適用される
+ * 値なので `reg` には効かない。Phase 1 ⑬ の「`reg` の解釈に使うセル数は
+ * 親の値」がそのまま効く場所である。
+ *
+ * バス番号の範囲は `bus-range`、セグメントは `linux,pci-domain`。
+ * どちらも無い機種があるので、無ければ 0〜255 / セグメント 0 とする
+ * （generic ECAM の既定。窓の大きさから逆算はしない）。 */
+LOCAL void take_pci(CONST Fdt *f, CONST Node *n, UW pac, UW psc, MachDesc *md)
+{
+	UD addr = 0;
+	UD size = 0;
+	UW len = 0;
+	UD at;
+	MdEcam *e;
+
+	if (!compat_has(f, n, "pci-host-ecam-generic")) {
+		return;
+	}
+	if (!reg_entry(f, n, pac, psc, 0, &addr, &size)) {
+		return;
+	}
+	if (md->ecam_count >= MD_MAX_ECAM) {
+		md->ecam_count++; /* 数だけ数える */
+		return;
+	}
+	e = &md->ecam[md->ecam_count];
+	e->pa = addr;
+	e->size = size;
+	e->bus_start = 0;
+	e->bus_end = 255;
+	e->segment = 0;
+	at = prop_find(f, n, "bus-range", &len);
+	if (at != 0 && len >= 8) {
+		e->bus_start = rd_be32(f->base, at);
+		e->bus_end = rd_be32(f->base, at + 4);
+	}
+	at = prop_find(f, n, "linux,pci-domain", &len);
+	if (at != 0 && len >= 4) {
+		e->segment = rd_be32(f->base, at);
+	}
+	md->ecam_count++;
+}
+
 LOCAL void take_psci(CONST Fdt *f, CONST Node *n, MachDesc *md)
 {
 	UW len = 0;
@@ -333,6 +379,7 @@ LOCAL void visit(CONST Fdt *f, CONST Node *n, UW pac, UW psc, MachDesc *md)
 	take_cpu(f, n, pac, psc, md);
 	take_psci(f, n, md);
 	take_virtio(f, n, pac, psc, md);
+	take_pci(f, n, pac, psc, md);
 }
 
 /* ------------------------------------------------------------------ */
