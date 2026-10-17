@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import shutil
+import struct
 import subprocess
 import sys
 from pathlib import Path
@@ -151,11 +152,11 @@ def build_disk(out: Path, esp: Path, fs_size_mib: int) -> None:
             "--clear",
             "--new", f"1:{ESP_OFFSET_MIB}MiB:+{esp_mib}MiB",
             "--typecode", f"1:{ESP_TYPE}",
-            "--change-name", "1:BTRON ESP"]
+            "--change-name", f"1:{ESP_NAME}"]
     if fs_size_mib > 0:
         argv += ["--new", f"2:0:+{fs_size_mib}MiB",
                  "--typecode", f"2:{BTRON_FS_TYPE}",
-                 "--change-name", "2:BTRON FS"]
+                 "--change-name", f"2:{BTRON_FS_NAME}"]
     argv.append(str(out))
     run(argv)
 
@@ -164,6 +165,118 @@ def build_disk(out: Path, esp: Path, fs_size_mib: int) -> None:
         f.seek(ESP_OFFSET_MIB * 1024 * 1024)
         f.write(data)
 
+    # **確かめるのは出来上がった物**。GPT を書いた直後ではなく、ESP を
+    # 流し込んだ後に読み返す（区画 2 が空であることも、ここで初めて
+    # 「最終状態で空」という意味になる）。
+    verify_disk(out, esp_size)
+
+
+# GPT の論理ブロックの大きさ。UEFI 仕様はメディアのブロック長を使うと
+# 定めているが、ここで作るのはイメージなので 512 で固定する。
+# 区画の名前。**作る側と確かめる側で同じ定数を使う**ために置いてある
+# （sgdisk へ渡す値と verify_disk が照らす値を 2 か所に書かない）。
+ESP_NAME = "BTRON ESP"
+BTRON_FS_NAME = "BTRON FS"
+
+MIB = 1024 * 1024
+SECTOR = 512
+
+
+def guid_bytes(text: str) -> bytes:
+    """GUID の文字列表記を、GPT が置くバイト列へ直す。
+
+    前 3 つの欄 (4/2/2 バイト) がリトルエンディアン、残り 8 バイトが
+    そのままという混在順序。UEFI 仕様 Appendix A。
+    """
+    raw = bytes.fromhex(text.replace("-", ""))
+    return raw[0:4][::-1] + raw[4:6][::-1] + raw[6:8][::-1] + raw[8:16]
+
+
+def verify_disk(out: Path, esp_size: int) -> None:
+    """書いた GPT を読み返して、区画が 2 つ切れていることを確かめる。
+
+    「不変条件は文書上の約束にせずテストにする」(tasks.md 0.4-2) の
+    ホスト側の分である。起動列 (T3-03) は区画表を読んでタイプ GUID で
+    BTRON 区画を見つけるが、**媒体の作り方が壊れていると症状はそちらに
+    出る** — 「区画が見つからない」とだけ言われて、原因がイメージ側か
+    カーネル側か分からない。作った場所で作った物を確かめておけば、
+    切り分けが要らなくなる。ctest の構成を増やさずに毎ビルド走る。
+    """
+    image = out.stat().st_size
+    with out.open("rb") as f:
+        f.seek(SECTOR)
+        head = f.read(SECTOR)
+        if head[0:8] != b"EFI PART":
+            sys.exit(f"{out}: GPT のヘッダがありません")
+        # ヘッダの +40 から FirstUsableLBA / LastUsableLBA、
+        # +72 から PartitionEntryLBA / 個数 / 1 件の大きさ (UEFI 仕様 5.3.2)。
+        # 区画の置ける範囲はヘッダ自身が持っているので、ここで数えない。
+        first_usable, last_usable = struct.unpack_from("<QQ", head, 40)
+        entry_lba, count, entry_size = struct.unpack_from("<QII", head, 72)
+
+        if (last_usable + 1) * SECTOR > image:
+            sys.exit(f"{out}: GPT が宣言する使用可能範囲がイメージより大きい")
+
+        f.seek(entry_lba * SECTOR)
+        table = f.read(count * entry_size)
+
+        used = []
+        for i in range(count):
+            e = table[i * entry_size:(i + 1) * entry_size]
+            if e[0:16] == bytes(16):
+                continue
+            start, end = struct.unpack_from("<QQ", e, 32)
+            name = e[56:56 + 72].decode("utf-16-le").rstrip("\0")
+            used.append((i + 1, e[0:16], start, end, name))
+
+        want = [(ESP_TYPE, ESP_NAME), (BTRON_FS_TYPE, BTRON_FS_NAME)]
+        if len(used) != len(want):
+            sys.exit(f"{out}: 区画が {len(used)} 個です（{len(want)} 個のはず）")
+
+        prev_end = first_usable - 1
+        for (num, kind, start, end, name), (want_type, want_name) in zip(used, want):
+            if kind != guid_bytes(want_type):
+                sys.exit(f"{out}: 区画 {num} のタイプ GUID が違います")
+            if name != want_name:
+                sys.exit(f"{out}: 区画 {num} の名前が「{name}」です"
+                         f"（「{want_name}」のはず）")
+            if start <= prev_end:
+                sys.exit(f"{out}: 区画 {num} が手前の区画（または GPT）と"
+                         f"重なっています")
+            if end > last_usable:
+                sys.exit(f"{out}: 区画 {num} が使用可能範囲からはみ出しています")
+            prev_end = end
+
+        esp_num, _, esp_start, esp_end, _ = used[0]
+        if esp_start * SECTOR != ESP_OFFSET_MIB * MIB:
+            sys.exit(f"{out}: 区画 {esp_num} の開始位置が ESP を流し込んだ"
+                     f"位置と違います")
+        if (esp_end - esp_start + 1) * SECTOR != esp_size:
+            sys.exit(f"{out}: 区画 {esp_num} の大きさが ESP と違います")
+
+        # 区画 2 は切っただけで中身を書いていないこと（詳細 F9）。
+        # 形式を書くのは OS の fsb_format() の仕事で、ここで書くと
+        # 同じオンディスク形式が 2 つになる。
+        f.seek(used[1][2] * SECTOR)
+        if f.read(4096) != bytes(4096):
+            sys.exit(f"{out}: 区画 2 に何か書かれています（空のはず）")
+
+        # **ESP に FAT があること。**
+        #
+        # GPT だけ見ていると「区画は正しいが中身が無い」を通してしまう。
+        # 実際にこの移植の途中で踏んだ —— mkimage.py が例外で落ちた後、
+        # GPT は書けていて ESP だけが空のイメージが残り、ファームウェアは
+        # `No bootable option or device was found` と言うだけだった。
+        # どこが悪いのか（イメージか、ローダか、カーネルか）が分からない。
+        #
+        # FAT32 の BPB は +82 に "FAT32   "、+510 に 0x55AA を持つ
+        # （Microsoft FAT 仕様）。署名だけ見れば mformat が走ったことは分かる。
+        f.seek(esp_start * SECTOR)
+        boot = f.read(SECTOR)
+        if len(boot) < SECTOR or boot[510:512] != b"\x55\xAA":
+            sys.exit(f"{out}: ESP に FAT の署名 (0x55AA) がありません")
+        if boot[82:90] != b"FAT32   ":
+            sys.exit(f"{out}: ESP が FAT32 ではありません")
 
 def main() -> int:
     ap = argparse.ArgumentParser()
