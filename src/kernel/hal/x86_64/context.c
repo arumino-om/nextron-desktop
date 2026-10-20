@@ -8,6 +8,7 @@
 
 IMPORT void btron_task_trampoline(void);
 IMPORT void btron_msg_trampoline(void);
+IMPORT void btron_user_trampoline(void);
 
 /* フレームの大きさ。呼び出され側保存レジスタ 6 本 ＋ 戻り番地。
  *
@@ -58,6 +59,23 @@ EXPORT UD hal_ctx_init(UD stack_top, void (*entry)(W stacd, VP exinf), W stacd,
 	f[F_R13] = (UD)(VP)exinf;
 	/* hal_ctx_switch の pop 列 + ret でここへ飛ぶ */
 	f[F_RET] = (UD)(VP)btron_task_trampoline;
+	return sp;
+}
+
+EXPORT UD hal_ctx_init_user(UD stack_top, UD entry, UD user_sp, UD arg)
+{
+	UD sp = frame_base(stack_top);
+	UD *f = (UD *)(VP)sp;
+	W i;
+
+	for (i = 0; i < F_WORDS; i++) {
+		f[i] = 0;
+	}
+	/* btron_user_trampoline が読む 3 つ。 */
+	f[F_RBX] = entry;
+	f[F_R12] = user_sp;
+	f[F_R13] = arg;
+	f[F_RET] = (UD)(VP)btron_user_trampoline;
 	return sp;
 }
 

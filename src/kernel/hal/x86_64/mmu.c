@@ -383,7 +383,23 @@ EXPORT ERR hal_vm_create(AddrSpace *as)
 		dst[i] = src[i];
 	}
 
-	as->asid = pcid_on ? next_pcid++ : 0;
+	/* 空間の識別子。
+	 *
+	 * **PCID が無効でも別の値を振る。** arm64 の ASID に当たる欄で、
+	 * 「別の空間は別の識別子を持つ」という性質は中心核の検査が見ている
+	 * （tests/proc.c の「ASID が別」）。CR3 に載せるのは PCID が有効な
+	 * ときだけなので、振っておくこと自体に副作用は無い。
+	 *
+	 * **PCID はまだ有効にしていない。** 有効にすると CR3 の書き換えで
+	 * TLB が流れなくなるので、別の空間の写像を変えたときの無効化
+	 * (`invpcid`) を全経路で見直す必要がある。性能の話であって正しさの
+	 * 話ではないので、L5 の範囲では入れない（有効にした機械では
+	 * この識別子がそのまま PCID になる）。 */
+	next_pcid++;
+	if (next_pcid > 0xFFFU) {
+		next_pcid = 1; /* 0 はカーネルの空間。12bit に収める */
+	}
+	as->asid = next_pcid;
 	as->resv = 0;
 	return 0;
 }
@@ -604,14 +620,27 @@ EXPORT ERR hal_vm_init(void)
 	/* 規律 R4: 上位 256 エントリ分の PDPT を起動時に全数確保する。
 	 * 256 × 4KB = 1MB を払って、以後の伝播問題を買い取る。
 	 * これをやらないと、共有領域が新しい 512GB 区画に初めて届いたときに
-	 * 全プロセスの PML4 を走査して書き換える必要が生じる。 */
+	 * 全プロセスの PML4 を走査して書き換える必要が生じる。
+	 *
+	 * **US を立てる。ここが arm64 との決定的な差である。**
+	 *
+	 * x86 のユーザアクセス可否は**経路の全段の US の AND** で決まる。
+	 * 上位半分は PML4 の 256..511 で、同じ 1 本の木の中にある
+	 * （arm64 は TTBR1 が別の木で、葉の AP[1] だけで決まる）。だから
+	 * ここで US を落とすと、§1.5 の共有メモリ (M_COMMON) の葉で
+	 * いくら許しても ring 3 から触れない。
+	 *
+	 * **保護が緩むわけではない。** 実際の可否は葉が決める —— システム
+	 * メモリ (M_SYSTEM)・直接マップ・カーネル本体の葉には US を付けない
+	 * （memory.c / map_direct / hal_vm_init）。中間段を通すのは、
+	 * 下位半分で walk() が既にそうしているのと同じ扱いである。 */
 	pml4 = table_ptr(kernel_space.root_pa);
 	for (i = PML4_SHARED_FIRST; i < PML4_ENTRIES; i++) {
 		UD t = pmem_early_alloc_page();
 		if (t == 0) {
 			return -1;
 		}
-		pml4[i] = (t & E_ADDR_MASK) | E_P | E_RW;
+		pml4[i] = (t & E_ADDR_MASK) | E_P | E_RW | E_US;
 	}
 
 	/* 物理メモリの直接マップ。

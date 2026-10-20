@@ -194,26 +194,10 @@ function(btron_add_user name blobname out_c)
     VERBATIM)
 endfunction()
 
-# **x86_64 ではまだユーザプログラムを結合しない。**
-# crt0 とシステムコールのスタブ (src/lib/sys/) が arm64 の命令で書かれて
-# いるため。カーネルは btron_user_* の像を参照する（実身に書いて cre_prc
-# する経路の検査と、外殻の起動）ので、リンクを通すために空の像を置く。
-# 嘘の像を置かないよう大きさは 0 にしてあり、cre_prc は形式不正で断る。
-if(NOT BTRON_ARCH STREQUAL "arm64")
-  set(BTRON_USER_STUB "${CMAKE_CURRENT_BINARY_DIR}/user_stub.c")
-  file(WRITE "${BTRON_USER_STUB}"
-"/* 自動生成 (CMakeLists.txt)。x86_64 ではユーザプログラムをまだ結合しない。\n"
-" * 詳細は docs/tasks/T1-11.md。*/\n"
-"const unsigned char btron_user_hello[1] = {0};\n"
-"const unsigned int btron_user_hello_size = 0;\n"
-"const unsigned char btron_user_shell[1] = {0};\n"
-"const unsigned int btron_user_shell_size = 0;\n"
-"const unsigned char btron_user_winman[1] = {0};\n"
-"const unsigned int btron_user_winman_size = 0;\n")
-endif()
-
-if(BTRON_ARCH STREQUAL "arm64")
-  btron_add_user(btron-user-hello btron_user_hello "${BTRON_USER_OBJ}"
+# **ユーザプログラムは両アーキで結合する** (L5 の 4 段目)。
+# crt0 とシステムコールのスタブ (src/lib/sys/) が x86_64 にも対応したので、
+# 「空の像を置いてリンクだけ通す」逃げは要らなくなった。
+btron_add_user(btron-user-hello btron_user_hello "${BTRON_USER_OBJ}"
     SRCS src/user/hello.c)
 
   # 外殻の最小形。ディスプレイプリミティブとフォントの利用側を
@@ -232,7 +216,6 @@ if(BTRON_ARCH STREQUAL "arm64")
          ${BTRON_SRCS_SYS_SCREEN}
          ${BTRON_SRCS_DP}
          ${BTRON_SRCS_APPL})
-endif()
 
 # --------------------------------------------------------------------------
 # カーネル (Phase 1)
@@ -256,11 +239,7 @@ set(BTRON_SRCS_KERNEL_COMMON
   ${BTRON_SRCS_APPL_WINDOW}
   ${BTRON_SRCS_DP})
 
-if(BTRON_ARCH STREQUAL "arm64")
-  set(BTRON_SRCS_USER "${BTRON_USER_OBJ}" "${BTRON_SHELL_OBJ}" "${BTRON_WM_OBJ}")
-else()
-  set(BTRON_SRCS_USER "${BTRON_USER_STUB}")
-endif()
+set(BTRON_SRCS_USER "${BTRON_USER_OBJ}" "${BTRON_SHELL_OBJ}" "${BTRON_WM_OBJ}")
 
 if(DEFINED BTRON_SRCS_START)
   add_executable(btron-kernel
@@ -431,14 +410,17 @@ if(TARGET btron-kernel)
               --expect "上位半分へ移行しました"
               --expect "ハード記述: ACPI"
               --expect "割込み    : APIC"
-              # **中心核が動いていること**（L5 の 3 段目）。arm64 と
-              # 同じ検査名が同じ順で走るのが T1-11 の受入条件なので、
-              # 中心核の区分が出ていることを外からも要求する。
+              # **arm64 と同じ検査が同じ数だけ通ること**（L5 完了）。
+              # T1-11 の受入条件「arm64 と同じテスト名が出ること」を
+              # 外側からも要求する。ring 3 まで降りる区分（実身からの
+              # プロセス起動・外殻）も含めて 184 件。
               --expect "中心核の初期化 (D10 / T1-01 / T1-02)"
               --expect "--- 中心核 タスク管理とスケジューラ ---"
               --expect "--- 周辺核 ランデブ (§1.3) ---"
-              --expect "周辺核以上は ring 3 待ち"
-              --expect "[ DONE ] 72/72"
+              --expect "[EL0] ユーザプログラムが動いています"
+              --expect "[外殻] ユーザ特権で起動しました"
+              --expect "[WM] ユーザ特権で起動しました"
+              --expect "[ DONE ] 184/184"
               --deny   "[ FAIL ]"
               --deny   "*** 例外 ***"
               "${BTRON_DISK_IMAGE}")

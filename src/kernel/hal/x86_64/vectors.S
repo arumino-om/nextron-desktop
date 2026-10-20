@@ -64,6 +64,24 @@
     .globl btron_vec_common
 btron_vec_common:
     PUSH_REGS
+
+    /* **ring 3 から入ったなら %gs をカーネル側へ入れ替える。**
+     *
+     * これを忘れると、症状は「ずっと後の syscall が番地 8 へ書く」として
+     * 現れる。%gs の入れ替え状態は per-CPU なので、ring 3 のタスクが
+     * 割込みで止められ、ディスパッチャが別のタスクへ切り替えて iretq で
+     * ring 3 へ戻ると、入れ替えの回数が奇数回ずれたまま残る。次の
+     * syscall の swapgs が「カーネル側 = 0」を持ってきて、入口の
+     * `movq %rsp, %gs:8` が 0+8 番地への書き込みになる。
+     *
+     * syscall 側 (syscall.S) と対になっている。あちらは命令が必ず
+     * ring 3 からしか来ないので無条件、こちらは ring 0 からの例外も
+     * 通るので CS を見て決める。 */
+    testb   $3, 18*8(%rsp)      /* 入ってきた CS の RPL。3 なら ring 3 */
+    jz      .Lfrom_kernel
+    swapgs
+.Lfrom_kernel:
+
     /* System V AMD64 ABI: rdi, rsi, rdx, rcx が第 1〜4 引数。
      * 退避した 15 本の上に [ベクタ][エラー][RIP] が並んでいる。 */
     movq    15*8(%rsp), %rdi
@@ -71,7 +89,23 @@ btron_vec_common:
     movq    17*8(%rsp), %rdx
     movq    %rsp, %rcx
     call    btron_exception_entry
-    /* 戻ってきたら外部割込みだった。レジスタを戻して復帰する。 */
+
+    /* 戻ってきたら外部割込みだった。
+     *
+     * **ring 3 へ戻るなら、戻る先のタスクのカーネルスタックを覚え直す。**
+     * 割込みの間にディスパッチャが別のタスクへ切り替えていることがあり
+     * （knl_dispatch_from_irq）、そのタスクが次に syscall や例外で入って
+     * くるときのスタックは**いまの RSP の側**である。arm64 は SP_EL1 が
+     * そのまま残るので何もしなくてよいが、x86 は TSS.RSP0 と per-CPU の
+     * 置き場をソフトで更新する必要がある（cpu.c の hal_ctx_set_kernel_sp）。
+     *
+     * レジスタはまだスタックに積んだままなので、ここで C を呼んでよい。 */
+    testb   $3, 18*8(%rsp)      /* 戻り先 CS の RPL。3 なら ring 3 */
+    jz      .Lback_to_kernel
+    leaq    22*8(%rsp), %rdi    /* iretq フレームを消費した後の RSP */
+    call    hal_ctx_set_kernel_sp
+    swapgs                      /* %gs をユーザ側へ戻す（入口と対） */
+.Lback_to_kernel:
     POP_REGS
     addq    $16, %rsp           /* ベクタ番号とエラーコードを捨てる */
     iretq

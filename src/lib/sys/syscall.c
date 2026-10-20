@@ -48,6 +48,36 @@ LOCAL inline D sysc(UD n, UD a0, UD a1, UD a2, UD a3, UD a4, UD a5)
 	return (D)x0;
 }
 
+#elif defined(__x86_64__)
+
+/* **第 4 引数が rcx ではなく r10 である。**
+ *
+ * `syscall` 命令は戻り先 RIP を rcx に、RFLAGS を r11 に入れるので、
+ * System V の第 4 引数レジスタ (rcx) は使えない。カーネル側の入口
+ * (src/kernel/hal/x86_64/syscall.S) が r10 を rcx へ移し替えて C の
+ * 並びに直す。番号は rax で、戻り値も rax。
+ *
+ * clobber に rcx と r11 を書くのは**命令が潰すから**で、書き忘れると
+ * 呼び出し元が持っていた値が壊れる（最適化で現れ方が変わるので、
+ * 症状が出たり出なかったりする類になる）。 */
+LOCAL inline D sysc(UD n, UD a0, UD a1, UD a2, UD a3, UD a4, UD a5)
+{
+	register UD rax __asm__("rax") = n;
+	register UD rdi __asm__("rdi") = a0;
+	register UD rsi __asm__("rsi") = a1;
+	register UD rdx __asm__("rdx") = a2;
+	register UD r10 __asm__("r10") = a3;
+	register UD r8 __asm__("r8") = a4;
+	register UD r9 __asm__("r9") = a5;
+
+	__asm__ volatile("syscall"
+	                 : "+r"(rax)
+	                 : "r"(rdi), "r"(rsi), "r"(rdx), "r"(r10), "r"(r8),
+	                   "r"(r9)
+	                 : "rcx", "r11", "memory");
+	return (D)rax;
+}
+
 #else
 #error "システムコールのスタブはこのアーキテクチャに未対応"
 #endif

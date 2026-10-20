@@ -49,6 +49,11 @@ hal_ctx_switch:
     movq    %rsp, (%rdi)            /* *save_sp = rsp */
     movq    %rsi, %rsp              /* rsp = new_sp */
 
+    /* **%gs をカーネル側に据え直す。** 入れ替えの釣り合いに頼れない
+     * 理由は cpu.c の hal_gs_to_kernel に書いた。call が積む戻り番地は
+     * これから pop するフレームの**下**なので、フレームは壊れない。 */
+    call    hal_gs_to_kernel
+
     popq    %r15
     popq    %r14
     popq    %r13
@@ -83,6 +88,59 @@ btron_task_trampoline:
     cli
     hlt
     jmp     .Lhang
+
+/*
+ * ユーザ特権 (ring 3) で走り始めるタスクの着地点。
+ *
+ * hal_ctx_init_user() が rbx = ユーザのエントリ、r12 = ユーザスタックの
+ * 先頭、r13 = 第 1 引数、として仕込んでいる。
+ *
+ * **ここで ring 0 から ring 3 へ降りる。** arm64 は ERET 1 命令で
+ * （ELR_EL1 / SPSR_EL1 / SP_EL0 を書いてから）降りるが、x86 は
+ * **iretq に積むフレームを自分で作る** —— SS, RSP, RFLAGS, CS, RIP の
+ * 5 本を順に積んで iretq する。sysretq でも降りられるが、RFLAGS の
+ * 指定が r11 任せになり最初の 1 回には向かない。
+ *
+ * 降りる前に**このタスクのカーネルスタックの先頭を覚えさせる**
+ * （hal_ctx_set_kernel_sp）。以後このタスクは
+ *
+ *   ring 3 で走る → syscall か割込み → TSS.RSP0 / %gs:0 のスタックで
+ *   処理 → iretq / sysretq で ring 3 へ戻る
+ *
+ * を繰り返す。arm64 で SP_EL1 がタスクごとに残るのと同じ状態を、
+ * x86 では TSS と per-CPU 領域で作っている。
+ */
+    .globl btron_user_trampoline
+    .type btron_user_trampoline, @function
+btron_user_trampoline:
+    /* いまの RSP = このタスクのカーネルスタックの使い始め。 */
+    movq    %rsp, %rdi
+    call    hal_ctx_set_kernel_sp
+
+    movq    %r13, %rdi              /* ユーザ側の第 1 引数 */
+    xorl    %esi, %esi
+    xorl    %edx, %edx
+    xorl    %ecx, %ecx
+    xorl    %ebp, %ebp
+
+    pushq   $0x1B                   /* SS  = SEL_DATA3 | RPL 3 */
+    pushq   %r12                    /* RSP = ユーザスタック */
+    pushq   $0x202                  /* RFLAGS: IF=1、bit1 は常に 1 */
+    pushq   $0x23                   /* CS  = SEL_CODE3 | RPL 3 */
+    pushq   %rbx                    /* RIP = ユーザのエントリ */
+    /* **ここを間違えると ring 0 のまま走り続けて保護が効かない。**
+     * CS の RPL が 3 でなければ降りていない（arm64 の SPSR_EL1 = 0 と
+     * 同じ意味を持つ場所）。 */
+    xorl    %ebx, %ebx
+    xorl    %r12d, %r12d
+    xorl    %r13d, %r13d
+    /* **ここも「カーネルから ring 3 へ出る」経路である。**
+     * 割込みの出口 (vectors.S) と syscall の出口 (syscall.S) と同じく
+     * %gs をユーザ側へ戻す。忘れると ring 3 がカーネル側の %gs を持った
+     * まま走り、そのタスクの最初の syscall が 0 + 8 番地へ書く
+     * （cpu.c の hal_gs_to_kernel に経緯）。 */
+    swapgs
+    iretq
 
 /*
  * メッセージハンドラの差し込み先 (周辺核 §1.2.3)。

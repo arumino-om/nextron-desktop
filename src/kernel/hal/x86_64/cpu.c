@@ -83,17 +83,66 @@ LOCAL inline void write_cr4(UD v)
  */
 #define GDT_CODE0 0x00209A0000000000ULL /* 実行可・読み出し可・DPL0・L=1 */
 #define GDT_DATA0 0x0000920000000000ULL /* 読み書き・DPL0 */
-#define GDT_CODE3 0x0020FA0000000000ULL /* DPL3 */
-#define GDT_DATA3 0x0000F20000000000ULL /* DPL3 */
+#define GDT_DATA3 0x0000F20000000000ULL /* 読み書き・DPL3 */
+#define GDT_CODE3 0x0020FA0000000000ULL /* 実行可・DPL3・L=1 */
 
 /* セレクタ（添字 × 8）。exception.c は実行時に CS を読むので、
- * ここを変えても IDT 側は追従する。 */
+ * ここを変えても IDT 側は追従する。
+ *
+ * **並びは `sysret` が決めている。** STAR の上位 16bit を base として
+ *
+ *   syscall:  CS = base_k,      SS = base_k + 8
+ *   sysret:   CS = base_u + 16, SS = base_u + 8
+ *
+ * と**ハードウェアが決め打ちで足す**ので、カーネルは code0, data0 の順、
+ * ユーザは data3, code3 の順でなければならない（ユーザ側だけ逆になる）。
+ * ここを入れ替えると sysret がデータセグメントを CS に載せようとして
+ * 一般保護例外になる。L5 の 4 段目でこの順に直した。 */
 #define SEL_CODE0 0x08U
 #define SEL_DATA0 0x10U
+#define SEL_DATA3 0x18U
+#define SEL_CODE3 0x20U
+#define SEL_TSS 0x28U
 
-#define GDT_ENTRIES 5
+/* null, code0, data0, data3, code3, TSS(16 バイトなので 2 枠) */
+#define GDT_ENTRIES 7
 
 LOCAL UD gdt[GDT_ENTRIES];
+
+/* ------------------------------------------------------------------ */
+/* TSS と per-CPU 領域 (L5 の 4 段目)                                   */
+/*                                                                     */
+/* **arm64 には要らないもの。** あちらは SP_EL1 / SP_EL0 が別のレジスタ  */
+/* なので、EL0 から例外が入れば自動でカーネルスタックに切り替わる。      */
+/* x86 は「どのスタックに切り替えるか」を TSS の RSP0 に書いておく       */
+/* 必要があり、しかも `syscall` 命令は**スタックを切り替えない**ので、    */
+/* ソフトウェアが自分で載せ替える。その置き場が per-CPU 領域で、         */
+/* KERNEL_GS_BASE から %gs 経由で引く。                                 */
+/* ------------------------------------------------------------------ */
+
+/* 64bit TSS。使うのは RSP0 だけだが、長さは規格どおり 104 バイト必要
+ * （短いと LTR が一般保護例外になる）。 */
+typedef struct __attribute__((packed)) {
+	UW resv0;
+	UD rsp0;
+	UD rsp1;
+	UD rsp2;
+	UD resv1;
+	UD ist[7];
+	UD resv2;
+	UH resv3;
+	UH iomap_base;
+} Tss;
+
+LOCAL Tss tss __attribute__((aligned(16)));
+
+/* per-CPU 領域。**並びは syscall.S が番地で読む**ので変えてはならない。 */
+typedef struct __attribute__((packed)) {
+	UD kernel_rsp; /* +0  いまのタスクのカーネルスタックの先頭 */
+	UD user_rsp;   /* +8  入口でユーザの RSP を置く場所 */
+} PerCpu;
+
+LOCAL PerCpu percpu __attribute__((aligned(16)));
 
 typedef struct __attribute__((packed)) {
 	UH limit;
@@ -111,8 +160,18 @@ LOCAL void load_gdt(void)
 	gdt[0] = 0;
 	gdt[1] = GDT_CODE0;
 	gdt[2] = GDT_DATA0;
-	gdt[3] = GDT_CODE3;
-	gdt[4] = GDT_DATA3;
+	/* **ユーザ側は data, code の順**（上の SEL_* の注記。sysret の要求）。 */
+	gdt[3] = GDT_DATA3;
+	gdt[4] = GDT_CODE3;
+	/* TSS 記述子は 16 バイト。型 0x9 = 使用可能な 64bit TSS。 */
+	{
+		UD base = (UD)(VP)&tss;
+		UD limit = sizeof(tss) - 1;
+
+		gdt[5] = (limit & 0xFFFFULL) | ((base & 0xFFFFFFULL) << 16)
+		         | (0x89ULL << 40) | (((base >> 24) & 0xFFULL) << 56);
+		gdt[6] = (base >> 32) & 0xFFFFFFFFULL;
+	}
 
 	p.limit = (UH)(sizeof(gdt) - 1);
 	p.base = (UD)(VP)gdt;
@@ -139,6 +198,68 @@ LOCAL void load_gdt(void)
 	    : "rax", "memory");
 }
 
+/* TSS を載せる。RSP0 は最初のタスクが ring 3 へ降りるときに入る。 */
+LOCAL void load_tss(void)
+{
+	tss.iomap_base = (UH)sizeof(tss); /* I/O 許可ビットマップは持たない */
+	__asm__ volatile("ltr %w0" : : "r"((UH)SEL_TSS));
+}
+
+/* MSR の読み書き。 */
+LOCAL inline void wrmsr(UW msr, UD v)
+{
+	__asm__ volatile("wrmsr"
+	                 :
+	                 : "c"(msr), "a"((UW)(v & 0xFFFFFFFFU)),
+	                   "d"((UW)(v >> 32)));
+}
+
+LOCAL inline UD rdmsr(UW msr)
+{
+	UW lo;
+	UW hi;
+
+	__asm__ volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(msr));
+	return ((UD)hi << 32) | lo;
+}
+
+#define MSR_EFER 0xC0000080U
+#define MSR_STAR 0xC0000081U
+#define MSR_LSTAR 0xC0000082U
+#define MSR_SFMASK 0xC0000084U
+#define MSR_GS_BASE 0xC0000101U
+#define MSR_KERNEL_GS_BASE 0xC0000102U
+
+#define EFER_SCE (1ULL << 0) /* syscall / sysret を使えるようにする */
+
+IMPORT void btron_syscall_stub(void);
+
+/* 下で定義する。setup_syscall が初期値を入れるのに使う。 */
+EXPORT void hal_gs_to_kernel(void);
+
+/* `syscall` 命令の経路を立てる。
+ *
+ * **arm64 の svc には設定が要らない。** あちらは例外ベクタの一部で、
+ * VBAR_EL1 を立てた時点で使える。x86 の syscall は「どこへ飛ぶか」
+ * （LSTAR）「どのセグメントになるか」（STAR）「どのフラグを落とすか」
+ * （SFMASK）を MSR で与える必要がある。
+ *
+ * SFMASK で IF を落とすのは arm64 に合わせるため —— あちらは例外を
+ * 取った時点で PSTATE.I が立つ（割込み禁止）ので、システムコールの
+ * 本体は割込み禁止で走る。ここも同じにする。 */
+LOCAL void setup_syscall(void)
+{
+	wrmsr(MSR_EFER, rdmsr(MSR_EFER) | EFER_SCE);
+	/* STAR[47:32] = カーネルの base、STAR[63:48] = ユーザの base。
+	 * ハードウェアが +8 / +16 を足すので、上の SEL_* の並びが要る。 */
+	wrmsr(MSR_STAR, ((UD)SEL_DATA0 << 48) | ((UD)SEL_CODE0 << 32));
+	wrmsr(MSR_LSTAR, (UD)(VP)btron_syscall_stub);
+	wrmsr(MSR_SFMASK, RFLAGS_IF);
+	/* 不変条件の初期値を入れる（hal_gs_to_kernel と同じ状態）。
+	 * いまはカーネルの中なので GS_BASE 側が per-CPU 領域である。 */
+	hal_gs_to_kernel();
+}
+
 EXPORT void hal_cpu_init(void)
 {
 	UD cr0 = read_cr0();
@@ -159,6 +280,49 @@ EXPORT void hal_cpu_init(void)
 
 	cr4 |= CR4_OSFXSR | CR4_OSXMMEXCPT;
 	write_cr4(cr4);
+
+	load_tss();
+	setup_syscall();
+}
+
+/* いまのタスクのカーネルスタックの先頭を覚える (L5 の 4 段目)。
+ *
+ * **2 か所に同じ値を書く。** 割込み・例外で ring 3 から入るときは
+ * ハードウェアが TSS の RSP0 を見て切り替える。`syscall` 命令は
+ * 切り替えないので、入口が %gs 経由で同じ値を引く。
+ *
+ * 呼ぶのは「カーネルから ring 3 へ出る直前」の 2 経路だけである
+ * （btron_user_trampoline と、割込みから ring 3 へ戻る iretq の手前）。
+ * そこでの RSP が、そのタスクのカーネルスタックの使い始めになる。 */
+/* %gs をカーネル側に据え直す (L5 の 4 段目)。
+ *
+ * **`swapgs` の入れ替えはタスクをまたいで釣り合わない。** 入れ替えの状態は
+ * CPU ごとに 1 つしか無いのに、「カーネルの中か ring 3 か」はタスクごとの
+ * 性質である。カーネルがシステムコールの中でブロックし、別のタスクが
+ * ring 3 へ戻る（そこで swapgs する）と、最初のタスクから見た入れ替えの
+ * 回数が奇数回ずれる。そのタスクが後で出口の swapgs を通ると、
+ * **ring 3 がカーネル側の %gs を持ったまま走り**、次の syscall の入口で
+ * `movq %rsp, %gs:8` が 0 + 8 番地への書き込みになる。
+ *
+ * そこで釣り合いに頼らず、**不変条件で持つ**ことにした。
+ *
+ *   カーネルの中にいる間   GS_BASE = per-CPU 領域、KERNEL_GS_BASE = 0
+ *   ring 3 にいる間        GS_BASE = 0、KERNEL_GS_BASE = per-CPU 領域
+ *
+ * 入口と出口の swapgs がこの 2 状態を行き来し、**タスクを切り替えた直後に
+ * ここで据え直す**（hal_ctx_switch から呼ぶ）。arm64 には要らない —— あちらは
+ * カーネルスタックが SP_EL1 として独立しているので、per-CPU の置き場を
+ * 自前で引く必要がない。 */
+EXPORT void hal_gs_to_kernel(void)
+{
+	wrmsr(MSR_GS_BASE, (UD)(VP)&percpu);
+	wrmsr(MSR_KERNEL_GS_BASE, 0);
+}
+
+EXPORT void hal_ctx_set_kernel_sp(UD top)
+{
+	tss.rsp0 = top;
+	percpu.kernel_rsp = top;
 }
 
 EXPORT UD hal_int_disable(void)

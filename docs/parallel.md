@@ -70,7 +70,7 @@ arm64 は QEMU 9 構成で検査 174 件＋自立起動 29 件、**x86_64 は起
 | **L2** tron-code | T2-01 TRON コード ↔ Unicode / JIS 変換表 | `tools/`, `src/lib/lang/` | なし | ◎ |
 | **L3** libstd | ライブラリ層 150 本（`bstring` / `bctype` / `bmath` / `bstdio` / `bstdlib` / `queue` / `bitop` / `tstring` ＋ §1.5.4 `malloc` 族） | `src/lib/std/`, `src/lib/lang/` | CMake 断片 | ○ |
 | **L4** dp-shape | DP §2.4.3-8 ＋ ピッキング ＋ 回転 | `src/lib/dp/` | `include/btron/dp.h` | ○ |
-| **L5** x86_64 | T1-11（起動・ページング・例外まで完了）。残り: APIC・タイマ割込み・コンテキスト切替・TSS と syscall | `src/boot/x86_64/`, `src/kernel/hal/x86_64/` | CMake 断片 | ○ |
+| **L5** x86_64 | **完了** (T1-11)。**arm64 と同じ 184 件が x86_64 でも通る** — Local APIC・タイマ割込み・コンテキスト切替・TSS と ring 3 / syscall。残りは PCID の有効化と SMEP / SMAP | `src/boot/x86_64/`, `src/kernel/hal/x86_64/` | CMake 断片 | ○ |
 | **L6** selfboot | **M1 の芯**（T3-03 で中核完了）。残り: `/SYS/DEVCONF`・外殻の常駐・ブロックキャッシュ | `src/kernel/boot/startup.c`, `src/drivers/virtio/`, `tools/mkimage.py` | 多い | ✗ |
 | **L11** real-hw | **実機 (x86_64 PC) ブート** T6-01 PCIe+MSI-X → T6-02 死なない経路 / T6-03 規模耐性 / T6-08 媒体の検査 → T6-04 NVMe / T6-05〜07 xHCI+USB HID | `src/drivers/pci/`, `src/drivers/nvme/`, `src/drivers/usb/`, `hal/*/{uart,exit}.c` | `machdesc.h` / `mkimage.py` | ○ |
 | **L7** small | T1-15 AML 最小歩行器 / T3-02 FDT 汎用 API / T0-01 ライセンス境界検査 / T1-09 対話モニタ | 各所に独立 | なし | ○ |

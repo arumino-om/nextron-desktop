@@ -1,8 +1,9 @@
 /*
- * crt0.S — ユーザプログラムの入口 (arm64)
+ * crt0.S — ユーザプログラムの入口
  *
- * カーネル（btron_user_trampoline）は x0 にプロセス起動メッセージへの
- * ポインタを入れて EL0 へ降ろしてくる。仕様 §1.1.6 の形式-A
+ * カーネル（btron_user_trampoline）は第 1 引数レジスタ（arm64 は x0、
+ * x86_64 は rdi）にプロセス起動メッセージへのポインタを入れて
+ * ユーザ特権へ降ろしてくる。仕様 §1.1.6 の形式-A
  *
  *   W MAIN (MESSAGE *msg)
  *
@@ -17,6 +18,21 @@
     .globl _start
     .type _start, @function
 _start:
+#if defined(__x86_64__)
+    /* フレームポインタを切っておく。**ここが呼び出し連鎖の根**なので、
+     * 上へ辿れてはいけない。x86 は戻り番地がスタックにあるので、
+     * レジスタを切るだけでは足りず「戻らない」ことで示す。 */
+    xorl    %ebp, %ebp
+    call    MAIN
+    movl    %eax, %edi              /* 戻り値 = 終了コード */
+    call    ext_prc
+.Lhang:
+    /* **ring 3 なので cli / hlt は使えない**（特権命令で #GP になる）。
+     * ext_prc は戻らないので来ないはずの場所だが、来たときに
+     * 一般保護例外を足すより素直に回る。 */
+    pause
+    jmp     .Lhang
+#else
     /* フレームポインタと戻り番地を切っておく。
      * **ここが呼び出し連鎖の根**なので、上へ辿れてはいけない。 */
     mov     x29, xzr
@@ -27,3 +43,4 @@ _start:
 .Lhang:
     wfe
     b       .Lhang
+#endif

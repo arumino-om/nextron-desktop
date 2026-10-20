@@ -64,10 +64,13 @@ BTRON_TEST_GROUP("実身からのプロセス起動とユーザ特権 (§1.1.6)"
 			fl_prog = p;
 			fd = opn_fil(&p, F_UPDATE, 0);
 			BTRON_CHECK("開く", fd > 0);
+			/* **副種別はこの機械の CPU**（objfmt.h の OBJ_CPU_NATIVE）。
+			 * cre_prc は副種別が自分の CPU と違う像を断るので、
+			 * ここに arm64 を直書きすると x86_64 で必ず失敗する。 */
 			BTRON_CHECK("プログラムを書く",
 			            apd_rec(fd, (CONST B *)btron_user_hello,
 			                    (W)btron_user_hello_size, 9,
-			                    (UH)OBJ_CPU_ARM64, 0) == ER_OK);
+			                    (UH)OBJ_CPU_NATIVE, 0) == ER_OK);
 			BTRON_CHECK("閉じる", cls_fil(fd) == ER_OK);
 
 			/* 起動メッセージ。先頭バイトがそのまま終了コードになる
@@ -225,7 +228,7 @@ BTRON_TEST_GROUP("実身からのプロセス起動とユーザ特権 (§1.1.6)"
 			BTRON_CHECK("外殻を書く",
 			            apd_rec(fd, (CONST B *)btron_user_shell,
 			                    (W)btron_user_shell_size, 9,
-			                    (UH)OBJ_CPU_ARM64, 0) == ER_OK);
+			                    (UH)OBJ_CPU_NATIVE, 0) == ER_OK);
 			BTRON_CHECK("閉じる", cls_fil(fd) == ER_OK);
 
 			oldmask = chg_emk(EM_NULL);

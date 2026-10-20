@@ -15,6 +15,7 @@
 
 #include "apic.h"
 #include <btron/screen.h>
+#include <btron/syscall.h>
 
 IMPORT UD btron_last_syscall;
 
@@ -175,7 +176,6 @@ LOCAL W report_depth;
 
 EXPORT void btron_exception_entry(UD vec, UD err, UD rip, UD regs)
 {
-	(void)regs;
 
 	/* 32 以降は外部割込み。中心核の割込み管理へ回す。
 	 * **いまはまだ APIC を立てていないので、ここへは来ない**（T1-11 の
@@ -187,6 +187,17 @@ EXPORT void btron_exception_entry(UD vec, UD err, UD rip, UD regs)
 		apic_take_vector(vec);
 		intc_dispatch();
 		return;
+	}
+
+	/* **ring 3 からの例外は、そのプロセスだけを落とす。**
+	 * カーネルごと止めてはならない —— 保護の意味が無くなる
+	 * （arm64 の `.Lfault_el0` と同じ扱い）。戻ってきたら落とせなかった
+	 * ということなので、カーネルの例外として報告へ進む。
+	 *
+	 * 引数の名前は arm64 由来だが、意味は対応している
+	 * （cause = ベクタとエラーコード / addr = CR2 / pc = RIP）。 */
+	if (regs != 0 && (((CONST UD *)(VP)regs)[18] & 3U) == 3U) {
+		hal_user_fault((vec << 32) | (err & 0xFFFFFFFFU), read_cr2(), rip);
 	}
 
 	report_depth++;
