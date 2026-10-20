@@ -6,6 +6,10 @@
 
 #include <btron/hal.h>
 
+/* フレームの大きさ。x19-x30 の 12 本 ＋ d8-d15 の 8 本 = 160 バイト。
+ * **x86_64 とは値が違う**（あちらは 56）。context.S の注記と一致させる。 */
+#define HAL_CTX_FRAME_SIZE 0xA0
+
 IMPORT void btron_task_trampoline(void);
 IMPORT void btron_msg_trampoline(void);
 IMPORT void btron_user_trampoline(void);

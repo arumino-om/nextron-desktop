@@ -132,8 +132,12 @@ IMPORT UD hal_ctx_inject(UD sp, void (*handler)(W a0, VP a1), W a0, VP a1);
 /* *save_sp に現在の SP を保存し、new_sp へ切り替える。 */
 IMPORT void hal_ctx_switch(UD *save_sp, UD new_sp);
 
+/* **退避フレームの大きさは HAL の外に出さない。** arm64 は 0xA0
+ * （レジスタ 12 本 + 浮動小数点 8 本）、x86_64 は 56（6 本 + 戻り番地）で、
+ * レジスタの本数も「戻り先がレジスタかスタックか」も違う。使うのは
+ * 各アーキの context.c だけなので、そちらに持たせてある。 */
+
 /* 保存フレームの大きさ。スタックサイズの検査に使う。 */
-#define HAL_CTX_FRAME_SIZE 0xA0
 
 /* --- ユーザ特権 (EL0 / ring 3) での実行 ------------------------------
  *

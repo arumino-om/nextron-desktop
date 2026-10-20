@@ -25,11 +25,6 @@
 #include <btron/test.h>
 #include <btron/vmem.h>
 
-#if defined(__x86_64__)
-/* 較正値を見るためだけ。HAL の中の私的ヘッダ（apic.h の冒頭）。 */
-#include "../hal/x86_64/apic.h"
-#endif
-
 IMPORT B __kernel_start[];
 IMPORT B __kernel_end[];
 
@@ -62,24 +57,6 @@ LOCAL UD screen_ink(void)
 	}
 	return n;
 }
-
-#if defined(__x86_64__)
-/* タイマ割込みが入ったことを数える（L5 / T1-11 の続き）。
- *
- * **x86_64 だけでここを見る。** arm64 は中心核の検査「割込みとタイマ
- * (D8 / T1-01 / T1-02)」が本物の経路で同じことを確かめているが、x86_64 は
- * まだ中心核に繋がっていないので、HAL だけを起動文脈で動かして見る。
- * 中心核が繋がったら（L5 の 2 段目）この枝は要らなくなる。 */
-LOCAL UD tick_hits;
-
-LOCAL void count_tick(UW intid, VP arg)
-{
-	(void)intid;
-	(void)arg;
-	hal_timer_tick_reload();
-	tick_hits++;
-}
-#endif
 
 EXPORT void boot_early_tests(void)
 {
@@ -382,55 +359,6 @@ EXPORT void boot_early_tests(void)
 		}
 	});
 
-#if defined(__x86_64__)
-	BTRON_TEST("タイマ割込みが入る (L5 / Local APIC)", {
-		UW intid = hal_timer_tick_intid();
-
-		BTRON_CHECK("割込みコントローラの初期化", intc_init() == E_OK);
-		/* 版レジスタが読めれば MMIO の写像が当たっている。
-		 * xAPIC は 0x10 以上を返す（0 は「読めていない」の意）。 */
-		BTRON_CHECK("APIC が応答する", hal_intc_version() >= 0x10U);
-		BTRON_CHECK("tick のベクタは例外域の外", intid >= 32U && intid < 256U);
-		BTRON_CHECK("ハンドラの登録",
-		            intc_set_handler(intid, count_tick, 0) == E_OK);
-
-		tick_hits = 0;
-		BTRON_CHECK("tick の開始", hal_timer_tick_start(1000U) == E_OK);
-		/* 較正値。1ms を測っているので、桁が合っていればよい
-		 * （QEMU の実測は 1GHz 前後。0 なら較正が失敗している）。 */
-		hal_console_puts("    APIC タイマ: ");
-		boot_put_dec(hal_apic_hz() / 1000000UL);
-		hal_console_puts(" MHz (較正)\n");
-		BTRON_CHECK("較正できた", hal_apic_hz() > 0);
-
-		{
-			UD t0 = hal_timer_count();
-			UD limit = hal_timer_freq() / 10U; /* 100ms で諦める */
-
-			hal_int_enable();
-			while (tick_hits < 3 && hal_timer_count() - t0 < limit) {
-				hal_cpu_idle();
-			}
-			(void)hal_int_disable();
-		}
-		hal_console_puts("    tick 到来  : ");
-		boot_put_dec(tick_hits);
-		hal_console_puts(" 回\n");
-
-		/* **2 回以上来たことが EOI が効いている証拠である。**
-		 * EOI を出さないと APIC は同じ優先度の割込みを 2 度目から
-		 * 上げない（ISR のビットが立ったまま）。1 回で止まっていたら
-		 * 「割込みは来たが受領していない」であって、そこを見分けられる
-		 * のはこの数しかない。 */
-		BTRON_CHECK("周期的に来る (EOI が効いている)", tick_hits >= 3);
-
-		/* 片付け。**この後は中心核が繋がるまで誰も面倒を見ない**ので、
-		 * 止めてハンドラも外す。割込みは禁止した状態で先へ進む。 */
-		BTRON_CHECK("止められる", intc_disable(intid) == E_OK);
-		BTRON_CHECK("ハンドラを外せる", intc_clr_handler(intid) == E_OK);
-	});
-
-#endif
 	BTRON_TEST("MMIO 区画への写像 (§3.2-3 / R18 の機構)", {
 		CONST MachDesc *md = machdesc();
 		UD pa = (md->intc_dist_pa != 0) ? md->intc_dist_pa : hal_console_pa();

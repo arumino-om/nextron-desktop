@@ -225,6 +225,40 @@ LOCAL UD *lookup(UD root_pa, UD va, UW *level)
 	return &tbl[idx_of(va, 3)];
 }
 
+/* 指定した段で止まる walk。arm64 側の walk_to() と対。
+ *
+ * **途中が大ページ (E_PS) だったら 0 を返す。** そこへ細かい写像を
+ * 入れるには分割が要り、直接マップを張り直すことになる。やらない。 */
+LOCAL UD *walk_to(UD root_pa, UD va, UW stop, Bool create)
+{
+	UD *tbl = table_ptr(root_pa);
+	UW level;
+
+	for (level = 0; level < stop; level++) {
+		UD *e = &tbl[idx_of(va, level)];
+
+		if (!(*e & E_P)) {
+			UD next;
+
+			if (!create) {
+				return 0;
+			}
+			next = alloc_table();
+			if (next == 0) {
+				return 0;
+			}
+			*e = (next & E_ADDR_MASK) | E_P | E_RW | E_US;
+			tbl = table_ptr(next);
+			continue;
+		}
+		if ((*e & E_PS) != 0) {
+			return 0; /* 大ページの途中。分割はしない */
+		}
+		tbl = table_ptr(*e & E_ADDR_MASK);
+	}
+	return &tbl[idx_of(va, stop)];
+}
+
 LOCAL UD *walk(UD root_pa, UD va, Bool create)
 {
 	UD *tbl = table_ptr(root_pa);
@@ -455,19 +489,94 @@ EXPORT UD hal_vm_map_framebuf(UD pa, UD size)
 /* 未検証。x86_64 のブート経路（UEFI / multiboot）ができてから確認する。 */
 /* ------------------------------------------------------------------ */
 
-/* 物理範囲を直接マップ領域に張る。範囲はページ境界に丸める（arm64 と同じ）。 */
+/* 1GB ページ (PDPE1GB) が使えるか。
+ *
+ * **arm64 には無い分岐である。** あちらは L1 のブロック記述子が常に
+ * 使えるが、x86 の 1GB ページは CPUID 0x8000_0001 EDX bit26 で任意
+ * 機能になっている。無い機械で E_PS を PDPT へ書くと予約ビット違反の
+ * ページフォルトになるので、2MB から始める。 */
+LOCAL Bool has_1gb_pages(void)
+{
+	UW a;
+	UW b;
+	UW c;
+	UW d;
+
+	__asm__ volatile("cpuid"
+	                 : "=a"(a), "=b"(b), "=c"(c), "=d"(d)
+	                 : "a"(0x80000001U), "c"(0U));
+	(void)a;
+	(void)b;
+	(void)c;
+	return ((d & (1U << 26)) != 0) ? True : False;
+}
+
+/* 物理範囲を直接マップ領域に張る。範囲はページ境界に丸める。
+ *
+ * **大ページを使う。** 4KB 粒度で張ると表が物理メモリの 1/512 になり、
+ * 32GB では 64MB になって早期プール (16MB) に入らない（詳細 F9 /
+ * 判明 (66)）。arm64 の map_direct と同じ形で、1GB (PDPT) / 2MB (PD) /
+ * 4KB (PT) を揃っている限り大きい方から使う。 */
 LOCAL ERR map_direct(UD start, UD end)
 {
 	UD ps = (UD)hal_page_size();
+	UD page_e = attr_to_entry(BTRON_PG_READ | BTRON_PG_WRITE | BTRON_PG_EXEC
+	                          | BTRON_PG_GLOBAL);
+	UW first = has_1gb_pages() ? 1U : 2U;
+	UD at;
 
 	start &= ~(ps - 1);
 	end = (end + ps - 1) & ~(ps - 1);
 	if (end <= start) {
 		return 0;
 	}
-	return hal_vm_map(&kernel_space, BTRON_PA_TO_VA(start), start, end - start,
-	                  BTRON_PG_READ | BTRON_PG_WRITE | BTRON_PG_EXEC
-	                      | BTRON_PG_GLOBAL);
+
+	for (at = start; at < end;) {
+		UD va = BTRON_PA_TO_VA(at);
+		Bool done = False;
+		UW level;
+
+		for (level = first; level <= 2U && !done; level++) {
+			UD span = level_span(level);
+			UD *e;
+
+			if ((at & (span - 1)) != 0 || end - at < span) {
+				continue;
+			}
+			e = walk_to(kernel_space.root_pa, va, level, True);
+			if (e == 0) {
+				continue; /* 途中が既に大ページ。細かい段で見る */
+			}
+			if ((*e & E_P) != 0 && (*e & E_PS) == 0) {
+				/* 既に細かい表がぶら下がっている（カーネル本体や
+				 * 早期プールを先に張った分）。**潰すと表が迷子になる**
+				 * ので、この区画は細かい段で埋める。 */
+				continue;
+			}
+			*e = (at & E_ADDR_MASK) | page_e | E_PS;
+			at += span;
+			done = True;
+		}
+		if (done) {
+			continue;
+		}
+		/* 端は 4KB で埋める。 */
+		{
+			UD *e = walk(kernel_space.root_pa, va, True);
+
+			if (e == 0) {
+				/* 上の段が既に大ページで覆っている。同じ物理を指して
+				 * いるなら、やることは残っていない。 */
+				if (hal_vm_translate(&kernel_space, va) != at) {
+					return -1;
+				}
+			} else {
+				*e = (at & E_ADDR_MASK) | page_e;
+			}
+			at += ps;
+		}
+	}
+	return 0;
 }
 
 EXPORT ERR hal_vm_init(void)

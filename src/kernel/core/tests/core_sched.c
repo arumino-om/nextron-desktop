@@ -155,7 +155,15 @@ BTRON_TEST_GROUP("中心核 待ち状態と優先度の操作", 120, TST_PHASE_K
 		SYSTIM m0;
 		SYSTIM m1;
 
+		/* **割込みコントローラの「版」はアーキで値が違う。** arm64 は
+		 * GIC の版 (2 / 3)、x86_64 は Local APIC の版レジスタ
+		 * （xAPIC は 0x10 以上）。見たいのは「コントローラが応答して
+		 * いること」なので、アーキごとに当てる値を変える。 */
+#if defined(__aarch64__)
 		BTRON_CHECK("GIC", hal_intc_version() == 2 || hal_intc_version() == 3);
+#else
+		BTRON_CHECK("APIC", hal_intc_version() >= 0x10U);
+#endif
 		BTRON_CHECK("割込みが入っている", c0 > 0);
 		BTRON_CHECK("tick が進んでいる", t0 > 0);
 		(void)tk_get_otm(&m0);

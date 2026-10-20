@@ -176,14 +176,20 @@ EXPORT void boot_main(UD arg)
 
 	boot_early_tests();
 
-	/* **ここで止まる。** 中心核を動かすには割込みコントローラ (APIC)・
-	 * タイマ割込み・コンテキスト切替が要る。x86_64 側はまだ入っていない
-	 * （T1-11 の残り。arm64 の GIC / CNTP / context.S に相当するもの）。
-	 *
-	 * 嘘をつかずに止めるのが要点である。スタブで「動いているように
-	 * 見せる」と、後から入れるときに何が動いていて何が動いていないのか
-	 * 分からなくなる。 */
-	hal_console_puts("\n  x86_64 は Local APIC とタイマ割込みまで。中心核は未接続\n");
-	hal_console_puts("  （コンテキスト切替と ring 3 / syscall が残り。T1-11 / L5）\n");
-	hal_exit(btron_test_report());
+	/* 中心核を起こす。**arm64 と同じ順序・同じ検査名で通す**のが T1-11 の
+	 * 受入条件なので、ここも boot.c (arm64) と同じ形にしてある。 */
+	BTRON_TEST("中心核の初期化 (D10 / T1-01 / T1-02)", {
+		BTRON_CHECK("knl_init", knl_init() == E_OK);
+		/* APIC の版レジスタ。xAPIC は 0x10 以上を返す
+		 * （arm64 側はここで GIC の版 2 / 3 を見ている）。 */
+		BTRON_CHECK("APIC の版", hal_intc_version() >= 0x10U);
+		BTRON_CHECK("まだ未起動", knl_running() == False);
+		BTRON_CHECK("タイマ周波数", hal_timer_freq() > 0);
+	});
+
+	/* 中心核のシステムコールはタスクの中でしか呼べない（仕様は E_CTX と
+	 * する）。boot_main はまだどのタスクでもないので、検査タスクを作って
+	 * 起動し、そこで残りを走らせる。
+	 * knl_selftest_start() は戻らず、最後に hal_exit() する。 */
+	knl_selftest_start();
 }

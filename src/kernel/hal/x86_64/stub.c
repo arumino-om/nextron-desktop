@@ -12,11 +12,12 @@
  *
  * 残っているもの（T1-11 の続き = L5。arm64 側の対応物を括弧に書く）:
  *
- *   - コンテキスト切替                            (context.c / context.S)
  *   - TSS と ring 3 への降り方                    (arm64 は ERET だけで済む)
  *   - システムコールの入口: syscall / sysret      (vectors.S の svc 経路)
  *
- * **入ったもの**: Local APIC と タイマ割込みは apic.c にある。
+ * **入ったもの**: Local APIC と タイマ割込み (apic.c)、
+ * コンテキスト切替 (context.c / context.S)。残るのは ring 3 の 1 段だけで、
+ * `hal_ctx_init_user` がそれである。
  */
 
 #include <btron/hal.h>
@@ -38,32 +39,6 @@ LOCAL void missing(CONST B *what)
 /* ---- タイマ割込み ---- */
 
 /* ---- コンテキスト切替 ---- */
-
-EXPORT UD hal_ctx_init(UD stack_top, void (*entry)(W stacd, VP exinf), W stacd,
-                       VP exinf)
-{
-	(void)stack_top;
-	(void)entry;
-	(void)stacd;
-	(void)exinf;
-	missing("hal_ctx_init（コンテキストの初期化）");
-}
-
-EXPORT UD hal_ctx_inject(UD sp, void (*handler)(W a0, VP a1), W a0, VP a1)
-{
-	(void)sp;
-	(void)handler;
-	(void)a0;
-	(void)a1;
-	missing("hal_ctx_inject（ハンドラの差し込み）");
-}
-
-EXPORT void hal_ctx_switch(UD *save_sp, UD new_sp)
-{
-	(void)save_sp;
-	(void)new_sp;
-	missing("hal_ctx_switch（コンテキスト切替）");
-}
 
 EXPORT UD hal_ctx_init_user(UD stack_top, UD entry, UD user_sp, UD arg)
 {
